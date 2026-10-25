@@ -1,0 +1,77 @@
+Trim Trailing Whitespace.................................................Failed
+- hook id: ahi/trailing-whitespace
+- exit code: 1
+
+notes.txt:1: trailing whitespace
+Fix End of Files.........................................................Failed
+- hook id: ahi/end-of-file
+- exit code: 1
+
+notes.txt: file must be empty or end with a single newline
+Check for merge conflicts................................................Failed
+- hook id: ahi/merge-conflict
+- exit code: 1
+
+conflict.txt:1: merge conflict string `<<<<<<<` found
+conflict.txt:3: merge conflict string `=======` found
+conflict.txt:5: merge conflict string `>>>>>>>` found
+Check for large files....................................................Passed
+Check for case conflicts.................................................Passed
+Check for symlinks......................................................Skipped
+(no files to check)
+Check JSON...............................................................Failed
+- hook id: ahi/check-json
+- exit code: 1
+
+bad.json: JSON parse error: EOF while parsing an object at line 2 column 0
+Check YAML...............................................................Failed
+- hook id: ahi/check-yaml
+- exit code: 1
+
+bad.yml: YAML parse error: did not find expected node content at line 2 column 1, while parsing a flow node
+Check TOML...............................................................Failed
+- hook id: ahi/check-toml
+- exit code: 1
+
+bad.toml: TOML parse error: TOML parse error at line 1, column 4
+  |
+1 | a =
+  |    ^
+invalid string
+expected `"`, `'`
+
+Trojan Source............................................................Failed
+- hook id: ahi/trojan-source
+- exit code: 1
+
+bidi.txt:1: bidirectional control U+202E
+Check Windows reserved names.............................................Passed
+Detect private key.......................................................Failed
+- hook id: ahi/private-key
+- exit code: 1
+
+key.pem: private key found
+GitHub Actions pinning...................................................Failed
+- hook id: ahi/github-actions
+- exit code: 1
+
+.github/workflows/ci.yml: action `actions/checkout@v4` must be pinned to a full 40-character commit SHA
+.github/workflows/ci.yml: job `test` is missing permissions
+Dockerfile supply chain..................................................Failed
+- hook id: ahi/dockerfile
+- exit code: 1
+
+Dockerfile:1: base image `alpine:3.19` is not pinned by a sha256 digest
+Dockerfile:2: RUN pipes curl or wget into a shell
+Dockerfile:2: download with curl or wget is missing a checksum check in the same RUN (a later layer is not accepted in v0.1)
+Dockerfile: final stage USER must be present and must not be root
+Shell strict mode........................................................Failed
+- hook id: ahi/shell-strict
+- exit code: 1
+
+script.sh:1: POSIX sh script is missing `set -eu` (pipefail is not required for sh)
+Committed dotenv file....................................................Failed
+- hook id: ahi/committed-dotenv
+- exit code: 1
+
+.env: dotenv file should not be committed (keep secrets out of git; an example file is allowed)

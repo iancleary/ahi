@@ -1,0 +1,23 @@
+[package]
+name = "ahi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "libFuzzer target for config parsing. Not built by the default CI jobs."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.7"
+ahi = { path = ".." }
+
+[[bin]]
+name = "parse_config"
+path = "fuzz_targets/parse_config.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent package. libFuzzer needs a sanitizer toolchain.
+[workspace]

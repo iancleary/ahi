@@ -1,0 +1,486 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "notes.txt"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "trailing whitespace"
+          },
+          "ruleId": "ahi/trailing-whitespace"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "notes.txt"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "file must be empty or end with a single newline"
+          },
+          "ruleId": "ahi/end-of-file"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "conflict.txt"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "merge conflict string `<<<<<<<` found"
+          },
+          "ruleId": "ahi/merge-conflict"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "conflict.txt"
+                },
+                "region": {
+                  "startLine": 3
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "merge conflict string `=======` found"
+          },
+          "ruleId": "ahi/merge-conflict"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "conflict.txt"
+                },
+                "region": {
+                  "startLine": 5
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "merge conflict string `>>>>>>>` found"
+          },
+          "ruleId": "ahi/merge-conflict"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "bad.json"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "JSON parse error: EOF while parsing an object at line 2 column 0"
+          },
+          "ruleId": "ahi/check-json"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "bad.yml"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "YAML parse error: did not find expected node content at line 2 column 1, while parsing a flow node"
+          },
+          "ruleId": "ahi/check-yaml"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "bad.toml"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "TOML parse error: TOML parse error at line 1, column 4\n  |\n1 | a =\n  |    ^\ninvalid string\nexpected `\"`, `'`\n"
+          },
+          "ruleId": "ahi/check-toml"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "bidi.txt"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "bidirectional control U+202E"
+          },
+          "ruleId": "ahi/trojan-source"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "key.pem"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "private key found"
+          },
+          "ruleId": "ahi/private-key"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "action `actions/checkout@v4` must be pinned to a full 40-character commit SHA"
+          },
+          "ruleId": "ahi/github-actions"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "job `test` is missing permissions"
+          },
+          "ruleId": "ahi/github-actions"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "base image `alpine:3.19` is not pinned by a sha256 digest"
+          },
+          "ruleId": "ahi/dockerfile"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile"
+                },
+                "region": {
+                  "startLine": 2
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "RUN pipes curl or wget into a shell"
+          },
+          "ruleId": "ahi/dockerfile"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile"
+                },
+                "region": {
+                  "startLine": 2
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "download with curl or wget is missing a checksum check in the same RUN (a later layer is not accepted in v0.1)"
+          },
+          "ruleId": "ahi/dockerfile"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Dockerfile"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "final stage USER must be present and must not be root"
+          },
+          "ruleId": "ahi/dockerfile"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "script.sh"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "POSIX sh script is missing `set -eu` (pipefail is not required for sh)"
+          },
+          "ruleId": "ahi/shell-strict"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".env"
+                },
+                "region": {}
+              }
+            }
+          ],
+          "message": {
+            "text": "dotenv file should not be committed (keep secrets out of git; an example file is allowed)"
+          },
+          "ruleId": "ahi/committed-dotenv"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "name": "ahi",
+          "rules": [
+            {
+              "fullDescription": {
+                "text": "Reports lines with trailing whitespace. A Markdown double-space linebreak is kept when --markdown-linebreak-ext names that extension (or *). v0.1 does not rewrite files."
+              },
+              "id": "ahi/trailing-whitespace",
+              "shortDescription": {
+                "text": "Trim Trailing Whitespace"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports a missing final newline, extra trailing newlines, or a file that is only newlines. Empty files are allowed. v0.1 does not rewrite files."
+              },
+              "id": "ahi/end-of-file",
+              "shortDescription": {
+                "text": "Fix End of Files"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports conflict markers. Unlike upstream check-merge-conflict, ahi scans even when git is not in the middle of a merge."
+              },
+              "id": "ahi/merge-conflict",
+              "shortDescription": {
+                "text": "Check for merge conflicts"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports files whose size in KiB, rounded up, exceeds --maxkb (default 500). Every selected file is checked, which is upstream's --enforce-all behavior."
+              },
+              "id": "ahi/large-files",
+              "shortDescription": {
+                "text": "Check for large files"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports paths that differ only by case, including parent directories. That collision breaks a checkout on Windows and on default macOS volumes."
+              },
+              "id": "ahi/case-conflict",
+              "shortDescription": {
+                "text": "Check for case conflicts"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports a broken symlink, and a symlink whose target escapes the repository root. The escape check is stricter than upstream check-symlinks."
+              },
+              "id": "ahi/symlinks",
+              "shortDescription": {
+                "text": "Check for symlinks"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports JSON that does not parse, including duplicate object keys."
+              },
+              "id": "ahi/check-json",
+              "shortDescription": {
+                "text": "Check JSON"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports YAML that does not parse. Aliases are allowed in files under check; they are rejected only in ahi's own config."
+              },
+              "id": "ahi/check-yaml",
+              "shortDescription": {
+                "text": "Check YAML"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports TOML that does not parse."
+              },
+              "id": "ahi/check-toml",
+              "shortDescription": {
+                "text": "Check TOML"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports Unicode bidi controls (U+202A–U+202E and U+2066–U+2069) and a documented set of Latin/Cyrillic/Greek homoglyphs on the same line. This is not the full Unicode confusables database."
+              },
+              "id": "ahi/trojan-source",
+              "shortDescription": {
+                "text": "Trojan Source"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports path components Windows rejects: device names (CON, PRN, AUX, NUL, COM1–COM9, LPT1–LPT9, including superscripts), trailing dots or spaces, and characters <>:\"|?*."
+              },
+              "id": "ahi/windows-reserved-names",
+              "shortDescription": {
+                "text": "Check Windows reserved names"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports private-key headers. The marker list is the one in pre-commit-hooks detect_private_key.py as of 2026-10-25. This is not a general entropy scanner."
+              },
+              "id": "ahi/private-key",
+              "shortDescription": {
+                "text": "Detect private key"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Requires actions and reusable workflows to be pinned to a full commit SHA (or an image digest), requires an explicit permissions block of read or none, and flags pull_request_target checkouts of the PR head or use of secrets in run steps. --allow-write=contents permits that one write permission."
+              },
+              "id": "ahi/github-actions",
+              "shortDescription": {
+                "text": "GitHub Actions pinning"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Requires every FROM image except scratch to be pinned by sha256 digest, a non-root USER in the final stage, no curl|sh or wget|sh, a checksum next to curl/wget downloads, and version-pinned apt packages."
+              },
+              "id": "ahi/dockerfile",
+              "shortDescription": {
+                "text": "Dockerfile supply chain"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Bash and zsh scripts must set -euo pipefail (or the three options separately). POSIX sh must set -eu; pipefail is not required because it is not POSIX."
+              },
+              "id": "ahi/shell-strict",
+              "shortDescription": {
+                "text": "Shell strict mode"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports a file named .env or .env.* other than .env.example, .env.sample, and .env.template. Files such as versions/tool.env are not dotenv files and are not flagged."
+              },
+              "id": "ahi/committed-dotenv",
+              "shortDescription": {
+                "text": "Committed dotenv file"
+              }
+            }
+          ],
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

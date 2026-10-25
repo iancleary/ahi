@@ -1,0 +1,64 @@
+name: CI
+
+# Pull requests and pushes to main only. Tag pushes do not match
+# `branches: ["main"]`, so this file never runs because a tag was pushed.
+# This workflow does not request CARGO_REGISTRY_TOKEN and does not publish.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Fork pull requests receive no repository secrets. This file does not use
+# pull_request_target, which would run in the base repository and could see secrets.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: 1.83.0
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Check documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+
+      - name: Verify package
+        # Local crate metadata check. This does not publish and does not use a registry token.
+        run: cargo package
+
+      - name: Build project
+        run: cargo build --release
+
+      - name: cargo-deny and cargo-audit
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/install-supply-chain-tools.sh && cargo deny check && cargo audit
+
+      - name: version smoke
+        shell: bash
+        run: bash scripts/smoke-version.sh
