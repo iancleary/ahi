@@ -1,0 +1,241 @@
+{
+  "ahi_version": "0.1.0",
+  "hooks": [
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": 1,
+          "message": "trailing whitespace",
+          "path": "notes.txt",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/trailing-whitespace",
+      "name": "Trim Trailing Whitespace",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "file must be empty or end with a single newline",
+          "path": "notes.txt",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/end-of-file",
+      "name": "Fix End of Files",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": 1,
+          "message": "merge conflict string `<<<<<<<` found",
+          "path": "conflict.txt",
+          "severity": "error"
+        },
+        {
+          "column": null,
+          "line": 3,
+          "message": "merge conflict string `=======` found",
+          "path": "conflict.txt",
+          "severity": "error"
+        },
+        {
+          "column": null,
+          "line": 5,
+          "message": "merge conflict string `>>>>>>>` found",
+          "path": "conflict.txt",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/merge-conflict",
+      "name": "Check for merge conflicts",
+      "outcome": "failed"
+    },
+    {
+      "findings": [],
+      "id": "ahi/large-files",
+      "name": "Check for large files",
+      "outcome": "passed"
+    },
+    {
+      "findings": [],
+      "id": "ahi/case-conflict",
+      "name": "Check for case conflicts",
+      "outcome": "passed"
+    },
+    {
+      "findings": [],
+      "id": "ahi/symlinks",
+      "name": "Check for symlinks",
+      "outcome": "skipped"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "JSON parse error: EOF while parsing an object at line 2 column 0",
+          "path": "bad.json",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/check-json",
+      "name": "Check JSON",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "YAML parse error: did not find expected node content at line 2 column 1, while parsing a flow node",
+          "path": "bad.yml",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/check-yaml",
+      "name": "Check YAML",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "TOML parse error: TOML parse error at line 1, column 4\n  |\n1 | a =\n  |    ^\ninvalid string\nexpected `\"`, `'`\n",
+          "path": "bad.toml",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/check-toml",
+      "name": "Check TOML",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": 1,
+          "message": "bidirectional control U+202E",
+          "path": "bidi.txt",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/trojan-source",
+      "name": "Trojan Source",
+      "outcome": "failed"
+    },
+    {
+      "findings": [],
+      "id": "ahi/windows-reserved-names",
+      "name": "Check Windows reserved names",
+      "outcome": "passed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "private key found",
+          "path": "key.pem",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/private-key",
+      "name": "Detect private key",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "action `actions/checkout@v4` must be pinned to a full 40-character commit SHA",
+          "path": ".github/workflows/ci.yml",
+          "severity": "error"
+        },
+        {
+          "column": null,
+          "line": null,
+          "message": "job `test` is missing permissions",
+          "path": ".github/workflows/ci.yml",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/github-actions",
+      "name": "GitHub Actions pinning",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": 1,
+          "message": "base image `alpine:3.19` is not pinned by a sha256 digest",
+          "path": "Dockerfile",
+          "severity": "error"
+        },
+        {
+          "column": null,
+          "line": 2,
+          "message": "RUN pipes curl or wget into a shell",
+          "path": "Dockerfile",
+          "severity": "error"
+        },
+        {
+          "column": null,
+          "line": 2,
+          "message": "download with curl or wget is missing a checksum check in the same RUN (a later layer is not accepted in v0.1)",
+          "path": "Dockerfile",
+          "severity": "error"
+        },
+        {
+          "column": null,
+          "line": null,
+          "message": "final stage USER must be present and must not be root",
+          "path": "Dockerfile",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/dockerfile",
+      "name": "Dockerfile supply chain",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": 1,
+          "message": "POSIX sh script is missing `set -eu` (pipefail is not required for sh)",
+          "path": "script.sh",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/shell-strict",
+      "name": "Shell strict mode",
+      "outcome": "failed"
+    },
+    {
+      "findings": [
+        {
+          "column": null,
+          "line": null,
+          "message": "dotenv file should not be committed (keep secrets out of git; an example file is allowed)",
+          "path": ".env",
+          "severity": "error"
+        }
+      ],
+      "id": "ahi/committed-dotenv",
+      "name": "Committed dotenv file",
+      "outcome": "failed"
+    }
+  ],
+  "result": "failed",
+  "warnings": []
+}

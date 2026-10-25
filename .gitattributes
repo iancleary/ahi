@@ -1,0 +1,4 @@
+# Golden snapshots are exact stdout bytes, including LF.
+tests/golden/** -text linguist-generated
+*.sh text eol=lf
+justfile text eol=lf
