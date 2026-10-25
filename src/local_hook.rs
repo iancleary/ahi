@@ -21,6 +21,8 @@ pub struct LocalOutput {
     pub exit_code: i32,
     pub output: String,
     pub invocations: usize,
+    /// Environment names passed to the process. No values.
+    pub env_names: Vec<String>,
 }
 
 pub struct LocalRequest<'a> {
@@ -32,11 +34,18 @@ pub struct LocalRequest<'a> {
     pub require_serial: bool,
     pub script: bool,
     pub log_file: &'a str,
+    /// Extra toolchain location names from the policy. Names only.
+    pub toolchain_env: &'a [String],
 }
 
 pub fn execute(request: &LocalRequest<'_>) -> Result<LocalOutput> {
     let planned = plan(request, None)?;
-    run_planned(request.root, &planned, request.log_file)
+    run_planned(
+        request.root,
+        &planned,
+        request.log_file,
+        request.toolchain_env,
+    )
 }
 
 pub(crate) fn plan(
@@ -56,7 +65,9 @@ pub(crate) fn plan(
                 .map(|count| count.get())
                 .unwrap_or(1)
         };
-    let budget = max_length.unwrap_or_else(|| command_budget(256 * 1024, scrubbed_environ_size()));
+    let budget = max_length.unwrap_or_else(|| {
+        command_budget(256 * 1024, scrubbed_environ_size(request.toolchain_env))
+    });
     if !request.pass_filenames || request.files.is_empty() {
         return Ok(vec![argv]);
     }
@@ -87,8 +98,13 @@ fn resolve_script(root: &Path, token: &str) -> Result<String> {
     Ok(path.to_string_lossy().replace('\\', "/"))
 }
 
-fn run_planned(root: &Path, batches: &[Vec<String>], log_file: &str) -> Result<LocalOutput> {
-    let env = scrub_env(std::env::vars_os());
+fn run_planned(
+    root: &Path,
+    batches: &[Vec<String>],
+    log_file: &str,
+    toolchain_env: &[String],
+) -> Result<LocalOutput> {
+    let env = scrub_env(std::env::vars_os(), toolchain_env);
     let mut combined = String::new();
     let mut failed = false;
     let mut exit_code = 0;
@@ -130,6 +146,7 @@ fn run_planned(root: &Path, batches: &[Vec<String>], log_file: &str) -> Result<L
         exit_code,
         output: combined,
         invocations: batches.len(),
+        env_names: env_names(&env),
     })
 }
 
@@ -181,7 +198,8 @@ fn append_log(root: &Path, log_file: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-const KEPT_ENV: &[&str] = &[
+/// Process basics a local hook needs. This is not a toolchain location list.
+pub const BASE_ENV: &[&str] = &[
     "PATH",
     "HOME",
     "USER",
@@ -200,7 +218,60 @@ const KEPT_ENV: &[&str] = &[
     "TERM",
 ];
 
-pub fn scrub_env<I, K, V>(vars: I) -> Vec<(OsString, OsString)>
+/// Toolchain locations passed through by default when they are set.
+///
+/// `CARGO_HOME` and `RUSTUP_HOME` are where an already installed rustup/cargo
+/// lives. Images often set them outside `$HOME`. `RUSTUP_TOOLCHAIN` selects
+/// which installed toolchain to run. None of these install or update a toolchain.
+pub const DEFAULT_TOOLCHAIN_ENV: &[&str] = &["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"];
+
+pub fn base_env_names() -> &'static [&'static str] {
+    BASE_ENV
+}
+
+pub fn default_toolchain_names() -> &'static [&'static str] {
+    DEFAULT_TOOLCHAIN_ENV
+}
+
+/// `None` when `name` is a toolchain location name. `Some` is the refusal.
+pub fn toolchain_name_error(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("toolchain_env name cannot be empty".to_string());
+    }
+    if name.contains('=') || name.contains('\0') || name.contains('\n') {
+        return Some(format!(
+            "toolchain_env `{name}` is not a name. List names only, never values"
+        ));
+    }
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_');
+    if !first_ok || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Some(format!(
+            "toolchain_env `{name}` is not an environment variable name"
+        ));
+    }
+    if is_secret_env_name(name) {
+        return Some(format!(
+            "toolchain_env `{name}` is a credential variable and is never passed through"
+        ));
+    }
+    None
+}
+
+pub fn is_secret_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("AWS_")
+        || upper.starts_with("AZURE_")
+        || upper.starts_with("GITHUB_")
+        || upper.contains("TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("KEY")
+}
+
+pub fn scrub_env<I, K, V>(vars: I, toolchain_env: &[String]) -> Vec<(OsString, OsString)>
 where
     I: IntoIterator<Item = (K, V)>,
     K: AsRef<OsStr>,
@@ -212,7 +283,7 @@ where
         let Some(name) = key_os.to_str() else {
             continue;
         };
-        if !kept_name(name) {
+        if !kept_name(name, toolchain_env) {
             continue;
         }
         out.push((key_os.to_os_string(), value.as_ref().to_os_string()));
@@ -221,26 +292,39 @@ where
     out
 }
 
-fn kept_name(name: &str) -> bool {
-    if !KEPT_ENV.contains(&name) {
+fn kept_name(name: &str, toolchain_env: &[String]) -> bool {
+    if is_secret_env_name(name) {
         return false;
     }
-    let upper = name.to_ascii_uppercase();
-    if upper.starts_with("AWS_") || upper.starts_with("AZURE_") {
-        return false;
-    }
-    if upper.contains("TOKEN")
-        || upper.contains("SECRET")
-        || upper.contains("PASSWORD")
-        || upper.contains("KEY")
-    {
-        return false;
-    }
-    true
+    BASE_ENV.iter().any(|kept| env_name_eq(name, kept))
+        || DEFAULT_TOOLCHAIN_ENV
+            .iter()
+            .any(|kept| env_name_eq(name, kept))
+        || toolchain_env.iter().any(|extra| env_name_eq(extra, name))
 }
 
-fn scrubbed_environ_size() -> usize {
-    scrub_env(std::env::vars_os())
+/// Unix environment names are case-sensitive. Windows names are not, and the
+/// process block often stores `Path` rather than `PATH`.
+fn env_name_eq(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn env_names(env: &[(OsString, OsString)]) -> Vec<String> {
+    let mut names: Vec<String> = env
+        .iter()
+        .filter_map(|(key, _)| key.to_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn scrubbed_environ_size(toolchain_env: &[String]) -> usize {
+    scrub_env(std::env::vars_os(), toolchain_env)
         .iter()
         .map(|(key, value)| key.len() + value.len() + 2)
         .sum()
@@ -262,8 +346,14 @@ mod tests {
             ("MY_KEY", "secret"),
             ("AZURE_CLIENT_SECRET", "secret"),
             ("LANG", "C"),
+            ("CARGO_HOME", "/usr/local/cargo"),
+            ("RUSTUP_HOME", "/usr/local/rustup"),
+            ("RUSTUP_TOOLCHAIN", "stable"),
+            ("GOROOT", "/usr/lib/go"),
+            ("UNLISTED_VAR", "nope"),
         ];
-        let scrubbed = scrub_env(vars);
+        let extra = vec!["GOROOT".to_string()];
+        let scrubbed = scrub_env(vars, &extra);
         let names: Vec<String> = scrubbed
             .iter()
             .map(|(key, _)| key.to_string_lossy().into_owned())
@@ -272,6 +362,11 @@ mod tests {
         assert!(names.contains(&"HOME".to_string()));
         assert!(names.contains(&"LANG".to_string()));
         assert!(names.contains(&"PRE_COMMIT".to_string()));
+        assert!(names.contains(&"CARGO_HOME".to_string()));
+        assert!(names.contains(&"RUSTUP_HOME".to_string()));
+        assert!(names.contains(&"RUSTUP_TOOLCHAIN".to_string()));
+        assert!(names.contains(&"GOROOT".to_string()));
+        assert!(!names.contains(&"UNLISTED_VAR".to_string()));
         assert!(!names.iter().any(|name| name.contains("TOKEN")
             || name.contains("SECRET")
             || name.contains("KEY")
@@ -282,6 +377,16 @@ mod tests {
             .find(|(key, _)| key == "PRE_COMMIT")
             .unwrap();
         assert_eq!(pre_commit.1, "1");
+        assert!(toolchain_name_error("AWS_PROFILE")
+            .unwrap()
+            .contains("never passed"));
+        assert!(toolchain_name_error("GITHUB_ACTOR")
+            .unwrap()
+            .contains("never passed"));
+        assert!(toolchain_name_error("CARGO_HOME=/tmp")
+            .unwrap()
+            .contains("never values"));
+        assert!(toolchain_name_error("GOROOT").is_none());
     }
 
     #[test]
@@ -298,6 +403,7 @@ mod tests {
             require_serial: true,
             script: false,
             log_file: "",
+            toolchain_env: &[],
         };
         let planned = plan(&request, Some(4096)).unwrap();
         assert_eq!(
@@ -324,6 +430,7 @@ mod tests {
             require_serial: serial,
             script: false,
             log_file: "",
+            toolchain_env: &[],
         };
         let serial = plan(&request(true), Some(4096)).unwrap();
         assert_eq!(serial.len(), 1);
@@ -345,6 +452,7 @@ mod tests {
             require_serial: false,
             script: false,
             log_file: "",
+            toolchain_env: &[],
         };
         let planned = plan(&request, Some(4096)).unwrap();
         assert_eq!(planned.len(), 1);

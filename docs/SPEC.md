@@ -261,9 +261,13 @@ trusted_system_hooks: []
 # Hook ids allowed to open the network. Default is none. Enforced once sandboxes exist.
 # A trusted local hook is not sandboxed in this version, so the network is not blocked for it.
 network_hooks: []
+# Extra toolchain location names for every local system/script hook.
+# Names only, never values. Credential names are a parse error.
+# The default pass-through (CARGO_HOME, RUSTUP_HOME, RUSTUP_TOOLCHAIN) is not listed here.
+toolchain_env: []
 ```
 
-Unknown keys are errors. v0.1 parses the file when it is present and rejects a malformed one. v0.1 does not fetch, so `repo_allow` is not consulted yet. A `language: system` or `script` hook (stored as `unsupported` or `unsupported_script`) runs only when `trusted_system_hooks` contains that id and the exact `entry` string. `args` are not part of the pin. A bare id does not authorize.
+Unknown keys are errors. v0.1 parses the file when it is present and rejects a malformed one. v0.1 does not fetch, so `repo_allow` is not consulted yet. A `language: system` or `script` hook (stored as `unsupported` or `unsupported_script`) runs only when `trusted_system_hooks` contains that id and the exact `entry` string. `args` are not part of the pin. A bare id does not authorize. A pin may also set `toolchain_env` to extra location names for that entry. Those names are added to the global `toolchain_env` list.
 
 ### Filtering
 
@@ -404,7 +408,7 @@ Trust boundaries:
 | Runtimes | A name on `runtime_allow` plus a binary already on `PATH` or an explicit path. No nodeenv, no rustup installer, no Go tarball. |
 | `system` / `script` | Denied unless `trusted_system_hooks` has the hook id and the exact `entry`. A bare id does not authorize. |
 | Network-using hooks | `network_hooks` is the allowlist once a sandbox can block the network. This version has no sandbox, so it does not pretend the allowlist is enforced. |
-| Environment | Local system and script hooks get the scrubbed environment below. |
+| Environment | Local system and script hooks get the scrubbed environment below. Toolchain pass-through is names of locations, never credentials, and never an installer. |
 | Files the check reads | Opened with `O_NOFOLLOW` where the OS supports it. Paths that escape the repo root are findings, not inputs. |
 
 ## Security behavior
@@ -440,16 +444,17 @@ Each locked artifact has a version and at least one sha256. `ahi fetch` checks t
 
 ### `system` / `script`, network, environment
 
-A local system or script hook runs only with an exact-entry pin, as described under the policy file. There is no sandbox in this version, so the network is not blocked for that process. The environment passed to the hook is:
+A local system or script hook runs only with an exact-entry pin, as described under the policy file. There is no sandbox in this version, so the network is not blocked for that process. ahi discovers and runs tools that are already installed, including a toolchain manager the image already provides. It passes through the variables those tools need to locate themselves. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 
-- Kept, if set: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `TERM`.
-- Dropped: everything else, including `GITHUB_TOKEN`, `GH_TOKEN`, `AWS_*`, `AZURE_*`, `NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`, `SSH_AUTH_SOCK`, and any variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`.
+The environment passed to the hook is names only at the policy layer. Values come from the process that invoked ahi, and only for allowed names. `ahi explain` prints the allowlist. The audit line records the names actually passed to each local hook and does not record values.
 
-`SSH_AUTH_SOCK` is dropped on purpose. Upstream documents it as required for `git@` clones ([tox section](https://pre-commit.com/#usage-with-tox)). ahi cloning happens in `ahi fetch`, which is allowed a separate, unscrubbed environment. Hook code does not get the agent socket.
+- Kept, if set: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `TERM`. The match is case-sensitive on Unix. On Windows the process block is case-insensitive, so `Path` matches `PATH`.
+- Toolchain pass-through, default, if set: `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`. `CARGO_HOME` and `RUSTUP_HOME` are the directories an already installed cargo and rustup use. Images and CI often set them outside `$HOME`; dropping them makes the rustup proxy look in the wrong place and fail to choose a toolchain. `RUSTUP_TOOLCHAIN`, when set, selects which installed toolchain to run. None of these download or update a toolchain.
+- Toolchain pass-through, policy only, not enabled by default: `GOROOT` and `GOPATH` (Go), `VIRTUAL_ENV` (an existing Python virtualenv), `NVM_DIR` (an existing Node version manager). Listing `NVM_DIR` does not enable `language: node` and does not run `npm install`.
+- Not done: installing a Rust toolchain, `rustup update`, `cargo install`, creating a virtualenv, `npm install`, or caching dependencies for a local hook. `additional_dependencies` on a local hook is still refused.
+- Refused, even if a policy lists the name: any name containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and any name starting with `AWS_`, `AZURE_`, or `GITHUB_`. The policy parse fails with that name. `CARGO_REGISTRY_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, and `SSH_AUTH_SOCK` stay dropped. `SSH_AUTH_SOCK` is dropped on purpose. Upstream documents it as required for `git@` clones ([tox section](https://pre-commit.com/#usage-with-tox)). ahi cloning happens in `ahi fetch`, which is allowed a separate, unscrubbed environment. Hook code does not get the agent socket.
 
 `PRE_COMMIT=1` is set, matching upstream since 2.5.0, so hooks that branch on it keep working.
-
-`CARGO_HOME` and `RUSTUP_HOME` are not on the keep list. A rustup proxy that needs them cannot select a toolchain. A toolchain installed under the default `$HOME/.rustup` still works because `HOME` is kept.
 
 ### Sandboxes (v0.4)
 
@@ -471,7 +476,7 @@ Builtin checks stay in-process and offline. They do not need a sandbox to avoid 
 ### Signatures, audit, path safety
 
 - **Signatures on fetched hook repos.** A lower-priority v0.2 field, not the way Ian produces commits. Where a fetched hook commit carries a gitsign or sigstore signature, `ahi fetch` may verify it and record `signature: verified | absent | failed | unverified` in the lockfile. `failed` is a hard error. `absent` is allowed and reported by `ahi verify`, because most hook repos are not signed today. A missing verifier is `unverified`, and `ahi verify --require-signatures` fails closed. ahi does not import or sign the user's commit on the host. **Unverified:** no gitsign bundle was validated while writing this spec.
-- **Audit log.** Append-only JSON lines in the cache directory's `audit.log`: time, command, repo root, hook id, outcome, finding count. No file contents, no environment, no tokens. v0.1 writes one record per `ahi run` when the cache is writable. A read-only cache skips the record with a warning and does not fail the run.
+- **Audit log.** Append-only JSON lines in the cache directory's `audit.log`: time, command, repo root, hook ids, outcome, finding count, local hook ids that ran, and `local_env` (each local hook and the environment names passed to it). No file contents, no environment values, no tokens. v0.1 writes one record per `ahi run` when the cache is writable. A read-only cache skips the record with a warning and does not fail the run.
 - **Path traversal.** Filenames from git and from `--files` are normalized and must stay inside the repo root. A symlink whose target escapes the root is a finding of `ahi/symlinks`, and content checks do not follow it.
 - **Filename safety.** NUL and newline in a path are rejected. When subprocesses exist, filenames are passed after `--` and never through a shell. The v0.1 runner does not invoke a shell for builtins.
 - **Stash.** The protocol in [Partial commits](#partial-commits). It is not implemented. `ahi run --fix` can write a selected source file for the three fixer checks, and it refuses that write when the file has unstaged changes.
@@ -694,7 +699,7 @@ Other CI facts:
 
 Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), `ahi migrate` (best-effort, no parity guarantee), stubs for the other commands, tests, `justfile`, `cargo deny`, CI matrix, README.
 
-A URL or `meta` hook fails the run with an explicit error. It is not skipped and not substituted. `repo: local` with `language: system` or `script` runs when the policy pins the id and the exact entry. Other local languages fail the hook. `ahi run --fix` rewrites the three whitespace checks without the stash protocol; a file with unstaged changes is refused. Network is not blocked for a trusted local hook, because v0.4 is the sandbox. The environment is scrubbed to the keep list in this spec (`CARGO_HOME` and `RUSTUP_HOME` are not on that list).
+A URL or `meta` hook fails the run with an explicit error. It is not skipped and not substituted. `repo: local` with `language: system` or `script` runs when the policy pins the id and the exact entry. Other local languages fail the hook. `ahi run --fix` rewrites the three whitespace checks without the stash protocol; a file with unstaged changes is refused. Network is not blocked for a trusted local hook, because v0.4 is the sandbox. The environment is scrubbed to the base keep list plus the toolchain pass-through (`CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN` by default; more names only from `toolchain_env` in the policy). Credential names are never passed.
 
 ### v0.2 — lock and fetch
 

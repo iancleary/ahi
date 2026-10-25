@@ -319,6 +319,80 @@ fn script_hook_receives_filenames_without_a_shell() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn toolchain_passthrough_is_names_only_and_drops_unlisted_vars() {
+    let dir = temp_repo("env");
+    write(
+        &dir.join("envcheck.sh"),
+        b"#!/bin/sh\nset -eu\n[ \"${PRE_COMMIT:-}\" = 1 ] || exit 4\n[ -n \"${CARGO_HOME:-}\" ] || exit 6\n[ -n \"${DEMO_TOOLCHAIN:-}\" ] || exit 7\n[ -z \"${UNLISTED_VAR:-}\" ] || exit 5\n[ -z \"${SECRET_TOKEN:-}\" ] || exit 3\n[ -z \"${GITHUB_TOKEN:-}\" ] || exit 8\nprintf 'ok\\n'\n",
+    );
+    let mut mode = fs::metadata(dir.join("envcheck.sh")).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    mode.set_mode(0o755);
+    fs::set_permissions(dir.join("envcheck.sh"), mode).unwrap();
+    write(
+        &dir.join(".pre-commit-config.yaml"),
+        b"repos:\n- repo: local\n  hooks:\n  - id: envcheck\n    name: Env\n    entry: envcheck.sh\n    language: script\n    pass_filenames: false\n    always_run: true\n    verbose: true\n",
+    );
+    write(
+        &dir.join("ahi.policy.yaml"),
+        b"version: 1\ntrusted_system_hooks:\n- id: envcheck\n  entry: envcheck.sh\n  toolchain_env: [DEMO_TOOLCHAIN]\n",
+    );
+    write(&dir.join("ok.txt"), b"ok\n");
+    git(&dir, &["add", "-A"]);
+    let cache = dir.join("cache");
+    let output = Command::new(env!("CARGO_BIN_EXE_ahi"))
+        .current_dir(&dir)
+        .env("CARGO_HOME", "/usr/local/cargo")
+        .env("DEMO_TOOLCHAIN", "from-policy")
+        .env("UNLISTED_VAR", "should-not-pass")
+        .env("SECRET_TOKEN", "should-not-pass")
+        .env("GITHUB_TOKEN", "should-not-pass")
+        .args([
+            "--cache-dir",
+            cache.to_str().unwrap(),
+            "run",
+            "--all-files",
+            "--verbose",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{text}\n{err}");
+    assert!(text.contains("ok"), "{text}");
+    let audit = fs::read_to_string(cache.join("audit.log")).unwrap();
+    assert!(audit.contains("DEMO_TOOLCHAIN"), "{audit}");
+    assert!(audit.contains("CARGO_HOME"), "{audit}");
+    assert!(!audit.contains("from-policy"), "{audit}");
+    assert!(!audit.contains("/usr/local/cargo"), "{audit}");
+    assert!(!audit.contains("UNLISTED_VAR"), "{audit}");
+    assert!(!audit.contains("SECRET_TOKEN"), "{audit}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn secret_toolchain_name_is_refused_before_the_hook_runs() {
+    let dir = temp_repo("secret-env");
+    write(
+        &dir.join(".pre-commit-config.yaml"),
+        b"repos:\n- repo: local\n  hooks:\n  - id: envcheck\n    name: Env\n    entry: true\n    language: system\n    pass_filenames: false\n    always_run: true\n",
+    );
+    write(
+        &dir.join("ahi.policy.yaml"),
+        b"version: 1\ntoolchain_env: [AWS_PROFILE]\ntrusted_system_hooks:\n- id: envcheck\n  entry: \"true\"\n",
+    );
+    write(&dir.join("ok.txt"), b"ok\n");
+    git(&dir, &["add", "-A"]);
+    let output = run(&dir, &["run", "--all-files"]);
+    let err = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("never passed through"), "{err}");
+    assert!(err.contains("AWS_PROFILE"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn ians_config_runs_where_cargo_is_available() {
     if !cargo_works() {
@@ -364,7 +438,12 @@ fn ians_config_runs_where_cargo_is_available() {
     let audit = fs::read_to_string(cache.join("audit.log")).unwrap();
     assert!(audit.contains("rust-linting"), "{audit}");
     assert!(audit.contains("rust-clippy"), "{audit}");
+    assert!(audit.contains("CARGO_HOME"), "{audit}");
+    assert!(audit.contains("RUSTUP_HOME"), "{audit}");
     assert!(!audit.contains("substitut"), "{audit}");
+    if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
+        assert!(!audit.contains(&cargo_home), "{audit}");
+    }
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -373,8 +452,7 @@ fn hook_passed(text: &str, name: &str) -> bool {
         .any(|line| line.contains(name) && line.contains("Passed"))
 }
 
-/// Same keep list as `local_hook::KEPT_ENV`. A rustup install that only works
-/// when `RUSTUP_HOME` is set is not treated as available.
+/// Base names plus the default toolchain pass-through. Matches `local_hook`.
 fn cargo_works() -> bool {
     const KEPT: &[&str] = &[
         "PATH",
@@ -393,6 +471,9 @@ fn cargo_works() -> bool {
         "COMSPEC",
         "PATHEXT",
         "TERM",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
     ];
     let mut cmd = Command::new("cargo");
     cmd.args(["fmt", "--version"])

@@ -33,7 +33,17 @@ The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
 | `install`, `uninstall`, `lock`, `verify`, `fetch`, `autoupdate` | Exit 1. They are specified and not implemented. |
 
-`repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. The process environment keeps the spec's allowlist and sets `PRE_COMMIT=1`. `CARGO_HOME` and `RUSTUP_HOME` are not kept. A rustup proxy that needs those variables cannot select a toolchain; a toolchain under the default `$HOME/.rustup` still works because `HOME` is kept. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook. `repo: meta` and remote URLs fail with an explicit error and are not fetched. Languages planned for v0.3 say `not supported until v0.3`. Other languages, including Node, say `not supported by ahi`. Nothing is skipped silently.
+`repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook. `repo: meta` and remote URLs fail with an explicit error and are not fetched. Languages planned for v0.3 say `not supported until v0.3`. Other languages, including Node, say `not supported by ahi`. Nothing is skipped silently.
+
+ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
+
+| | Names |
+| --- | --- |
+| Passed by default, if set | `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, plus `PATH`, `HOME`, and the other base names in the spec. `PRE_COMMIT=1` is set. |
+| Policy only (`toolchain_env`) | `GOROOT`, `GOPATH`, `VIRTUAL_ENV`, `NVM_DIR`. Not enabled by default. `NVM_DIR` does not enable Node and does not run `npm install`. |
+| Never passed | Names containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and names starting with `AWS_`, `AZURE_`, or `GITHUB_`. Listing one in the policy is an error. |
+
+`ahi explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one `trusted_system_hooks` entry applies only to that id and entry.
 
 Builtin checks are report-only unless `--fix` is passed. `--fix` rewrites only `ahi/end-of-file`, `ahi/trailing-whitespace`, and `ahi/line-endings`, then the hook fails because the file changed. A hook argument `--fix` does the same for those three. `--fix=no` on mixed line endings stays report-only. The write is a temp file in the same directory, fsynced, then renamed. Symlinks are refused. Paths outside the selected set are refused. A file with unstaged changes is left unchanged. ahi does not stash.
 

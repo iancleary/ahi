@@ -148,6 +148,10 @@ fn list_checks_and_explain() {
     let text = String::from_utf8(explained.stdout).unwrap();
     assert!(text.contains("set -euo pipefail"));
     assert!(text.contains("version: ahi "));
+    assert!(text.contains("CARGO_HOME"));
+    assert!(text.contains("RUSTUP_HOME"));
+    assert!(text.contains("RUSTUP_TOOLCHAIN"));
+    assert!(text.contains("names only"));
 
     let missing = ahi().args(["explain", "nope"]).output().unwrap();
     assert_eq!(missing.status.code(), Some(1));

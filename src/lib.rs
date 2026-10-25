@@ -22,6 +22,7 @@ pub mod store;
 mod yaml_safe;
 
 pub use error::{Error, Result};
+pub use local_hook::{base_env_names, default_toolchain_names};
 
 /// Version baked in from the library package. The `ahi` binary uses the same number.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

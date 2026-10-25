@@ -16,6 +16,13 @@ pub struct AuditEvent<'a> {
     pub finding_count: usize,
     /// Local system/script hook ids that ran.
     pub local_hooks: &'a [String],
+    /// Environment names passed to each local hook. No values.
+    pub local_env: &'a [HookEnv<'a>],
+}
+
+pub struct HookEnv<'a> {
+    pub hook: &'a str,
+    pub names: &'a [String],
 }
 
 pub fn append(cache_dir: &Path, event: &AuditEvent<'_>) -> Result<()> {
@@ -33,6 +40,10 @@ pub fn append(cache_dir: &Path, event: &AuditEvent<'_>) -> Result<()> {
         "outcome": event.outcome,
         "findings": event.finding_count,
         "local_hooks": event.local_hooks,
+        "local_env": event.local_env.iter().map(|item| json!({
+            "hook": item.hook,
+            "names": item.names,
+        })).collect::<Vec<_>>(),
     });
     let mut file = OpenOptions::new()
         .create(true)

@@ -249,6 +249,14 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
             runner::Outcome::Failed => "failed",
             runner::Outcome::Skipped => "skipped",
         };
+        let local_env: Vec<ahi::audit::HookEnv<'_>> = report
+            .local_env
+            .iter()
+            .map(|item| ahi::audit::HookEnv {
+                hook: &item.hook,
+                names: &item.names,
+            })
+            .collect();
         if let Err(err) = ahi::audit::append(
             store.root(),
             &AuditEvent {
@@ -258,6 +266,7 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
                 outcome,
                 finding_count: findings,
                 local_hooks: &report.local_hooks,
+                local_env: &local_env,
             },
         ) {
             eprintln!("warning: {err}");
@@ -345,7 +354,49 @@ fn explain(id: &str) -> ExitCode {
         println!("pass_filenames: false when the config omits pass_filenames");
     }
     println!("version: ahi {VERSION}");
+    println!();
+    let loaded = env::current_dir().ok().and_then(|cwd| {
+        repo_root(&cwd)
+            .ok()
+            .and_then(|root| policy::load_policy(&root).ok())
+    });
+    print_local_env(loaded.as_ref());
     ExitCode::from(0)
+}
+
+fn print_local_env(policy: Option<&ahi::policy::Policy>) {
+    println!(
+        "local hook environment (names only, if set): {}",
+        ahi::base_env_names().join(", ")
+    );
+    println!(
+        "toolchain pass-through (default, if set): {}",
+        ahi::default_toolchain_names().join(", ")
+    );
+    println!(
+        "toolchain pass-through adds names a tool needs to find an install that is already there. ahi does not install, update, or cache a toolchain. Credential names (TOKEN, SECRET, PASSWORD, KEY, AWS_*, AZURE_*, GITHUB_*) are refused."
+    );
+    let Some(policy) = policy else {
+        return;
+    };
+    if policy.toolchain_env.is_empty() {
+        println!("toolchain pass-through (policy): (none)");
+    } else {
+        println!(
+            "toolchain pass-through (policy): {}",
+            policy.toolchain_env.join(", ")
+        );
+    }
+    for hook in &policy.trusted_system_hooks {
+        if hook.toolchain_env.is_empty() {
+            continue;
+        }
+        println!(
+            "toolchain pass-through ({}): {}",
+            hook.id,
+            hook.toolchain_env.join(", ")
+        );
+    }
 }
 
 fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> ExitCode {
@@ -414,6 +465,7 @@ fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> 
                 println!(
                     "fix: `ahi run --fix` rewrites end-of-file, trailing whitespace, and mixed line endings; other checks stay report-only"
                 );
+                print_local_env(Some(&loaded));
             }
             Err(err) => println!("policy: {err}"),
         },

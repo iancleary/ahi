@@ -19,6 +19,8 @@ pub struct TrustedSystemHook {
     pub id: String,
     /// `None` is the legacy id-only form. It parses and does not authorize.
     pub entry: Option<String>,
+    /// Extra toolchain location names for this pin. Names only.
+    pub toolchain_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,6 +29,8 @@ pub struct Policy {
     pub runtime_allow: Vec<String>,
     pub trusted_system_hooks: Vec<TrustedSystemHook>,
     pub network_hooks: Vec<String>,
+    /// Extra toolchain location names for every local system/script hook.
+    pub toolchain_env: Vec<String>,
     pub path_present: bool,
 }
 
@@ -56,6 +60,19 @@ impl Policy {
             SystemAuth::Missing
         }
     }
+
+    /// Global names plus the names on the pin that matches this id and entry.
+    pub fn toolchain_names(&self, hook_id: &str, entry: &str) -> Vec<String> {
+        let mut names = self.toolchain_env.clone();
+        for hook in &self.trusted_system_hooks {
+            if hook.id == hook_id && hook.entry.as_deref() == Some(entry) {
+                names.extend(hook.toolchain_env.iter().cloned());
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
 }
 
 pub fn load_policy(root: &Path) -> Result<Policy> {
@@ -84,13 +101,32 @@ pub fn parse_policy_str(src: &str, origin: &str) -> Result<Policy> {
     for value in raw.trusted_system_hooks.unwrap_or_default() {
         trusted_system_hooks.push(parse_trusted(&value, origin)?);
     }
+    let toolchain_env = parse_toolchain_names(
+        &raw.toolchain_env.unwrap_or_default(),
+        origin,
+        "toolchain_env",
+    )?;
     Ok(Policy {
         repo_allow: raw.repo_allow.unwrap_or_default(),
         runtime_allow: raw.runtime_allow.unwrap_or_default(),
         trusted_system_hooks,
         network_hooks: raw.network_hooks.unwrap_or_default(),
+        toolchain_env,
         path_present: false,
     })
+}
+
+fn parse_toolchain_names(names: &[String], origin: &str, what: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for name in names {
+        if let Some(err) = crate::local_hook::toolchain_name_error(name) {
+            return Err(Error::new(format!("{origin}: {what}: {err}")));
+        }
+        if !out.iter().any(|existing| existing == name) {
+            out.push(name.clone());
+        }
+    }
+    Ok(out)
 }
 
 fn parse_trusted(value: &Value, origin: &str) -> Result<TrustedSystemHook> {
@@ -104,11 +140,13 @@ fn parse_trusted(value: &Value, origin: &str) -> Result<TrustedSystemHook> {
             Ok(TrustedSystemHook {
                 id: id.clone(),
                 entry: None,
+                toolchain_env: Vec::new(),
             })
         }
         Value::Mapping(map) => {
             let mut id = None;
             let mut entry = None;
+            let mut toolchain_env = Vec::new();
             for (key, item) in map {
                 let Some(key) = key.as_str() else {
                     return Err(Error::new(format!(
@@ -138,9 +176,26 @@ fn parse_trusted(value: &Value, origin: &str) -> Result<TrustedSystemHook> {
                                 .to_string(),
                         );
                     }
+                    "toolchain_env" => {
+                        let Some(values) = item.as_sequence() else {
+                            return Err(Error::new(format!(
+                                "{origin}: trusted_system_hooks toolchain_env must be a list of names"
+                            )));
+                        };
+                        let mut names = Vec::new();
+                        for value in values {
+                            let Some(name) = value.as_str() else {
+                                return Err(Error::new(format!(
+                                    "{origin}: trusted_system_hooks toolchain_env values must be strings"
+                                )));
+                            };
+                            names.push(name.to_string());
+                        }
+                        toolchain_env = parse_toolchain_names(&names, origin, "toolchain_env")?;
+                    }
                     other => {
                         return Err(Error::new(format!(
-                            "{origin}: trusted_system_hooks field `{other}` is not supported (expected id and entry)"
+                            "{origin}: trusted_system_hooks field `{other}` is not supported (expected id, entry, and toolchain_env)"
                         )));
                     }
                 }
@@ -158,6 +213,7 @@ fn parse_trusted(value: &Value, origin: &str) -> Result<TrustedSystemHook> {
             Ok(TrustedSystemHook {
                 id,
                 entry: Some(entry),
+                toolchain_env,
             })
         }
         _ => Err(Error::new(format!(
@@ -200,6 +256,8 @@ struct RawPolicy {
     trusted_system_hooks: Option<Vec<Value>>,
     #[serde(default)]
     network_hooks: Option<Vec<String>>,
+    #[serde(default)]
+    toolchain_env: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -237,5 +295,27 @@ mod tests {
         assert!(text.contains("id: rust-linting"));
         assert!(text.contains("entry: \"cargo fmt --all --\""));
         assert!(text.contains("language `system`"));
+    }
+
+    #[test]
+    fn toolchain_names_merge_and_secrets_are_refused() {
+        let policy = parse_policy_str(
+            "version: 1\ntoolchain_env: [GOROOT]\ntrusted_system_hooks:\n- id: rust-linting\n  entry: cargo fmt --all --\n  toolchain_env: [GOPATH]\n",
+            "policy",
+        )
+        .unwrap();
+        assert_eq!(
+            policy.toolchain_names("rust-linting", "cargo fmt --all --"),
+            vec!["GOPATH".to_string(), "GOROOT".to_string()]
+        );
+        let secret = parse_policy_str("version: 1\ntoolchain_env: [GITHUB_TOKEN]\n", "policy");
+        let err = secret.unwrap_err().to_string();
+        assert!(err.contains("never passed through"), "{err}");
+        let value = parse_policy_str(
+            "version: 1\ntrusted_system_hooks:\n- id: rust-linting\n  entry: cargo fmt --all --\n  toolchain_env: ['CARGO_HOME=/tmp']\n",
+            "policy",
+        );
+        let err = value.unwrap_err().to_string();
+        assert!(err.contains("never values"), "{err}");
     }
 }

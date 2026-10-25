@@ -49,6 +49,14 @@ pub struct Report {
     pub hooks: Vec<HookReport>,
     /// Local system/script hook ids that were executed.
     pub local_hooks: Vec<String>,
+    /// Environment names passed to each local hook. No values.
+    pub local_env: Vec<PassedEnv>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassedEnv {
+    pub hook: String,
+    pub names: Vec<String>,
 }
 
 pub struct RunRequest<'a> {
@@ -78,6 +86,7 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
     let git_files = select_files(request)?;
     let mut warnings = Vec::new();
     let mut local_hooks = Vec::new();
+    let mut local_env = Vec::new();
     if matches!(request.selection, Selection::Staged) && git_files.unstaged {
         warnings.push(
             "unstaged changes are present; checks read the worktree. ahi does not stash, and it refuses to rewrite a file that has unstaged changes"
@@ -129,8 +138,12 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
             }
             if hook.kind == HookOriginKind::Local {
                 let outcome = run_local_hook(request, hook, &policy, &names, &git_files.modes);
-                if let LocalRan::Ran(id) = &outcome.status {
+                if let LocalRan::Ran { id, env_names } = &outcome.status {
                     local_hooks.push(id.clone());
+                    local_env.push(PassedEnv {
+                        hook: id.clone(),
+                        names: env_names.clone(),
+                    });
                 }
                 hooks.push(outcome.report);
                 if outcome.failed && should_stop(request, hook) {
@@ -191,6 +204,7 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
         warnings,
         hooks,
         local_hooks,
+        local_env,
     })
 }
 
@@ -201,7 +215,7 @@ struct LocalStatus {
 }
 
 enum LocalRan {
-    Ran(String),
+    Ran { id: String, env_names: Vec<String> },
     NotRan,
 }
 
@@ -288,6 +302,7 @@ fn run_local_hook(
     } else {
         Vec::new()
     };
+    let toolchain_env = policy.toolchain_names(&hook.id, &hook.entry);
     let executed = local_hook::execute(&LocalRequest {
         root: request.root,
         entry: &hook.entry,
@@ -297,7 +312,12 @@ fn run_local_hook(
         require_serial: hook.require_serial,
         script,
         log_file: &hook.log_file,
+        toolchain_env: &toolchain_env,
     });
+    let env_names = match &executed {
+        Ok(output) => output.env_names.clone(),
+        Err(_) => Vec::new(),
+    };
     let report = match executed {
         Ok(output) => {
             let show = output.failed || hook.verbose || request.verbose;
@@ -331,7 +351,10 @@ fn run_local_hook(
     let failed_hook = report.outcome == Outcome::Failed;
     LocalStatus {
         failed: failed_hook,
-        status: LocalRan::Ran(hook.id.clone()),
+        status: LocalRan::Ran {
+            id: hook.id.clone(),
+            env_names,
+        },
         report,
     }
 }
