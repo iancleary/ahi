@@ -4,8 +4,6 @@ mod content;
 mod supply;
 mod whitespace;
 
-use std::fs::OpenOptions;
-use std::io::Read;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -99,6 +97,8 @@ impl CheckContext<'_> {
 fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
     #[cfg(unix)]
     {
+        use std::fs::OpenOptions;
+        use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = OpenOptions::new()
             .read(true)
