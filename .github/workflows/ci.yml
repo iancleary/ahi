@@ -46,7 +46,10 @@ jobs:
         run: cargo test --all-features
 
       - name: Check documentation
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+        # PowerShell on Windows does not accept the bash `VAR=value command` form.
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
       - name: Verify package
         # Local crate metadata check. This does not publish and does not use a registry token.
