@@ -1,0 +1,30 @@
+# cargo-deny 0.17. Vulnerabilities are denied by default in the advisories check.
+# Unlicensed crates are denied because they are not in the allow list.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "serde_yaml 0.9.34 is the typed YAML parser that still builds on the 1.83 MSRV. Maintained replacements require Rust 1.85 or newer. yaml-rust2 rejects aliases, anchors, and duplicate keys before serde_yaml parses a config. This advisory is unmaintained, not a vulnerability." },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

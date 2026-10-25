@@ -1,0 +1,42 @@
+[package]
+name = "ahi"
+description = "Fail-closed pre-commit runner. Reads .pre-commit-config.yaml and runs offline builtin checks."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.83"
+repository = "https://github.com/iancleary/ahi"
+authors = ["Ian Cleary"]
+readme = "README.md"
+
+[lib]
+name = "ahi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ahi"
+path = "src/main.rs"
+
+# Exact pins. Caret ranges resolve to 2026 releases whose MSRV is above 1.83.
+[dependencies]
+clap = { version = "=4.5.23", features = ["derive"] }
+regex = "=1.11.1"
+serde = { version = "=1.0.216", features = ["derive"] }
+serde_json = "=1.0.134"
+serde_yaml = "=0.9.34"
+sha2 = "=0.10.8"
+thiserror = "=1.0.69"
+toml = "=0.8.23"
+yaml-rust2 = "=0.10.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.169"
+
+[dev-dependencies]
+proptest = "=1.6.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
