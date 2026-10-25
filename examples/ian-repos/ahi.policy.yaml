@@ -1,0 +1,15 @@
+# Exact-entry allowlist for the local Rust hooks.
+# The entry string must match the config. `args` are not part of the pin.
+# CARGO_HOME, RUSTUP_HOME, and RUSTUP_TOOLCHAIN are passed through by default.
+# ahi does not install a toolchain. Add other location names under toolchain_env.
+version: 1
+repo_allow: []
+runtime_allow: []
+trusted_system_hooks:
+  - id: rust-linting
+    entry: cargo fmt --all --
+  - id: rust-clippy
+    entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+  - id: rust-clippy
+    entry: cargo clippy --all-targets --all-features -- -D warnings
+network_hooks: []

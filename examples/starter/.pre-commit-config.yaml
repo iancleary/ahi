@@ -1,0 +1,46 @@
+# Starter config. Every hook is either an ahi builtin or a local command.
+# There is no remote repo, so `ahi run` does not need a network and does not
+# substitute hook ids.
+#
+# The whitespace checks report by default. To rewrite them:
+#   ahi run --fix
+# `examples/starter/pre-commit` is a sample git hook that passes `--fix`.
+# `ahi install` is not implemented; copy that file to `.git/hooks/pre-commit`.
+#
+# The local hooks run only when examples/starter/ahi.policy.yaml is next to
+# this file (or copied to the repository root as ahi.policy.yaml).
+repos:
+  - repo: builtin
+    hooks:
+      - id: ahi/check-yaml
+      - id: ahi/check-json
+      - id: ahi/check-toml
+      - id: ahi/check-xml
+      - id: ahi/trailing-whitespace
+      - id: ahi/end-of-file
+      - id: ahi/line-endings
+      - id: ahi/merge-conflict
+      - id: ahi/large-files
+      - id: ahi/case-conflict
+      - id: ahi/symlinks
+      - id: ahi/private-key
+      - id: ahi/aws-credentials
+      - id: ahi/shebang-executable
+      - id: ahi/executable-shebang
+      - id: ahi/no-commit-to-branch
+      - id: ahi/byte-order-marker
+      - id: ahi/vcs-permalinks
+  - repo: local
+    hooks:
+      - id: rust-linting
+        name: Rust linting
+        entry: cargo fmt --all --
+        language: system
+        pass_filenames: true
+        types: [file, rust]
+      - id: rust-clippy
+        name: Rust clippy
+        entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+        language: system
+        pass_filenames: false
+        types: [file, rust]

@@ -334,7 +334,7 @@
           "rules": [
             {
               "fullDescription": {
-                "text": "Reports lines with trailing whitespace. A Markdown double-space linebreak is kept when --markdown-linebreak-ext names that extension (or *). v0.1 does not rewrite files."
+                "text": "Reports lines with trailing whitespace. A Markdown double-space linebreak is kept when --markdown-linebreak-ext names that extension (or *). The check is report-only unless `ahi run --fix` or a hook argument `--fix` is set, which rewrites the file and fails the hook."
               },
               "id": "ahi/trailing-whitespace",
               "shortDescription": {
@@ -343,7 +343,7 @@
             },
             {
               "fullDescription": {
-                "text": "Reports a missing final newline, extra trailing newlines, or a file that is only newlines. Empty files are allowed. v0.1 does not rewrite files."
+                "text": "Reports a missing final newline, extra trailing newlines, or a file that is only newlines. Empty files are allowed. The check is report-only unless `ahi run --fix` or a hook argument `--fix` is set, which rewrites the file and fails the hook."
               },
               "id": "ahi/end-of-file",
               "shortDescription": {
@@ -438,6 +438,78 @@
               "id": "ahi/private-key",
               "shortDescription": {
                 "text": "Detect private key"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports CR, LF, and CRLF mixed in one file. The check is report-only, like upstream --fix=no, unless `ahi run --fix` or a hook argument `--fix` (auto, lf, crlf, or cr) is set. --fix=no stays report-only."
+              },
+              "id": "ahi/line-endings",
+              "shortDescription": {
+                "text": "Mixed Line Endings"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "An executable text file must start with #!. Tracked files use the git index mode so Windows and WSL agree. Upstream check-executables-have-shebangs."
+              },
+              "id": "ahi/shebang-executable",
+              "shortDescription": {
+                "text": "Check Executables Have Shebangs"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "A tracked text file that starts with #! must be executable in the git index. Untracked files are skipped, matching upstream check-shebang-scripts-are-executable."
+              },
+              "id": "ahi/executable-shebang",
+              "shortDescription": {
+                "text": "Check Shebang Scripts Are Executable"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Fails when the current branch is one of --branch (default main and master) or matches --pattern from the start of the name. A detached HEAD passes. This matches upstream no-commit-to-branch."
+              },
+              "id": "ahi/no-commit-to-branch",
+              "shortDescription": {
+                "text": "Don't Commit to Branch"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports XML that is not well-formed. External entities are not resolved and no network request is made. Upstream check-xml."
+              },
+              "id": "ahi/check-xml",
+              "shortDescription": {
+                "text": "Check Xml"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports AWS access key ids (AKIA, ASIA, ABIA, ACCA plus 16 uppercase letters or digits) and 40-character secret, session, or security tokens assigned on the same line. Does not read ~/.aws, credential files, or the environment. Upstream detect-aws-credentials instead searches for secrets it loaded from those files; ahi cannot do that inside a sandbox without a home directory."
+              },
+              "id": "ahi/aws-credentials",
+              "shortDescription": {
+                "text": "Detect Aws Credentials"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports GitHub blob links whose revision is not a 4 to 64 digit hex commit and that point at a line number. A 40-hex permalink is allowed. --additional-github-domain adds a host. Upstream check-vcs-permalinks."
+              },
+              "id": "ahi/vcs-permalinks",
+              "shortDescription": {
+                "text": "Check Vcs Permalinks"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Reports a leading UTF-8 BOM (EF BB BF). The check is report-only. `ahi run --fix` does not strip the marker."
+              },
+              "id": "ahi/byte-order-marker",
+              "shortDescription": {
+                "text": "Fix Utf-8 Byte Order Marker"
               }
             },
             {

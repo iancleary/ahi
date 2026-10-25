@@ -20,6 +20,7 @@ path = "src/main.rs"
 # Exact pins. Caret ranges resolve to 2026 releases whose MSRV is above 1.83.
 [dependencies]
 clap = { version = "=4.5.23", features = ["derive"] }
+quick-xml = "=0.41.0"
 regex = "=1.11.1"
 serde = { version = "=1.0.216", features = ["derive"] }
 serde_json = "=1.0.134"

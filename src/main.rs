@@ -3,13 +3,14 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use ahi::audit::AuditEvent;
 use ahi::check::{all_checks, builtin_by_id};
 use ahi::config::discover_config;
 use ahi::git::repo_root;
 use ahi::output::render;
 use ahi::runner::{self, Selection};
 use ahi::store::{self, Store};
-use ahi::{audit, config, VERSION};
+use ahi::{config, migrate, policy, VERSION};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -56,8 +57,20 @@ enum Command {
     Fetch,
     /// Move locked repos to newer commits.
     Autoupdate,
-    /// Rewrite legacy pre-commit config keys.
-    Migrate,
+    /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
+    ///
+    /// Prints a report and a suggested config. Does not fetch remotes and does not
+    /// change `ahi run`. Writes only with `--write`, and refuses to replace an
+    /// existing file unless `--force` is also set.
+    Migrate {
+        /// Write the suggested config over the file that was read.
+        /// Refuses when that file exists unless `--force` is set.
+        #[arg(long)]
+        write: bool,
+        /// Replace an existing file. Does nothing unless `--write` is also set.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -85,9 +98,17 @@ struct RunArgs {
     /// Stop after the first failing hook.
     #[arg(long)]
     fail_fast: bool,
-    /// Reserved. Failures already include the hook id.
+    /// Show output from a passing local hook. Failures always show output.
     #[arg(long, short = 'v')]
     verbose: bool,
+    /// Rewrite end-of-file, trailing-whitespace, and mixed-line-ending.
+    ///
+    /// Other checks stay report-only. A hook argument `--fix` enables the same
+    /// three checks. `--fix=no` on mixed-line-ending stays report-only.
+    /// Writes are atomic, do not follow symlinks, and skip files outside the
+    /// selected set. A file with unstaged changes is left unchanged.
+    #[arg(long)]
+    fix: bool,
     /// Commit-message path for commit-msg and prepare-commit-msg.
     #[arg(long)]
     commit_msg_filename: Option<String>,
@@ -110,7 +131,7 @@ fn main() -> ExitCode {
         Command::Lock | Command::Verify | Command::Fetch | Command::Autoupdate => {
             unimplemented_until("v0.2")
         }
-        Command::Migrate => unimplemented_until("v0.2"),
+        Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
     }
 }
 
@@ -182,6 +203,7 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
     } else {
         Selection::Staged
     };
+    let stage_fixes = matches!(selection, Selection::Staged);
     let mut skip = BTreeSet::new();
     if let Ok(raw) = env::var("SKIP") {
         for part in raw.split(',') {
@@ -200,6 +222,9 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
         fail_fast: args.fail_fast,
         skip,
         commit_msg_filename: args.commit_msg_filename.as_deref(),
+        fix: args.fix,
+        stage_fixes,
+        verbose: args.verbose,
     }) {
         Ok(report) => report,
         Err(err) => {
@@ -215,7 +240,6 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
         }
     };
     print!("{rendered}");
-    let _ = args.verbose;
     let cache = store::cache_dir(cli.cache_dir.as_deref());
     if let Ok(store) = Store::open(&cache) {
         let ids: Vec<String> = report.hooks.iter().map(|hook| hook.id.clone()).collect();
@@ -225,7 +249,26 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
             runner::Outcome::Failed => "failed",
             runner::Outcome::Skipped => "skipped",
         };
-        if let Err(err) = audit::append(store.root(), "run", &root, &ids, outcome, findings) {
+        let local_env: Vec<ahi::audit::HookEnv<'_>> = report
+            .local_env
+            .iter()
+            .map(|item| ahi::audit::HookEnv {
+                hook: &item.hook,
+                names: &item.names,
+            })
+            .collect();
+        if let Err(err) = ahi::audit::append(
+            store.root(),
+            &AuditEvent {
+                command: "run",
+                repo: &root,
+                hook_ids: &ids,
+                outcome,
+                finding_count: findings,
+                local_hooks: &report.local_hooks,
+                local_env: &local_env,
+            },
+        ) {
             eprintln!("warning: {err}");
         }
     }
@@ -299,8 +342,61 @@ fn explain(id: &str) -> ExitCode {
     if let Some(upstream) = check.upstream() {
         println!("upstream hook: {upstream}");
     }
+    if check.fixes() {
+        println!(
+            "fixer: report-only unless `ahi run --fix` or a hook argument `--fix` is set. The rewrite is atomic, does not follow symlinks, and only touches files in the selected set. ahi refuses the rewrite when that file has unstaged changes. There is no stash."
+        );
+    }
+    if check.default_always_run() {
+        println!("always_run: true when the config omits always_run");
+    }
+    if !check.default_pass_filenames() {
+        println!("pass_filenames: false when the config omits pass_filenames");
+    }
     println!("version: ahi {VERSION}");
+    println!();
+    let loaded = env::current_dir().ok().and_then(|cwd| {
+        repo_root(&cwd)
+            .ok()
+            .and_then(|root| policy::load_policy(&root).ok())
+    });
+    print_local_env(loaded.as_ref());
     ExitCode::from(0)
+}
+
+fn print_local_env(policy: Option<&ahi::policy::Policy>) {
+    println!(
+        "local hook environment (names only, if set): {}",
+        ahi::base_env_names().join(", ")
+    );
+    println!(
+        "toolchain pass-through (default, if set): {}",
+        ahi::default_toolchain_names().join(", ")
+    );
+    println!(
+        "toolchain pass-through adds names a tool needs to find an install that is already there. ahi does not install, update, or cache a toolchain. Credential names (TOKEN, SECRET, PASSWORD, KEY, AWS_*, AZURE_*, GITHUB_*) are refused."
+    );
+    let Some(policy) = policy else {
+        return;
+    };
+    if policy.toolchain_env.is_empty() {
+        println!("toolchain pass-through (policy): (none)");
+    } else {
+        println!(
+            "toolchain pass-through (policy): {}",
+            policy.toolchain_env.join(", ")
+        );
+    }
+    for hook in &policy.trusted_system_hooks {
+        if hook.toolchain_env.is_empty() {
+            continue;
+        }
+        println!(
+            "toolchain pass-through ({}): {}",
+            hook.id,
+            hook.toolchain_env.join(", ")
+        );
+    }
 }
 
 fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> ExitCode {
@@ -336,6 +432,106 @@ fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> 
     }
     println!("scratch: {}", store::scratch_dir().display());
     println!("sandbox: not probed in this version");
+    println!(
+        "network: not enforced in this version (no sandbox); local hook environments are scrubbed"
+    );
+    match env::current_dir().and_then(|cwd| {
+        repo_root(&cwd)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
+    }) {
+        Ok(root) => match policy::load_policy(&root) {
+            Ok(loaded) => {
+                let path = root.join("ahi.policy.yaml");
+                if loaded.path_present {
+                    println!("policy: {}", path.display());
+                } else {
+                    println!("policy: absent (deny by default)");
+                }
+                let pinned = loaded
+                    .trusted_system_hooks
+                    .iter()
+                    .filter(|hook| hook.entry.is_some())
+                    .count();
+                let bare = loaded.trusted_system_hooks.len() - pinned;
+                println!(
+                    "trusted system hooks: {pinned} entry-pinned, {bare} id-only (id-only does not authorize)"
+                );
+                println!(
+                    "local execution: system and script when the policy pins the hook id and the exact entry; other languages are refused"
+                );
+                println!(
+                    "remote hooks: not executed and not substituted; use repo: builtin or `ahi migrate` for a best-effort suggestion"
+                );
+                println!(
+                    "fix: `ahi run --fix` rewrites end-of-file, trailing whitespace, and mixed line endings; other checks stay report-only"
+                );
+                print_local_env(Some(&loaded));
+            }
+            Err(err) => println!("policy: {err}"),
+        },
+        Err(err) => println!("policy: {err}"),
+    }
+    ExitCode::from(0)
+}
+
+fn migrate_config(config: Option<&std::path::Path>, write: bool, force: bool) -> ExitCode {
+    if force && !write {
+        eprintln!("error: --force does not write a file; pass --write --force to replace one");
+        return ExitCode::from(2);
+    }
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let root = match repo_root(&cwd) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let path = match discover_config(&root, config) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let original = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let suggestion = match migrate::suggest(&original, &path.display().to_string()) {
+        Ok(suggestion) => suggestion,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    print!("{}", suggestion.report);
+    print!("{}", suggestion.suggested);
+    if !write {
+        eprintln!("left {} unchanged", path.display());
+        return ExitCode::from(0);
+    }
+    if path.exists() && !force {
+        eprintln!(
+            "error: refusing to overwrite {}; pass --write --force to replace it",
+            path.display()
+        );
+        return ExitCode::from(1);
+    }
+    if let Err(err) = std::fs::write(&path, &suggestion.suggested) {
+        eprintln!("error: {err}");
+        return ExitCode::from(1);
+    }
+    eprintln!("wrote {}", path.display());
     ExitCode::from(0)
 }
 

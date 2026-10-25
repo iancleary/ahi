@@ -60,8 +60,8 @@ What that means for ahi:
 - A drop-in bug-for-bug reimplementation of every pre-commit language, hook, and command. [prek](https://prek.j178.dev/dev/) already pursues that, and it auto-installs toolchains. ahi will not.
 - Publishing to crates.io, cutting a release, pushing a git tag, or running `scripts/cut-release.sh`. The release script and the tag-gated publish workflow are in the tree so a later release has a path. This work does not invoke them. SemVer versus calendar versioning is an open decision.
 - Hosting or calling pre-commit.ci, or any other third-party CI service. **Inferred.**
-- Executing arbitrary hook languages in v0.1. Those hooks fail with an explicit error.
-- Rewriting the worktree in v0.1. Builtin checks report. `--fix` waits until the partial-commit stash protocol is implemented and tested, because a fixer that writes the working tree can destroy unstaged work.
+- Executing arbitrary hook languages. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Other languages fail with an explicit error. Remote repos are not fetched and are not substituted at run time.
+- Rewriting the worktree except for three explicit fixers. `ahi run --fix` rewrites end-of-file, trailing whitespace, and mixed line endings. It does not stash. A file with unstaged changes is left alone. Other builtins stay report-only. The partial-commit stash protocol is still not implemented.
 - A new configuration language. `prek.toml` and `lefthook.yml` / `hk.pkl` are out of scope. ahi reads pre-commit YAML, plus an optional repo-local policy file that upstream pre-commit ignores.
 
 ## Prior art
@@ -93,7 +93,7 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 
 ### hk
 
-[hk](https://github.com/jdx/hk) (docs at [hk.jdx.dev](https://hk.jdx.dev/why-hk.html)) runs project checks and fixers concurrently, with per-file read/write locks so two fixers do not clobber the same file. Configuration is Pkl (`hk.pkl`), not pre-commit YAML. It can stash unstaged changes during `pre-commit` (`stash = "git"`) and has a `hk migrate pre-commit` path from the pre-commit framework. Tool installation is delegated to mise or the existing `PATH`. ahi does not read `hk.pkl`. The stash and "check versus fix" split are design references; v0.1 is check-only.
+[hk](https://github.com/jdx/hk) (docs at [hk.jdx.dev](https://hk.jdx.dev/why-hk.html)) runs project checks and fixers concurrently, with per-file read/write locks so two fixers do not clobber the same file. Configuration is Pkl (`hk.pkl`), not pre-commit YAML. It can stash unstaged changes during `pre-commit` (`stash = "git"`) and has a `hk migrate pre-commit` path from the pre-commit framework. Tool installation is delegated to mise or the existing `PATH`. ahi does not read `hk.pkl`. The stash and "check versus fix" split are design references. v0.1 checks by default. `ahi run --fix` rewrites three whitespace checks and refuses a dirty unstaged file instead of stashing.
 
 ### Where ahi differs
 
@@ -118,8 +118,8 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 | `.pre-commit-hooks.yaml` | parsed by the library | used when fetching remote repos (v0.2+) | Same strictness: unknown keys error. |
 | Top-level `repos`, `files`, `exclude`, `fail_fast`, `default_stages`, `default_install_hook_types`, `default_language_version`, `minimum_pre_commit_version` | parsed; `files` / `exclude` / `fail_fast` / `default_stages` affect `ahi run` | install uses `default_install_hook_types` | `default_stages` default remains "all stages", matching upstream. |
 | `ci:` | accepted as a mapping and retained on the config struct | not acted on | ahi does not talk to pre-commit.ci. Unknown nested keys are errors, unlike upstream, which accepts any dict. Schema of the mapping matches [pre-commit.ci](https://pre-commit.ci/) / [`pre_commit_ci_config.py`](https://github.com/pre-commit-ci/pre-commit-ci-config/blob/main/pre_commit_ci_config.py). |
-| `repo` URL | parsed, not cloned | v0.2 lock + fetch, v0.3 execute | No network in v0.1. A non-builtin repo does not run. |
-| `repo: local` | parsed | execution in v0.3 for the supported language set | `language: system` and `script` (and the modern names `unsupported` and `unsupported_script`) are refused unless the hook id is listed in the trusted-system policy. |
+| `repo` URL | parsed, not cloned, not substituted | v0.2 lock + fetch, v0.3 execute | No network on `run`. A remote hook fails with an explicit error. `ahi migrate` may suggest a builtin id; `ahi run` does not apply that table. |
+| `repo: local` | `language: system` and `script` run when the policy pins the id and the exact `entry` | other languages in v0.3 | The entry is split without a shell. A bare id does not authorize. `args` are not part of the pin. |
 | `repo: meta` | parsed | not scheduled | The three meta hooks (`check-hooks-apply`, `check-useless-excludes`, `identity`) are recognized. v0.1 does not run them. `entry` remains forbidden, matching upstream. |
 | `repo: builtin` | runs |  | ahi extension, same sentinel idea as prek. No `rev` key. |
 | `rev` | required for URL repos, stored as a string | v0.2: must resolve to a full 40-hex commit recorded in `ahi.lock` | Tags and branches are not accepted at `ahi run` once a lockfile is required (v0.2). v0.1 does not fetch, so it cannot resolve tags. |
@@ -131,11 +131,11 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 | `language: fail` and `language: pygrep` | recognized, not executed | v0.3, no runtime needed | Good candidates to pull forward. Not in the v0.1 execution set. |
 | Languages other than the v0.3 set | parsed if they are real pre-commit language names | unsupported | A hook whose language is outside the implemented set fails that hook with `not supported until v0.3` (or "not planned", for languages listed as unsupported). It is not skipped. |
 | `SKIP` | honored (comma-separated hook ids and aliases) |  | Matches [`_get_skips`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/commands/run.py). |
-| xargs-style batching | pure function, tested | used when a hook is a subprocess (v0.3) | Builtin checks run in-process on the full filtered list. |
+| xargs-style batching | used for `repo: local` system and script hooks. Batches run one after another | same partition for later languages | Builtin checks run in-process on the full filtered list. `SC_ARG_MAX` is not read. |
 | Partial-commit stash | not invoked | required before any check may write the worktree | Specified below so the later implementation has a contract. |
 | Git hook shim, `install`, `uninstall`, `init-templatedir`, git 2.54 `hook.<name>.event` config | not installed | after the runner is safe to put on `git commit` | v0.1 `install` / `uninstall` exit with a clear "not implemented yet" error. |
-| `autoupdate`, `try-repo`, `migrate-config`, `clean`, `gc`, `sample-config`, `validate-config`, `validate-manifest`, `hazmat` | corresponding ahi commands that exist early exit with the phase that will implement them, except `migrate` which is the ahi name for config migration | see roadmap | ahi does not implement `hazmat` (`cd`, `ignore-exit-code`, `n1`). Those entry prefixes are a hard error if encountered, not a silent pass. Upstream documents them as usually a bad idea ([docs](https://pre-commit.com/#pre-commit-hazmat)). |
-| Worktree rewriting / formatters | report only | `--fix` only with the stash protocol | Intentional v0.1 limit. |
+| `autoupdate`, `try-repo`, `migrate-config`, `clean`, `gc`, `sample-config`, `validate-config`, `validate-manifest`, `hazmat` | corresponding ahi commands that exist early exit with the phase that will implement them. `ahi migrate` is a different command (best-effort suggestion, not upstream `migrate-config`) | see roadmap | ahi does not implement `hazmat` (`cd`, `ignore-exit-code`, `n1`). Those entry prefixes are a hard error if encountered, not a silent pass. Upstream documents them as usually a bad idea ([docs](https://pre-commit.com/#pre-commit-hazmat)). |
+| Worktree rewriting / formatters | `ahi run --fix` for end-of-file, trailing whitespace, and mixed line endings. No stash. Unstaged files are refused. Writes are atomic and do not follow symlinks | stash protocol still later | Other builtins, including the UTF-8 BOM check, stay report-only. |
 
 Exit codes for `ahi run`:
 
@@ -256,14 +256,18 @@ version: 1
 repo_allow: []
 # Runtimes ahi may invoke. It will not download them.
 runtime_allow: []
-# Hook ids allowed to use language `unsupported` (system) or `unsupported_script` (script).
+# Each item is an id plus the exact entry string. A bare id parses and does not authorize.
 trusted_system_hooks: []
-# Hook ids allowed to open the network. Default is none. Enforced once sandboxes exist;
-# until then, external execution is refused rather than allowed-with-network.
+# Hook ids allowed to open the network. Default is none. Enforced once sandboxes exist.
+# A trusted local hook is not sandboxed in this version, so the network is not blocked for it.
 network_hooks: []
+# Extra toolchain location names for every local system/script hook.
+# Names only, never values. Credential names are a parse error.
+# The default pass-through (CARGO_HOME, RUSTUP_HOME, RUSTUP_TOOLCHAIN) is not listed here.
+toolchain_env: []
 ```
 
-Unknown keys are errors. v0.1 parses the file when it is present and rejects a malformed one. v0.1 does not fetch, so `repo_allow` is not consulted yet. A `language: unsupported` or `unsupported_script` hook is refused in every version unless its id is in `trusted_system_hooks`.
+Unknown keys are errors. v0.1 parses the file when it is present and rejects a malformed one. v0.1 does not fetch, so `repo_allow` is not consulted yet. A `language: system` or `script` hook (stored as `unsupported` or `unsupported_script`) runs only when `trusted_system_hooks` contains that id and the exact `entry` string. `args` are not part of the pin. A bare id does not authorize. A pin may also set `toolchain_env` to extra location names for that entry. Those names are added to the global `toolchain_env` list.
 
 ### Filtering
 
@@ -369,8 +373,8 @@ Upstream, for the default staged run only (`stash = not all_files and not files`
 ahi adopts that protocol before any builtin or hook may write a file, with these extra rules:
 
 - The patch is checksummed and not deleted until apply has succeeded, or until the rollback apply has succeeded. A failed rollback is a fatal error that prints the patch path and does not exit 0.
-- `--fix` is refused when the worktree is dirty and the patch cannot be written.
-- v0.1 has no writers, so it does not stash and cannot lose unstaged changes by editing them. Read-only checks still only *report* on the filtered path list; they do not pretend to have isolated the index. A dirty unstaged hunk in a staged file can therefore affect a v0.1 report. `ahi run` prints a one-line warning when the staged run sees unstaged changes. The stash isolation lands together with `--fix`.
+- `--fix` is refused for a file that has unstaged changes. ahi does not stash, so it will not destroy that hunk and it also will not isolate the index.
+- Read-only checks still only *report* on the filtered path list; they do not pretend to have isolated the index. A dirty unstaged hunk in a staged file can therefore affect a report. `ahi run` prints a one-line warning when the staged run sees unstaged changes. The stash isolation is still specified and not implemented. `ahi run --fix` writes only the three fixer checks, only paths in the selected set, atomically, and never through a symlink.
 
 ### Git hook shim
 
@@ -378,7 +382,7 @@ Upstream's generated hook is [`hook-tmpl`](https://github.com/pre-commit/pre-com
 
 ahi's eventual shim calls `ahi hook-impl` with the same per-type argument counts. It is not installed in v0.1. The git 2.54 `git config set hook.<name>.event` form is documented by pre-commit as new in 4.6.0 ([docs](https://pre-commit.com/#usage-with-git-254-hook-configuration)). **Unverified:** this spec did not confirm against Git's own release notes that 2.54 is the version that introduced that config. ahi will not require that mechanism. The shell shim remains the portable install path.
 
-`migrate-config` upstream rewrites three historical shapes ([`migrate_config.py`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/commands/migrate_config.py)): a top-level list becomes `repos:`, the key `sha` becomes `rev`, `language: python_venv` becomes `python`, and stages `commit` / `push` / `merge-commit` gain a `pre-` prefix. `ahi migrate` will perform those rewrites and nothing that changes a pinned rev. Not in v0.1.
+`migrate-config` upstream rewrites three historical shapes ([`migrate_config.py`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/commands/migrate_config.py)): a top-level list becomes `repos:`, the key `sha` becomes `rev`, `language: python_venv` becomes `python`, and stages `commit` / `push` / `merge-commit` gain a `pre-` prefix. `ahi migrate` does not perform those rewrites. It is a best-effort reading aid: it prints which hook ids have an obvious `repo: builtin` equivalent, which `repo: local` system and script hooks can be carried over (with the policy snippet), and which hooks cannot be ported, with a reason. It does not guarantee feature parity or the same file scope. It prints the suggestion and leaves the file unchanged unless `--write` is set, and it refuses to replace an existing file unless `--force` is also set. The id table is not consulted by `ahi run`. A run-time mapping from remote `pre-commit-hooks` ids onto builtins was removed; remote hooks keep failing with the explicit not-executed error. Legacy stage names stay a parse error.
 
 ## Threat model
 
@@ -400,11 +404,11 @@ Trust boundaries:
 | Config | Untrusted data. Parsed with limits (file size cap 1 MiB, depth cap, no YAML aliases/anchors — anchors are rejected so a config cannot expand into a billion nodes). Inside the sandbox the same file is editable by the sandbox user, so the run is advisory and CI is the backstop. |
 | `rev` | Not a branch. v0.2 stores the full commit and a tree digest. Tags are resolved only by `ahi lock` / `ahi autoupdate`, which are online on purpose. |
 | Cache | Content-addressed. Run verifies before use. The store opens read-only when the object directory cannot be written. The cache path is not inside the repository being checked, and it is not assumed to live under a home directory. |
-| Network | `ahi fetch` and `ahi lock` / `ahi autoupdate` may use the network. `ahi run`, `ahi verify`, `ahi install`, and the builtin checks may not. |
+| Network | `ahi fetch` and `ahi lock` / `ahi autoupdate` may use the network. Builtin checks do not open one. A trusted local hook is not sandboxed in this version, so ahi cannot stop that process from opening a socket. |
 | Runtimes | A name on `runtime_allow` plus a binary already on `PATH` or an explicit path. No nodeenv, no rustup installer, no Go tarball. |
-| `system` / `script` | Denied unless the hook id is in `trusted_system_hooks`. |
-| Network-using hooks | Denied unless the hook id is in `network_hooks`, and even then only inside a sandbox that can actually block the network. If the sandbox cannot, the hook is denied. |
-| Environment | Subprocesses get a scrubbed environment (v0.3). |
+| `system` / `script` | Denied unless `trusted_system_hooks` has the hook id and the exact `entry`. A bare id does not authorize. |
+| Network-using hooks | `network_hooks` is the allowlist once a sandbox can block the network. This version has no sandbox, so it does not pretend the allowlist is enforced. |
+| Environment | Local system and script hooks get the scrubbed environment below. Toolchain pass-through is names of locations, never credentials, and never an installer. |
 | Files the check reads | Opened with `O_NOFOLLOW` where the OS supports it. Paths that escape the repo root are findings, not inputs. |
 
 ## Security behavior
@@ -440,12 +444,15 @@ Each locked artifact has a version and at least one sha256. `ahi fetch` checks t
 
 ### `system` / `script`, network, environment
 
-Denied as described under the policy file. When subprocess execution exists, the environment passed to a hook is:
+A local system or script hook runs only with an exact-entry pin, as described under the policy file. There is no sandbox in this version, so the network is not blocked for that process. ahi discovers and runs tools that are already installed, including a toolchain manager the image already provides. It passes through the variables those tools need to locate themselves. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 
-- Kept, if set: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `TERM`.
-- Dropped: everything else, including `GITHUB_TOKEN`, `GH_TOKEN`, `AWS_*`, `AZURE_*`, `NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`, `SSH_AUTH_SOCK`, and any variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`.
+The environment passed to the hook is names only at the policy layer. Values come from the process that invoked ahi, and only for allowed names. `ahi explain` prints the allowlist. The audit line records the names actually passed to each local hook and does not record values.
 
-`SSH_AUTH_SOCK` is dropped on purpose. Upstream documents it as required for `git@` clones ([tox section](https://pre-commit.com/#usage-with-tox)). ahi cloning happens in `ahi fetch`, which is allowed a separate, unscrubbed environment. Hook code does not get the agent socket.
+- Kept, if set: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATHEXT`, `TERM`. The match is case-sensitive on Unix. On Windows the process block is case-insensitive, so `Path` matches `PATH`.
+- Toolchain pass-through, default, if set: `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`. `CARGO_HOME` and `RUSTUP_HOME` are the directories an already installed cargo and rustup use. Images and CI often set them outside `$HOME`; dropping them makes the rustup proxy look in the wrong place and fail to choose a toolchain. `RUSTUP_TOOLCHAIN`, when set, selects which installed toolchain to run. None of these download or update a toolchain.
+- Toolchain pass-through, policy only, not enabled by default: `GOROOT` and `GOPATH` (Go), `VIRTUAL_ENV` (an existing Python virtualenv), `NVM_DIR` (an existing Node version manager). Listing `NVM_DIR` does not enable `language: node` and does not run `npm install`.
+- Not done: installing a Rust toolchain, `rustup update`, `cargo install`, creating a virtualenv, `npm install`, or caching dependencies for a local hook. `additional_dependencies` on a local hook is still refused.
+- Refused, even if a policy lists the name: any name containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and any name starting with `AWS_`, `AZURE_`, or `GITHUB_`. The policy parse fails with that name. `CARGO_REGISTRY_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, and `SSH_AUTH_SOCK` stay dropped. `SSH_AUTH_SOCK` is dropped on purpose. Upstream documents it as required for `git@` clones ([tox section](https://pre-commit.com/#usage-with-tox)). ahi cloning happens in `ahi fetch`, which is allowed a separate, unscrubbed environment. Hook code does not get the agent socket.
 
 `PRE_COMMIT=1` is set, matching upstream since 2.5.0, so hooks that branch on it keep working.
 
@@ -469,16 +476,16 @@ Builtin checks stay in-process and offline. They do not need a sandbox to avoid 
 ### Signatures, audit, path safety
 
 - **Signatures on fetched hook repos.** A lower-priority v0.2 field, not the way Ian produces commits. Where a fetched hook commit carries a gitsign or sigstore signature, `ahi fetch` may verify it and record `signature: verified | absent | failed | unverified` in the lockfile. `failed` is a hard error. `absent` is allowed and reported by `ahi verify`, because most hook repos are not signed today. A missing verifier is `unverified`, and `ahi verify --require-signatures` fails closed. ahi does not import or sign the user's commit on the host. **Unverified:** no gitsign bundle was validated while writing this spec.
-- **Audit log.** Append-only JSON lines in the cache directory's `audit.log`: time, command, repo root, hook id, outcome, finding count. No file contents, no environment, no tokens. v0.1 writes one record per `ahi run` when the cache is writable. A read-only cache skips the record with a warning and does not fail the run.
+- **Audit log.** Append-only JSON lines in the cache directory's `audit.log`: time, command, repo root, hook ids, outcome, finding count, local hook ids that ran, and `local_env` (each local hook and the environment names passed to it). No file contents, no environment values, no tokens. v0.1 writes one record per `ahi run` when the cache is writable. A read-only cache skips the record with a warning and does not fail the run.
 - **Path traversal.** Filenames from git and from `--files` are normalized and must stay inside the repo root. A symlink whose target escapes the root is a finding of `ahi/symlinks`, and content checks do not follow it.
 - **Filename safety.** NUL and newline in a path are rejected. When subprocesses exist, filenames are passed after `--` and never through a shell. The v0.1 runner does not invoke a shell for builtins.
-- **Stash.** The protocol in [Partial commits](#partial-commits). No v0.1 code path writes a source file.
+- **Stash.** The protocol in [Partial commits](#partial-commits). It is not implemented. `ahi run --fix` can write a selected source file for the three fixer checks, and it refuses that write when the file has unstaged changes.
 
 ## Builtin check catalog
 
 Builtins are offline, in-process, and selected with `repo: builtin`. The canonical id is `ahi/<name>`. Aliases exist so a short name also resolves. Defaults for `types` apply when the config hook does not set `types`.
 
-Checks report findings. They do not modify files in v0.1. Several upstream ids are fixers (`trailing-whitespace`, `end-of-file-fixer`, `mixed-line-ending`). ahi's v0.1 counterparts detect the same condition and report it. `--fix` is a later phase.
+Checks report findings. `ahi/end-of-file`, `ahi/trailing-whitespace`, and `ahi/line-endings` rewrite a selected file only when `ahi run --fix` or a hook argument `--fix` is set, then fail the hook because the file changed. Without that flag they only report. Other checks, including `ahi/byte-order-marker`, never write.
 
 Severity is `error` unless noted. A single error finding fails the hook.
 
@@ -486,8 +493,8 @@ Severity is `error` unless noted. A single error finding fails the hook.
 
 | Id | Alias | Default types | Behavior |
 | --- | --- | --- | --- |
-| `ahi/trailing-whitespace` | `trailing-whitespace` | `text` | A line with trailing whitespace. Markdown (`.md`, `.markdown`, and any extra extensions passed as `args: [--markdown-linebreak-ext=md,markdown]`) may keep a trailing double space on a non-blank line, matching [`trailing_whitespace_fixer.py`](https://github.com/pre-commit/pre-commit-hooks/blob/main/pre_commit_hooks/trailing_whitespace_fixer.py). `--chars` is accepted as an argument. |
-| `ahi/end-of-file` | `end-of-file-fixer` | `text` | Non-empty file whose last line ending is missing, or that has more than one trailing newline sequence. Empty files are fine. Logic matches the cases in [`end_of_file_fixer.py`](https://github.com/pre-commit/pre-commit-hooks/blob/main/pre_commit_hooks/end_of_file_fixer.py) without writing. |
+| `ahi/trailing-whitespace` | `trailing-whitespace` | `text` | A line with trailing whitespace. Markdown (`.md`, `.markdown`, and any extra extensions passed as `args: [--markdown-linebreak-ext=md,markdown]`) may keep a trailing double space on a non-blank line, matching [`trailing_whitespace_fixer.py`](https://github.com/pre-commit/pre-commit-hooks/blob/main/pre_commit_hooks/trailing_whitespace_fixer.py). `--chars` is accepted as an argument. Report-only unless `--fix`. |
+| `ahi/end-of-file` | `end-of-file-fixer` | `text` | Non-empty file whose last line ending is missing, or that has more than one trailing newline sequence. Empty files are fine. Logic matches the cases in [`end_of_file_fixer.py`](https://github.com/pre-commit/pre-commit-hooks/blob/main/pre_commit_hooks/end_of_file_fixer.py). Report-only unless `--fix`. |
 | `ahi/merge-conflict` | `check-merge-conflict` | `text` | A line starting with `<<<<<<< `, `=======` (including the newline forms), or `>>>>>>> `. Upstream returns success when git is not in a merge ([source](https://github.com/pre-commit/pre-commit-hooks/blob/main/pre_commit_hooks/check_merge_conflict.py)). ahi always scans. Conflict markers are worth failing on after the merge is over. |
 | `ahi/large-files` | `check-added-large-files` | `file` | `ceil(bytes / 1024) > max_kb`. Default `max_kb` is 500, matching upstream. Argument `--maxkb=N`. Upstream by default only checks newly added files unless `--enforce-all`. ahi checks every selected file (the `--enforce-all` behavior), because "added" is surprising in CI. Git LFS skip is not in v0.1; a pointer file is small anyway. |
 | `ahi/case-conflict` | `check-case-conflict` | `file` | Two tracked or selected paths that differ only by case, including parent directories. Algorithm matches [`check_case_conflict.py`](https://github.com/pre-commit/pre-commit-hooks/blob/main/pre_commit_hooks/check_case_conflict.py). |
@@ -502,6 +509,14 @@ Severity is `error` unless noted. A single error finding fails the hook.
 | `ahi/dockerfile` | none | `dockerfile` | See below. |
 | `ahi/shell-strict` | none | `shell` | See below. |
 | `ahi/committed-dotenv` | none | `file` | A tracked or selected file whose base name is `.env`, or `.env.*`, except `.env.example`, `.env.sample`, and `.env.template`. Does not flag `versions/*.env` (those are pin files, not dotenv files). |
+| `ahi/line-endings` | `mixed-line-ending` | `text` | Mixed CR, LF, and CRLF in one file. Default is report-only, like upstream `--fix=no`. `ahi run --fix` rewrites with `--fix=auto` (LF wins a tie). A hook argument `--fix=lf`, `--fix=crlf`, `--fix=cr`, or `--fix=auto` rewrites. `--fix=no` stays report-only. |
+| `ahi/shebang-executable` | `check-executables-have-shebangs` | `text`, `executable` | An executable text file with no `#!` shebang. Uses the git index mode. |
+| `ahi/executable-shebang` | `check-shebang-scripts-are-executable` | `text` | A tracked text file with a shebang that is not executable in the git index. Untracked files are skipped. |
+| `ahi/no-commit-to-branch` | `no-commit-to-branch` | (none; `always_run` defaults to true and `pass_filenames` to false) | The current branch is `main` or `master`, unless `--branch` / `-b` names a different set. `--pattern` / `-p` is start-anchored. A detached HEAD passes. |
+| `ahi/check-xml` | `check-xml` | `xml` | Not well-formed XML (unclosed elements, multiple roots, missing root). A doctype with `SYSTEM`, `PUBLIC`, or `ENTITY` is refused. External entities are not resolved and no network request is made. Parsed with quick-xml 0.41. |
+| `ahi/aws-credentials` | `detect-aws-credentials` | `text` | An access key id (`AKIA`, `ASIA`, `ABIA`, or `ACCA` plus 16 uppercase letters or digits) or a 40-character secret, session, or security token assigned on the same line. Scans the selected files only. Does not read `~/.aws`, a credentials file, or the environment. `--credentials-file` is refused. This is narrower than upstream, which loads secrets from those files and searches for the exact bytes. |
+| `ahi/vcs-permalinks` | `check-vcs-permalinks` | `text` | A GitHub blob link whose revision is not 4 to 64 hex digits and that points at a line number. A 40-hex permalink is allowed. `--additional-github-domain` adds a host. |
+| `ahi/byte-order-marker` | `fix-byte-order-marker` | `text` | A leading UTF-8 BOM (`EF BB BF`). Report-only. `--fix` does not strip it. |
 
 #### `ahi/github-actions`
 
@@ -533,9 +548,6 @@ Specified so the ids stay stable. Each returns "not implemented" if somehow sele
 
 | Id | Intent |
 | --- | --- |
-| `ahi/shebang-executable` | Executable text files have a `#!` shebang. Uses git file mode, like upstream `check-executables-have-shebangs`. |
-| `ahi/executable-shebang` | A text file with a shebang is marked executable in git. Upstream `check-shebang-scripts-are-executable`. |
-| `ahi/line-endings` | Report mixed CR, LF, and CRLF inside one file. Counterpart of upstream `mixed-line-ending` in check mode (`--fix=no`). Default is report-only. |
 | `ahi/file-mode` | A text file tracked as executable without a shebang, or a mode outside `100644` / `100755`. Cross-platform normalization so WSL and Windows agree. |
 | `ahi/version-pins` | Files under `versions/*.env` (or a configured directory) contain `NAME_VERSION=...` and `NAME_SHA256_<ARCH>=<64 hex>` for each architecture the file claims. A version key with no checksum, or a checksum that is not 64 hex digits, is an error. The directory default is `versions`. |
 | `ahi/secrets` | A second, narrower pass beyond private-key headers (cloud tokens with a known prefix). Not an entropy scanner. |
@@ -552,13 +564,13 @@ Binary name: `ahi`. Global flags, matching the upstream shape where it exists:
 
 | Command | Phase | Behavior |
 | --- | --- | --- |
-| `ahi run [HOOK]` | v0.1 | Run selected hooks. Flags: `--all-files`, `--files <PATH>...`, `--from-ref`, `--to-ref`, `--hook-stage`, `--format text\|json\|sarif`, `--fail-fast`, `--verbose`. |
+| `ahi run [HOOK]` | v0.1 | Run selected hooks. Flags: `--all-files`, `--files <PATH>...`, `--from-ref`, `--to-ref`, `--hook-stage`, `--format text\|json\|sarif`, `--fail-fast`, `--verbose`, `--fix`. |
 | `ahi list-checks` | v0.1 | Builtin ids, aliases, one-line descriptions. `--format text\|json`. |
 | `ahi explain <ID>` | v0.1 | Description, defaults, arguments, and the upstream hook it corresponds to, if any. |
 | `ahi install` / `uninstall` | shim phase (after v0.3, before relying on it in git) | v0.1 exits 1 with "not implemented until the hook shim phase". |
 | `ahi lock` / `verify` / `fetch` / `autoupdate` | v0.2 | v0.1 exits 1 naming v0.2. |
 | `ahi doctor` | v0.1 prints version, git version, config path, cache path, whether that cache is writable or read-only, the scratch directory, and `sandbox: not probed in this version` | v0.4 reports whether an outer sandbox was detected and which host backend, if any, would be used. |
-| `ahi migrate` | with v0.2 | v0.1 exits 1 naming the phase. |
+| `ahi migrate` | v0.1 | Best-effort suggestion. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Writes only with `--write`, and refuses to replace an existing file unless `--force` is set. Not upstream `migrate-config`. |
 | `ahi hook-impl` | with install | Hidden. Not in v0.1. |
 
 `ahi run` text format follows the upstream rhythm: a hook title, then `Passed`, `Failed`, or `Skipped`, then indented findings `path:line: message` when a line is known.
@@ -685,9 +697,9 @@ Other CI facts:
 
 ### v0.1 — this implementation slice
 
-Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), stubs for the other commands, tests, `justfile`, `cargo deny`, CI matrix, README.
+Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), `ahi migrate` (best-effort, no parity guarantee), stubs for the other commands, tests, `justfile`, `cargo deny`, CI matrix, README.
 
-A URL, `local`, or `meta` hook fails the run with the unsupported-language (or "not executed until v0.3") message. It is not skipped.
+A URL or `meta` hook fails the run with an explicit error. It is not skipped and not substituted. `repo: local` with `language: system` or `script` runs when the policy pins the id and the exact entry. Other local languages fail the hook. `ahi run --fix` rewrites the three whitespace checks without the stash protocol; a file with unstaged changes is refused. Network is not blocked for a trusted local hook, because v0.4 is the sandbox. The environment is scrubbed to the base keep list plus the toolchain pass-through (`CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN` by default; more names only from `toolchain_env` in the policy). Credential names are never passed.
 
 ### v0.2 — lock and fetch
 
@@ -695,7 +707,7 @@ A URL, `local`, or `meta` hook fails the run with the unsupported-language (or "
 
 ### v0.3 — limited languages
 
-Execute `fail`, `pygrep`, `python` (uv, hashes), `rust` (`cargo --locked`), `golang` (system Go, checksums), and `docker_image` (digest already local). `unsupported` / `unsupported_script` only for ids in `trusted_system_hooks`. Environment scrubbing. No Node, no runtime downloads. `--fix` for the whitespace and end-of-file checks, behind the stash protocol, with a test that an unstaged hunk survives a failed and a successful fix.
+Execute `fail`, `pygrep`, `python` (uv, hashes), `rust` (`cargo --locked`), `golang` (system Go, checksums), and `docker_image` (digest already local). `language: system` / `script` and the three `--fix` checks were pulled forward; this phase still adds the other languages. No Node, no runtime downloads. The stash protocol, with a test that an unstaged hunk survives a failed and a successful fix, is still this phase's contract. v0.1 refuses the unstaged file instead.
 
 ### v0.4 — detect an outer sandbox, and offer host sandboxing
 
@@ -737,7 +749,7 @@ Names can be squatted after this check. Re-check crates.io before any publish. T
 
 **Recommendation:** fail closed on the security boundary (unknown keys, mutable or non-SHA revs once locking exists, regex features that can backtrack, system/script, missing workflow permissions, Dockerfile without a digest). Stay compatible on file discovery, the filtering algebra, stage names, and the `SKIP` variable. Do not add a `--compat=pre-commit` flag in v0.1; if a real config in Ian's repos cannot move, add the flag later for the specific warning-to-error cases (unknown keys), never for the sandbox rules.
 
-Legacy stage names are rejected rather than rewritten in place. `ahi migrate` is the rewriter.
+Legacy stage names are rejected rather than rewritten in place. `ahi migrate` does not rewrite them.
 
 ### 4. Which languages in v1
 
