@@ -162,7 +162,6 @@ fn later_commands_fail_closed() {
         "verify",
         "fetch",
         "autoupdate",
-        "migrate",
     ] {
         let output = ahi().arg(cmd).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{cmd}");

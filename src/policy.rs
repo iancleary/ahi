@@ -1,25 +1,60 @@
 //! Optional `ahi.policy.yaml`. Absence means deny-by-default empty allowlists.
 //! Upstream pre-commit does not read this file.
+//!
+//! `language: system` and `language: script` run only when `trusted_system_hooks`
+//! contains the hook id and the exact `entry` string. A bare id does not authorize
+//! a command. Remote hooks are not substituted from this file.
 
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use serde_yaml::Value;
 
 use crate::error::{Error, Result};
 use crate::yaml_safe::check_config_yaml;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSystemHook {
+    pub id: String,
+    /// `None` is the legacy id-only form. It parses and does not authorize.
+    pub entry: Option<String>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
     pub repo_allow: Vec<String>,
     pub runtime_allow: Vec<String>,
-    pub trusted_system_hooks: Vec<String>,
+    pub trusted_system_hooks: Vec<TrustedSystemHook>,
     pub network_hooks: Vec<String>,
+    pub path_present: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemAuth {
+    Allowed,
+    Missing,
+    /// The id is listed, but not with this exact entry.
+    EntryMismatch,
 }
 
 impl Policy {
-    pub fn trusts_system(&self, hook_id: &str) -> bool {
-        self.trusted_system_hooks.iter().any(|id| id == hook_id)
+    pub fn authorize_system(&self, hook_id: &str, entry: &str) -> SystemAuth {
+        let mut saw_id = false;
+        for hook in &self.trusted_system_hooks {
+            if hook.id != hook_id {
+                continue;
+            }
+            saw_id = true;
+            if hook.entry.as_deref() == Some(entry) {
+                return SystemAuth::Allowed;
+            }
+        }
+        if saw_id {
+            SystemAuth::EntryMismatch
+        } else {
+            SystemAuth::Missing
+        }
     }
 }
 
@@ -30,7 +65,9 @@ pub fn load_policy(root: &Path) -> Result<Policy> {
     }
     let text = fs::read_to_string(&path)
         .map_err(|err| Error::new(format!("failed to read {}: {err}", path.display())))?;
-    parse_policy_str(&text, &path.display().to_string())
+    let mut policy = parse_policy_str(&text, &path.display().to_string())?;
+    policy.path_present = true;
+    Ok(policy)
 }
 
 pub fn parse_policy_str(src: &str, origin: &str) -> Result<Policy> {
@@ -43,12 +80,112 @@ pub fn parse_policy_str(src: &str, origin: &str) -> Result<Policy> {
             raw.version
         )));
     }
+    let mut trusted_system_hooks = Vec::new();
+    for value in raw.trusted_system_hooks.unwrap_or_default() {
+        trusted_system_hooks.push(parse_trusted(&value, origin)?);
+    }
     Ok(Policy {
         repo_allow: raw.repo_allow.unwrap_or_default(),
         runtime_allow: raw.runtime_allow.unwrap_or_default(),
-        trusted_system_hooks: raw.trusted_system_hooks.unwrap_or_default(),
+        trusted_system_hooks,
         network_hooks: raw.network_hooks.unwrap_or_default(),
+        path_present: false,
     })
+}
+
+fn parse_trusted(value: &Value, origin: &str) -> Result<TrustedSystemHook> {
+    match value {
+        Value::String(id) => {
+            if id.is_empty() {
+                return Err(Error::new(format!(
+                    "{origin}: trusted_system_hooks id cannot be empty"
+                )));
+            }
+            Ok(TrustedSystemHook {
+                id: id.clone(),
+                entry: None,
+            })
+        }
+        Value::Mapping(map) => {
+            let mut id = None;
+            let mut entry = None;
+            for (key, item) in map {
+                let Some(key) = key.as_str() else {
+                    return Err(Error::new(format!(
+                        "{origin}: trusted_system_hooks keys must be strings"
+                    )));
+                };
+                match key {
+                    "id" => {
+                        id = Some(
+                            item.as_str()
+                                .ok_or_else(|| {
+                                    Error::new(format!(
+                                        "{origin}: trusted_system_hooks id must be a string"
+                                    ))
+                                })?
+                                .to_string(),
+                        );
+                    }
+                    "entry" => {
+                        entry = Some(
+                            item.as_str()
+                                .ok_or_else(|| {
+                                    Error::new(format!(
+                                        "{origin}: trusted_system_hooks entry must be a string"
+                                    ))
+                                })?
+                                .to_string(),
+                        );
+                    }
+                    other => {
+                        return Err(Error::new(format!(
+                            "{origin}: trusted_system_hooks field `{other}` is not supported (expected id and entry)"
+                        )));
+                    }
+                }
+            }
+            let Some(id) = id.filter(|id| !id.is_empty()) else {
+                return Err(Error::new(format!(
+                    "{origin}: trusted_system_hooks entry needs an id"
+                )));
+            };
+            let Some(entry) = entry.filter(|entry| !entry.is_empty()) else {
+                return Err(Error::new(format!(
+                    "{origin}: trusted_system_hooks id `{id}` needs an exact entry string"
+                )));
+            };
+            Ok(TrustedSystemHook {
+                id,
+                entry: Some(entry),
+            })
+        }
+        _ => Err(Error::new(format!(
+            "{origin}: trusted_system_hooks values must be an id string or an id/entry mapping"
+        ))),
+    }
+}
+
+pub fn policy_snippet(hook_id: &str, entry: &str, language: &str) -> String {
+    format!(
+        "hook `{hook_id}` uses language `{language}` with entry {entry_quoted}, which is refused unless ahi.policy.yaml allows this id and exact entry.\nAdd:\n\ntrusted_system_hooks:\n  - id: {hook_id}\n    entry: {quoted}\n",
+        entry_quoted = yaml_double_quote(entry),
+        quoted = yaml_double_quote(entry),
+    )
+}
+
+fn yaml_double_quote(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +197,45 @@ struct RawPolicy {
     #[serde(default)]
     runtime_allow: Option<Vec<String>>,
     #[serde(default)]
-    trusted_system_hooks: Option<Vec<String>>,
+    trusted_system_hooks: Option<Vec<Value>>,
     #[serde(default)]
     network_hooks: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_entry_authorizes_and_bare_id_does_not() {
+        let policy = parse_policy_str(
+            "version: 1\ntrusted_system_hooks:\n- id: rust-linting\n  entry: cargo fmt --all --\n- rust-clippy\n",
+            "policy",
+        )
+        .unwrap();
+        assert_eq!(
+            policy.authorize_system("rust-linting", "cargo fmt --all --"),
+            SystemAuth::Allowed
+        );
+        assert_eq!(
+            policy.authorize_system("rust-linting", "cargo fmt"),
+            SystemAuth::EntryMismatch
+        );
+        assert_eq!(
+            policy.authorize_system("rust-clippy", "cargo clippy"),
+            SystemAuth::EntryMismatch
+        );
+        assert_eq!(
+            policy.authorize_system("other", "true"),
+            SystemAuth::Missing
+        );
+    }
+
+    #[test]
+    fn snippet_quotes_the_entry() {
+        let text = policy_snippet("rust-linting", "cargo fmt --all --", "system");
+        assert!(text.contains("id: rust-linting"));
+        assert!(text.contains("entry: \"cargo fmt --all --\""));
+        assert!(text.contains("language `system`"));
+    }
 }

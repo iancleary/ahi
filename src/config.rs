@@ -155,6 +155,11 @@ pub struct Hook {
     pub rev: Option<String>,
     /// Config set `types` explicitly. Builtin defaults apply only when this is false.
     pub types_explicit: bool,
+    pub files_explicit: bool,
+    pub always_run_explicit: bool,
+    pub pass_filenames_explicit: bool,
+    /// Language name as written in the config, before `system` / `script` translation.
+    pub language_source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +423,7 @@ fn materialize_hook(
         .minimum_pre_commit_version
         .unwrap_or_else(|| "0".to_string());
     check_minimum(&minimum, origin)?;
+    let language_source = raw.language.clone();
     let language = raw.language.as_deref().map(translate_language);
     if let Some(language) = &language {
         if !LANGUAGES.contains(&language.as_str()) {
@@ -506,6 +512,10 @@ fn materialize_hook(
     let exclude = raw.exclude.unwrap_or_else(|| "^$".to_string());
     let types_explicit = raw.types.is_some();
     let mut types = raw.types.unwrap_or_else(|| vec!["file".to_string()]);
+    let always_run_explicit = raw.always_run.is_some();
+    let pass_filenames_explicit = raw.pass_filenames.is_some();
+    let mut always_run = raw.always_run.unwrap_or(false);
+    let mut pass_filenames = raw.pass_filenames.unwrap_or(true);
     if kind == HookOriginKind::Builtin {
         if let Some(check) = builtin_by_id(&raw.id) {
             if !types_explicit {
@@ -517,6 +527,12 @@ fn materialize_hook(
             }
             if !files_explicit && !check.default_files().is_empty() {
                 files = check.default_files().to_string();
+            }
+            if !always_run_explicit {
+                always_run = check.default_always_run();
+            }
+            if !pass_filenames_explicit {
+                pass_filenames = check.default_pass_filenames();
             }
         }
     }
@@ -558,9 +574,9 @@ fn materialize_hook(
         exclude_types,
         additional_dependencies: raw.additional_dependencies.unwrap_or_default(),
         args: raw.args.unwrap_or_default(),
-        always_run: raw.always_run.unwrap_or(false),
+        always_run,
         fail_fast: raw.fail_fast.unwrap_or(false),
-        pass_filenames: raw.pass_filenames.unwrap_or(true),
+        pass_filenames,
         description: raw.description.unwrap_or_default(),
         language_version: raw
             .language_version
@@ -574,6 +590,10 @@ fn materialize_hook(
         repo: repo.to_string(),
         rev,
         types_explicit,
+        files_explicit,
+        always_run_explicit,
+        pass_filenames_explicit,
+        language_source,
     })
 }
 
@@ -631,7 +651,7 @@ fn check_stages(stages: &[String], origin: &str, what: &str) -> Result<Vec<Strin
     for stage in stages {
         if let Some(modern) = legacy_stage(stage) {
             return Err(Error::new(format!(
-                "{origin}: `{what}` uses legacy stage `{stage}`; use `{modern}` (ahi migrate will rewrite this in a later version)"
+                "{origin}: `{what}` uses legacy stage `{stage}`; use `{modern}`. ahi migrate does not rewrite legacy stages"
             )));
         }
         if !STAGES.contains(&stage.as_str()) {

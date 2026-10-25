@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sample git hook. `ahi install` is not implemented.
+# Copy this file to .git/hooks/pre-commit and mark it executable.
+# `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings.
+# Without `--fix` those checks only report.
+exec ahi run --fix

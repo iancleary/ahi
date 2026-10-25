@@ -11,10 +11,13 @@ pub mod error;
 pub mod filter;
 pub mod git;
 pub mod identify;
+mod local_hook;
+pub mod migrate;
 pub mod output;
 mod paths;
 pub mod policy;
 pub mod runner;
+mod shlex;
 pub mod store;
 mod yaml_safe;
 

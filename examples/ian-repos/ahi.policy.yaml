@@ -1,0 +1,13 @@
+# Exact-entry allowlist for the local Rust hooks.
+# The entry string must match the config. `args` are not part of the pin.
+version: 1
+repo_allow: []
+runtime_allow: []
+trusted_system_hooks:
+  - id: rust-linting
+    entry: cargo fmt --all --
+  - id: rust-clippy
+    entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+  - id: rust-clippy
+    entry: cargo clippy --all-targets --all-features -- -D warnings
+network_hooks: []

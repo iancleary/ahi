@@ -22,7 +22,8 @@ pub fn render_text(report: &Report) -> String {
         out.push_str(&dot_line(&hook.name, label));
         out.push('\n');
         if hook.outcome == Outcome::Failed {
-            out.push_str(&format!("- hook id: {}\n- exit code: 1\n\n", hook.id));
+            let code = hook.exit_code.unwrap_or(1);
+            out.push_str(&format!("- hook id: {}\n- exit code: {code}\n\n", hook.id));
             for finding in &hook.findings {
                 out.push_str(&format_finding(
                     finding.path.as_deref(),
@@ -31,6 +32,11 @@ pub fn render_text(report: &Report) -> String {
                 ));
                 out.push('\n');
             }
+            if let Some(detail) = &hook.detail {
+                push_detail(&mut out, detail);
+            }
+        } else if let Some(detail) = &hook.detail {
+            push_detail(&mut out, detail);
         } else if let Some(reason) = &hook.skip_reason {
             if reason.starts_with('(') {
                 out.push_str(reason);
@@ -46,7 +52,7 @@ pub fn render_json(report: &Report) -> String {
         .hooks
         .iter()
         .map(|hook| {
-            json!({
+            let mut value = json!({
                 "id": hook.id,
                 "name": hook.name,
                 "outcome": outcome_name(hook.outcome),
@@ -59,7 +65,11 @@ pub fn render_json(report: &Report) -> String {
                         "message": finding.message,
                     })
                 }).collect::<Vec<_>>(),
-            })
+            });
+            if let Some(detail) = &hook.detail {
+                value["output"] = json!(detail);
+            }
+            value
         })
         .collect();
     let value = json!({
@@ -145,6 +155,13 @@ fn dot_line(name: &str, label: &str) -> String {
     let width = 79usize;
     let dots = width.saturating_sub(name.len() + label.len()).max(1);
     format!("{name}{}{label}", ".".repeat(dots))
+}
+
+fn push_detail(out: &mut String, detail: &str) {
+    out.push_str(detail);
+    if !detail.ends_with('\n') {
+        out.push('\n');
+    }
 }
 
 fn format_finding(path: Option<&str>, line: Option<u32>, message: &str) -> String {

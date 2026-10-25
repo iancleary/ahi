@@ -8,14 +8,17 @@ use serde_json::json;
 
 use crate::error::{Error, Result};
 
-pub fn append(
-    cache_dir: &Path,
-    command: &str,
-    repo: &Path,
-    hook_ids: &[String],
-    outcome: &str,
-    finding_count: usize,
-) -> Result<()> {
+pub struct AuditEvent<'a> {
+    pub command: &'a str,
+    pub repo: &'a Path,
+    pub hook_ids: &'a [String],
+    pub outcome: &'a str,
+    pub finding_count: usize,
+    /// Local system/script hook ids that ran.
+    pub local_hooks: &'a [String],
+}
+
+pub fn append(cache_dir: &Path, event: &AuditEvent<'_>) -> Result<()> {
     fs::create_dir_all(cache_dir)
         .map_err(|err| Error::new(format!("failed to create audit directory: {err}")))?;
     let time = std::time::SystemTime::now()
@@ -24,11 +27,12 @@ pub fn append(
         .unwrap_or(0);
     let line = json!({
         "time": time,
-        "command": command,
-        "repo": repo.display().to_string(),
-        "hooks": hook_ids,
-        "outcome": outcome,
-        "findings": finding_count,
+        "command": event.command,
+        "repo": event.repo.display().to_string(),
+        "hooks": event.hook_ids,
+        "outcome": event.outcome,
+        "findings": event.finding_count,
+        "local_hooks": event.local_hooks,
     });
     let mut file = OpenOptions::new()
         .create(true)

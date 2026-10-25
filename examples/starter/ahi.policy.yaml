@@ -1,0 +1,15 @@
+# Pins the local Rust hooks by id and the exact entry string.
+# `args` are not part of the pin. A different entry does not run.
+# id-only entries parse and do not authorize a command.
+version: 1
+repo_allow: []
+runtime_allow: []
+trusted_system_hooks:
+  - id: rust-linting
+    entry: cargo fmt --all --
+  - id: rust-clippy
+    entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+  # Alternate spelling used by some of Ian's repos. List the one the config uses.
+  - id: rust-clippy
+    entry: cargo clippy --all-targets --all-features -- -D warnings
+network_hooks: []

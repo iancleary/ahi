@@ -1,0 +1,33 @@
+# Ian's hooks, rewritten so ahi can run them offline.
+# check-yaml, end-of-file-fixer, and trailing-whitespace are `repo: builtin`.
+# There is no remote repo. `ahi run` does not substitute hook ids.
+#
+# Rewrites need an explicit flag:
+#   ahi run --fix
+# A git hook that fixes on commit (`ahi install` is not implemented):
+#   #!/bin/sh
+#   exec ahi run --fix
+# The same snippet is examples/starter/pre-commit.
+#
+# The local Rust hooks run only when ahi.policy.yaml pins each id and the
+# exact entry string.
+repos:
+  - repo: builtin
+    hooks:
+      - id: ahi/check-yaml
+      - id: ahi/end-of-file
+      - id: ahi/trailing-whitespace
+  - repo: local
+    hooks:
+      - id: rust-linting
+        name: Rust linting
+        entry: cargo fmt --all --
+        language: system
+        pass_filenames: true
+        types: [file, rust]
+      - id: rust-clippy
+        name: Rust clippy
+        entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+        language: system
+        pass_filenames: false
+        types: [file, rust]
