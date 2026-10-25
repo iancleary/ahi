@@ -1,13 +1,14 @@
 name: CI
 
-# Pull requests and pushes to main only. Tag pushes do not match
-# `branches: ["main"]`, so this file never runs because a tag was pushed.
-# This workflow does not request CARGO_REGISTRY_TOKEN and does not publish.
+# Pushes to main, and pull requests targeting main or the stacked spec
+# branch. Tag pushes do not match `branches`, so this file never runs
+# because a tag was pushed. This workflow does not request
+# CARGO_REGISTRY_TOKEN and does not publish.
 on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "cursor/spec-050d"]
 
 env:
   CARGO_TERM_COLOR: always
