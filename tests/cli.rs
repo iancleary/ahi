@@ -1,5 +1,9 @@
 //! CLI behavior that needs a git repository: golden `ahi run` output, and
 //! the v0.3 refusal for hooks this slice does not execute.
+//!
+//! JSON and SARIF snapshots include the crate version. Comparison substitutes
+//! `env!("CARGO_PKG_VERSION")` into that field. Text output is compared as
+//! stored. The live command output must still report the crate version.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -104,6 +108,142 @@ fn golden(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn plain_json_string(value: &str) -> bool {
+    !value.contains('"') && !value.contains('\\')
+}
+
+fn json_string_field_bounds(text: &str, key: &str) -> (usize, usize) {
+    let needle = format!("\"{key}\": \"");
+    let count = text.matches(&needle).count();
+    assert_eq!(count, 1, "expected exactly one {key} string field");
+    let key_at = text
+        .find(&needle)
+        .unwrap_or_else(|| panic!("missing {key}"));
+    let value_at = key_at + needle.len();
+    let end_rel = text[value_at..]
+        .find('"')
+        .unwrap_or_else(|| panic!("unterminated {key}"));
+    let value_end = value_at + end_rel;
+    assert!(
+        plain_json_string(&text[value_at..value_end]),
+        "{key} value contains an escape"
+    );
+    (value_at, value_end)
+}
+
+fn json_string_field(text: &str, key: &str) -> String {
+    let (start, end) = json_string_field_bounds(text, key);
+    text[start..end].to_string()
+}
+
+fn replace_json_string_value(text: &str, key: &str, new_value: &str) -> String {
+    assert!(
+        plain_json_string(new_value),
+        "replacement must be a plain JSON string"
+    );
+    let (start, end) = json_string_field_bounds(text, key);
+    let mut out = String::with_capacity(text.len() + new_value.len());
+    out.push_str(&text[..start]);
+    out.push_str(new_value);
+    out.push_str(&text[end..]);
+    out
+}
+
+const SARIF_DRIVER_VERSION_NEEDLE: &str = "\n          \"version\": \"";
+
+fn sarif_driver_version_bounds(text: &str) -> (usize, usize) {
+    let driver_count = text.matches(SARIF_DRIVER_VERSION_NEEDLE).count();
+    assert_eq!(driver_count, 1, "expected exactly one SARIF driver version");
+    let schema_count = text.matches("\n  \"version\": \"").count();
+    assert_eq!(schema_count, 1, "expected the SARIF schema version field");
+    let key_at = text
+        .find(SARIF_DRIVER_VERSION_NEEDLE)
+        .expect("driver version");
+    let value_at = key_at + SARIF_DRIVER_VERSION_NEEDLE.len();
+    let end_rel = text[value_at..]
+        .find('"')
+        .expect("unterminated driver version");
+    let value_end = value_at + end_rel;
+    let value = &text[value_at..value_end];
+    assert_ne!(
+        value, "2.1.0",
+        "refusing to treat the SARIF schema version as the tool version"
+    );
+    assert!(
+        plain_json_string(value),
+        "driver version contains an escape"
+    );
+    (value_at, value_end)
+}
+
+fn sarif_driver_version(text: &str) -> String {
+    let (start, end) = sarif_driver_version_bounds(text);
+    text[start..end].to_string()
+}
+
+fn replace_sarif_driver_version(text: &str, new_value: &str) -> String {
+    assert!(
+        plain_json_string(new_value),
+        "replacement must be a plain JSON string"
+    );
+    assert_ne!(
+        new_value, "2.1.0",
+        "replacement collides with the schema version"
+    );
+    let (start, end) = sarif_driver_version_bounds(text);
+    let mut out = String::with_capacity(text.len() + new_value.len());
+    out.push_str(&text[..start]);
+    out.push_str(new_value);
+    out.push_str(&text[end..]);
+    assert_eq!(
+        out.matches("\n  \"version\": \"").count(),
+        1,
+        "schema version field changed"
+    );
+    out
+}
+
+fn substitute_crate_version(name: &str, bytes: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(bytes).expect("golden output is utf-8");
+    let version = env!("CARGO_PKG_VERSION");
+    let substituted = match name {
+        "run.json" => replace_json_string_value(text, "ahi_version", version),
+        "run.sarif" => replace_sarif_driver_version(text, version),
+        _ => return bytes.to_vec(),
+    };
+    substituted.into_bytes()
+}
+
+fn reported_crate_version(name: &str, bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).expect("golden output is utf-8");
+    match name {
+        "run.json" => Some(json_string_field(text, "ahi_version")),
+        "run.sarif" => Some(sarif_driver_version(text)),
+        _ => None,
+    }
+}
+
+fn golden_difference(name: &str, actual: &[u8]) -> Option<String> {
+    let path = golden(name);
+    let expected = fs::read(&path).unwrap_or_else(|err| {
+        panic!(
+            "missing {} ({err}); re-run with UPDATE_GOLDEN=1 after reviewing the output",
+            path.display()
+        )
+    });
+    let expected = substitute_crate_version(name, &expected);
+    let actual = substitute_crate_version(name, actual);
+    if expected == actual {
+        None
+    } else {
+        Some(format!(
+            "golden {name} drifted\n--- expected\n{}\n--- actual\n{}",
+            String::from_utf8_lossy(&expected),
+            String::from_utf8_lossy(&actual)
+        ))
+    }
+}
+
 fn expect_golden(name: &str, actual: &[u8]) {
     let path = golden(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
@@ -111,16 +251,15 @@ fn expect_golden(name: &str, actual: &[u8]) {
         fs::write(&path, actual).unwrap();
         return;
     }
-    let expected = fs::read(&path).unwrap_or_else(|err| {
-        panic!(
-            "missing {} ({err}); re-run with UPDATE_GOLDEN=1 after reviewing the output",
-            path.display()
-        )
-    });
-    if expected != actual {
-        let actual_text = String::from_utf8_lossy(actual);
-        let expected_text = String::from_utf8_lossy(&expected);
-        panic!("golden {name} drifted\n--- expected\n{expected_text}\n--- actual\n{actual_text}");
+    if let Some(reported) = reported_crate_version(name, actual) {
+        assert_eq!(
+            reported,
+            env!("CARGO_PKG_VERSION"),
+            "{name} reported {reported}"
+        );
+    }
+    if let Some(diff) = golden_difference(name, actual) {
+        panic!("{diff}");
     }
 }
 
@@ -223,6 +362,56 @@ fn run_all_files_matches_golden_output() {
     let sarif = run(&dir, &["run", "--all-files", "--format", "sarif"]);
     assert_eq!(sarif.status.code(), Some(1));
     expect_golden("run.sarif", &sarif.stdout);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn crate_version_change_does_not_fail_golden_json_or_sarif() {
+    let dir = fixture();
+    let json = run(&dir, &["run", "--all-files", "--format", "json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let json_text = String::from_utf8(json.stdout).unwrap();
+    assert_eq!(
+        json_string_field(&json_text, "ahi_version"),
+        env!("CARGO_PKG_VERSION")
+    );
+    let rewritten_json = replace_json_string_value(&json_text, "ahi_version", "9.9.9");
+    assert!(
+        golden_difference("run.json", rewritten_json.as_bytes()).is_none(),
+        "a crate version change must not fail the JSON golden comparison"
+    );
+    let broken_json = rewritten_json.replacen("trailing whitespace", "trailing spaces", 1);
+    assert_ne!(broken_json, rewritten_json);
+    assert!(
+        golden_difference("run.json", broken_json.as_bytes()).is_some(),
+        "a finding change must still fail the JSON golden comparison"
+    );
+
+    let sarif = run(&dir, &["run", "--all-files", "--format", "sarif"]);
+    assert_eq!(sarif.status.code(), Some(1));
+    let sarif_text = String::from_utf8(sarif.stdout).unwrap();
+    assert_eq!(sarif_driver_version(&sarif_text), env!("CARGO_PKG_VERSION"));
+    let rewritten_sarif = replace_sarif_driver_version(&sarif_text, "9.9.9");
+    assert!(
+        golden_difference("run.sarif", rewritten_sarif.as_bytes()).is_none(),
+        "a crate version change must not fail the SARIF golden comparison"
+    );
+    let broken_sarif = rewritten_sarif.replacen("trailing whitespace", "trailing spaces", 1);
+    assert_ne!(broken_sarif, rewritten_sarif);
+    assert!(
+        golden_difference("run.sarif", broken_sarif.as_bytes()).is_some(),
+        "a finding change must still fail the SARIF golden comparison"
+    );
+    let broken_schema = sarif_text.replacen(
+        "\n  \"version\": \"2.1.0\"",
+        "\n  \"version\": \"9.9.9\"",
+        1,
+    );
+    assert_ne!(broken_schema, sarif_text);
+    assert!(
+        golden_difference("run.sarif", broken_schema.as_bytes()).is_some(),
+        "the SARIF schema version must still be compared"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
