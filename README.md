@@ -16,7 +16,7 @@ cargo build --release
 ./target/release/ahi --version
 ```
 
-`ahi --version` prints `ahi 0.1.0` and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
+`ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
 
 `scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself still builds with Rust 1.83. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
 
@@ -84,6 +84,37 @@ ahi run --fix
 #!/bin/sh
 exec ahi run --fix
 ```
+
+## Release assets
+
+A published GitHub release for tag `v<version>` carries three assets. `<version>` is the SemVer string without the leading `v` (tag `v0.1.1` uses `0.1.1`).
+
+- `ahi-<version>-linux-x86_64.tar.gz`
+- `ahi-<version>-linux-aarch64.tar.gz`
+- `ahi-<version>-sha256sums.txt`
+
+Each archive contains one statically linked `ahi` executable at the archive root and no other members. The sums file is `sha256sum` output for those two archives, `x86_64` first.
+
+From the directory that contains the downloaded files, for release `0.1.1`:
+
+```sh
+sha256sum --check ahi-0.1.1-sha256sums.txt
+gh attestation verify ahi-0.1.1-linux-x86_64.tar.gz --repo iancleary/ahi
+gh attestation verify ahi-0.1.1-linux-aarch64.tar.gz --repo iancleary/ahi
+gh attestation verify ahi-0.1.1-sha256sums.txt --repo iancleary/ahi
+```
+
+`sha256sum --check` uses the filenames recorded in the sums file, so the archives have to sit beside that file. Replace `0.1.1` with the release that was downloaded.
+
+v0.1.0 and v0.1.1 were published before this workflow existed, so they have no assets until the workflow is dispatched. After `.github/workflows/release_binary_assets.yml` is on `main`:
+
+```sh
+gh workflow run release_binary_assets.yml --repo iancleary/ahi --ref main -f release_tag=v0.1.1
+```
+
+The same command with `release_tag=v0.1.0` backfills that release. Dispatch from `main`. The tag that is built does not need to contain the workflow file. The workflow refuses a ref that is not a tag, and it refuses to replace an asset whose bytes differ. The next release published after the workflow is on `main` receives the three assets from the `release` trigger, without a manual run.
+
+Archive layout, runners, and the reproducibility flags are in [docs/release.md](docs/release.md).
 
 ## License
 

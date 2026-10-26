@@ -1,0 +1,331 @@
+name: release binary assets
+
+# Attach static Linux binaries to a published GitHub release.
+#
+# Triggers:
+# - release: published. The tagged commit is built and the three assets are
+#   uploaded to that release.
+# - workflow_dispatch with a required release_tag (for example v0.1.1).
+#   This is the backfill path for releases that already exist.
+# - pull_request against main or the stacked spec branch. This is a dry run:
+#   build, package, smoke-test, and compare sha256. It does not upload and
+#   it does not attest.
+#
+# This file does not publish crates. Pull requests use the pull_request
+# event. .github/workflows/publish.yml is unchanged and remains the crates.io publish.
+#
+# Scripts are taken from the workflow ref (the commit GitHub used to load
+# this file). Source is checked out separately: the tag for a publish, or
+# the pull request head for a dry run. A backfill can therefore build
+# v0.1.0 or v0.1.1, which do not contain these scripts.
+#
+# Runners are native. ubuntu-latest is the x86_64 image. ubuntu-24.04-arm
+# is the GitHub-hosted arm64 label in the hosted runners reference
+# (confirmed 2026-10-26). The build does not cross-compile.
+#
+# Build jobs keep contents: read. actions: write on those jobs is only the
+# workflow-artifact permission used to pass archives to the checksum job.
+# contents: write, id-token: write, and attestations: write are set on
+# attach_release_assets and nowhere else.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to attach assets to. Include the leading v, for example v0.1.1."
+        required: true
+        type: string
+  pull_request:
+    branches: ["main", "cursor/spec-050d"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  resolve_release_identity:
+    name: resolve_release_identity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.verify.outputs.mode }}
+      tag: ${{ steps.verify.outputs.tag }}
+      version: ${{ steps.verify.outputs.version }}
+      source_ref: ${{ steps.verify.outputs.source_ref }}
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      source_date_epoch: ${{ steps.verify.outputs.source_date_epoch }}
+    steps:
+      - name: checkout workflow tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: workflow_tree
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: select source ref
+        id: select
+        working-directory: workflow_tree
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: bash scripts/resolve_release_identity.sh --select-ref
+
+      - name: checkout source tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.select.outputs.source_ref }}
+          path: source_tree
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: verify release identity
+        id: verify
+        working-directory: source_tree
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          SOURCE_REF: ${{ steps.select.outputs.source_ref }}
+        run: bash "${GITHUB_WORKSPACE}/workflow_tree/scripts/resolve_release_identity.sh" --verify
+
+  build_linux_binary:
+    name: build_linux_binary (${{ matrix.architecture }})
+    needs: resolve_release_identity
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            architecture: aarch64
+    steps:
+      - name: checkout workflow tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: workflow_tree
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: checkout source tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve_release_identity.outputs.source_ref }}
+          path: source_tree
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
+        with:
+          toolchain: 1.83.0
+          targets: ${{ matrix.target }}
+
+      - name: build release binary twice and compare sha256
+        working-directory: source_tree
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.resolve_release_identity.outputs.source_date_epoch }}
+          SOURCE_SHA: ${{ needs.resolve_release_identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/workflow_tree/scripts/build_linux_binary.sh" \
+            --target "$TARGET" \
+            --output "${GITHUB_WORKSPACE}/release_binary/ahi" \
+            --version "$VERSION" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --expect-commit "$SOURCE_SHA"
+
+      - name: verify static linkage
+        run: bash workflow_tree/scripts/verify_static_linkage.sh --binary release_binary/ahi
+
+      - name: package release archive twice and compare sha256
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          SOURCE_DATE_EPOCH: ${{ needs.resolve_release_identity.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          archive_name="ahi-${VERSION}-linux-${ARCHITECTURE}.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/archive-first" "${RUNNER_TEMP}/archive-second"
+          first="${RUNNER_TEMP}/archive-first/${archive_name}"
+          second="${RUNNER_TEMP}/archive-second/${archive_name}"
+          args=(
+            --binary "${GITHUB_WORKSPACE}/release_binary/ahi"
+            --version "$VERSION"
+            --architecture "$ARCHITECTURE"
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
+          )
+          bash workflow_tree/scripts/package_release_archive.sh "${args[@]}" --output "$first"
+          bash workflow_tree/scripts/package_release_archive.sh "${args[@]}" --output "$second"
+          hash1=$(sha256sum "$first" | awk '{print $1}')
+          hash2=$(sha256sum "$second" | awk '{print $1}')
+          echo "package_release_archive: first sha256 ${hash1}"
+          echo "package_release_archive: second sha256 ${hash2}"
+          if [[ "$hash1" != "$hash2" ]]; then
+            echo "error: archive sha256 values differ" >&2
+            exit 1
+          fi
+          echo "package_release_archive: archive sha256 values match"
+          mkdir -p release_assets
+          cp "$first" "release_assets/${archive_name}"
+
+      - name: verify packaged binary
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          bash workflow_tree/scripts/verify_packaged_binary.sh \
+            --archive "release_assets/ahi-${VERSION}-linux-${ARCHITECTURE}.tar.gz" \
+            --version "$VERSION"
+
+      - name: record linkage and digests
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="release_assets/ahi-${VERSION}-linux-${ARCHITECTURE}.tar.gz"
+          {
+            echo "### ${TARGET}"
+            echo
+            echo '```'
+            file release_binary/ahi
+            ldd release_binary/ahi || true
+            sha256sum release_binary/ahi "$archive"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: upload release archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-archive-linux-${{ matrix.architecture }}
+          path: release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-${{ matrix.architecture }}.tar.gz
+          if-no-files-found: error
+
+  write_sha256sums:
+    name: write_sha256sums
+    needs: [resolve_release_identity, build_linux_binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: checkout workflow tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: workflow_tree
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: download release archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-archive-linux-*
+          path: release_assets
+          merge-multiple: true
+
+      - name: write sha256sums and check
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+        run: bash workflow_tree/scripts/write_sha256sums.sh --version "$VERSION" --directory release_assets
+
+      - name: upload sha256sums
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sha256sums
+          path: release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-sha256sums.txt
+          if-no-files-found: error
+
+  attach_release_assets:
+    name: attach_release_assets
+    needs: [resolve_release_identity, build_linux_binary, write_sha256sums]
+    if: >-
+      needs.resolve_release_identity.outputs.mode == 'publish'
+      && (github.event_name == 'workflow_dispatch' || github.event.action == 'published')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: checkout workflow tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: workflow_tree
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: download release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: release_assets
+          merge-multiple: true
+
+      - name: check sha256sums
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release_assets
+          sha256sum --check "ahi-${VERSION}-sha256sums.txt"
+
+      - name: compare existing release assets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve_release_identity.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bash workflow_tree/scripts/attach_release_assets.sh \
+            --mode check \
+            --tag "$TAG" \
+            --directory "${GITHUB_WORKSPACE}/release_assets" \
+            --repository "$REPOSITORY"
+
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-x86_64.tar.gz
+            release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-aarch64.tar.gz
+            release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-sha256sums.txt
+
+      - name: upload missing release assets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve_release_identity.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bash workflow_tree/scripts/attach_release_assets.sh \
+            --mode upload \
+            --tag "$TAG" \
+            --directory "${GITHUB_WORKSPACE}/release_assets" \
+            --repository "$REPOSITORY"
