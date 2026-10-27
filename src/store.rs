@@ -180,8 +180,7 @@ mod tests {
 
     #[test]
     fn put_get_roundtrip_and_detects_tampering() {
-        let dir = std::env::temp_dir().join(format!("ahi-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::fixture_directory::create_unique_fixture_directory("object-store");
         let store = Store::open(&dir).unwrap();
         let digest = store.put(b"hello").unwrap();
         assert_eq!(store.get(&digest).unwrap(), b"hello");
@@ -200,8 +199,8 @@ mod tests {
     #[test]
     fn open_readonly_store_reads_and_refuses_put() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("ahi-store-ro-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir =
+            crate::fixture_directory::create_unique_fixture_directory("object-store-readonly");
         let store = Store::open(&dir).unwrap();
         let digest = store.put(b"cached").unwrap();
         drop(store);

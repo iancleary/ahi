@@ -191,9 +191,7 @@ mod tests {
 
     #[test]
     fn classifies_python_and_directory() {
-        let dir = std::env::temp_dir().join(format!("ahi-id-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fixture_directory::create_unique_fixture_directory("classify");
         let file = dir.join("main.py");
         let mut handle = File::create(&file).unwrap();
         writeln!(handle, "print('hi')").unwrap();
@@ -212,9 +210,7 @@ mod tests {
 
     #[test]
     fn git_mode_overrides_filesystem_bit() {
-        let dir = std::env::temp_dir().join(format!("ahi-id-mode-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fixture_directory::create_unique_fixture_directory("git-mode");
         let file = dir.join("tool.sh");
         std::fs::write(&file, "echo hi\n").unwrap();
         let tags = classify(&file, Some("100755")).unwrap();

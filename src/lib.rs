@@ -21,6 +21,10 @@ mod shlex;
 pub mod store;
 mod yaml_safe;
 
+#[cfg(test)]
+#[path = "../tests/support/fixture_directory.rs"]
+mod fixture_directory;
+
 pub use error::{Error, Result};
 pub use local_hook::{base_env_names, default_toolchain_names};
 

@@ -544,17 +544,7 @@ mod tests {
     }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ahi-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::fixture_directory::create_unique_fixture_directory(label)
     }
 
     #[test]
@@ -687,7 +677,7 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "{args:?}");
         };
-        git(&["init", "-q"]);
+        git(&["init", "-q", "--template="]);
         git(&["config", "user.email", "ahi@example.com"]);
         git(&["config", "user.name", "ahi"]);
         std::fs::write(dir.join("f"), b"a\n").unwrap();
