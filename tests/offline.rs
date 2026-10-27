@@ -7,6 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "support/fixture_directory.rs"]
+mod fixture_directory;
+
 fn ahi() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ahi"))
 }
@@ -33,17 +36,8 @@ fn run(dir: &Path, args: &[&str]) -> Output {
 }
 
 fn temp_repo(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ahi-off-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    git(&dir, &["init", "-q"]);
+    let dir = fixture_directory::create_unique_fixture_directory(label);
+    git(&dir, &["init", "-q", "--template="]);
     git(&dir, &["config", "user.email", "ahi@example.com"]);
     git(&dir, &["config", "user.name", "ahi"]);
     git(&dir, &["config", "core.autocrlf", "false"]);

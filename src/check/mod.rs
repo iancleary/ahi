@@ -399,15 +399,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces_a_file_and_refuses_a_symlink() {
-        let dir = std::env::temp_dir().join(format!(
-            "ahi-write-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::fixture_directory::create_unique_fixture_directory("atomic-replace");
         std::fs::write(dir.join("notes.txt"), b"old\n").unwrap();
         write_nofollow(&dir, "notes.txt", b"new\n").unwrap();
         assert_eq!(std::fs::read(dir.join("notes.txt")).unwrap(), b"new\n");
