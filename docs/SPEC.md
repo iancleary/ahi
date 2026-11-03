@@ -134,7 +134,7 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 | xargs-style batching | used for `repo: local` system and script hooks. Batches run one after another | same partition for later languages | Builtin checks run in-process on the full filtered list. `SC_ARG_MAX` is not read. |
 | Partial-commit stash | not invoked | required before any check may write the worktree | Specified below so the later implementation has a contract. |
 | Git hook shim, `install`, `uninstall`, `init-templatedir`, git 2.54 `hook.<name>.event` config | not installed | after the runner is safe to put on `git commit` | v0.1 `install` / `uninstall` exit with a clear "not implemented yet" error. |
-| `autoupdate`, `try-repo`, `migrate-config`, `clean`, `gc`, `sample-config`, `validate-config`, `validate-manifest`, `hazmat` | corresponding ahi commands that exist early exit with the phase that will implement them. `ahi migrate` is a different command (best-effort suggestion, not upstream `migrate-config`) | see roadmap | ahi does not implement `hazmat` (`cd`, `ignore-exit-code`, `n1`). Those entry prefixes are a hard error if encountered, not a silent pass. Upstream documents them as usually a bad idea ([docs](https://pre-commit.com/#pre-commit-hazmat)). |
+| `autoupdate`, `try-repo`, `migrate-config`, `clean`, `gc`, `sample-config`, `validate-config`, `validate-manifest`, `hazmat` | `ahi update` is the v0.2 command. `ahi autoupdate` is an alias of it. Other corresponding ahi commands that exist early exit with the phase that will implement them. `ahi migrate` is a different command (best-effort suggestion, not upstream `migrate-config`) | see roadmap | ahi does not implement `hazmat` (`cd`, `ignore-exit-code`, `n1`). Those entry prefixes are a hard error if encountered, not a silent pass. Upstream documents them as usually a bad idea ([docs](https://pre-commit.com/#pre-commit-hazmat)). The config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names. |
 | Worktree rewriting / formatters | `ahi run --fix` for end-of-file, trailing whitespace, and mixed line endings. No stash. Unstaged files are refused. Writes are atomic and do not follow symlinks | stash protocol still later | Other builtins, including the UTF-8 BOM check, stay report-only. |
 
 Exit codes for `ahi run`:
@@ -320,7 +320,7 @@ Upstream caches clones in `PRE_COMMIT_HOME` or `$XDG_CACHE_HOME/pre-commit` or `
 
 ahi separates fetch from run.
 
-`ahi.lock` (YAML, version 1), written by `ahi lock` / `ahi autoupdate` and verified by `ahi run` and `ahi verify` starting in v0.2:
+`ahi.lock` (YAML, version 1), written by `ahi lock` / `ahi update` and verified by `ahi run` and `ahi verify` starting in v0.2:
 
 ```yaml
 version: 1
@@ -402,9 +402,9 @@ Trust boundaries:
 | Boundary | Rule |
 | --- | --- |
 | Config | Untrusted data. Parsed with limits (file size cap 1 MiB, depth cap, no YAML aliases/anchors — anchors are rejected so a config cannot expand into a billion nodes). Inside the sandbox the same file is editable by the sandbox user, so the run is advisory and CI is the backstop. |
-| `rev` | Not a branch. v0.2 stores the full commit and a tree digest. Tags are resolved only by `ahi lock` / `ahi autoupdate`, which are online on purpose. |
+| `rev` | Not a branch. v0.2 stores the full commit and a tree digest. Tags are resolved only by `ahi lock` / `ahi update`, which are online on purpose. |
 | Cache | Content-addressed. Run verifies before use. The store opens read-only when the object directory cannot be written. The cache path is not inside the repository being checked, and it is not assumed to live under a home directory. |
-| Network | `ahi fetch` and `ahi lock` / `ahi autoupdate` may use the network. Builtin checks do not open one. A trusted local hook is not sandboxed in this version, so ahi cannot stop that process from opening a socket. |
+| Network | `ahi fetch` and `ahi lock` / `ahi update` may use the network. Builtin checks do not open one. A trusted local hook is not sandboxed in this version, so ahi cannot stop that process from opening a socket. |
 | Runtimes | A name on `runtime_allow` plus a binary already on `PATH` or an explicit path. No nodeenv, no rustup installer, no Go tarball. |
 | `system` / `script` | Denied unless `trusted_system_hooks` has the hook id and the exact `entry`. A bare id does not authorize. |
 | Network-using hooks | `network_hooks` is the allowlist once a sandbox can block the network. This version has no sandbox, so it does not pretend the allowlist is enforced. |
@@ -415,7 +415,20 @@ Trust boundaries:
 
 ### Revisions and the lockfile
 
-Specified in [Rev, lockfile, and cache](#rev-lockfile-and-cache). `ahi autoupdate` moves `requested` to a tag only by writing both the tag and the resolved commit into the lockfile. It does not replace a full SHA in the config with a moving branch. `--bleeding-edge` is rejected: ahi will not record `rev` as a branch tip. Upstream's `--freeze` (store the SHA in the config, with a comment naming the tag) is the model for what `ahi autoupdate` writes into the lockfile; the config may keep the tag so diffs stay readable.
+Specified in [Rev, lockfile, and cache](#rev-lockfile-and-cache). The v0.2 command is `ahi update`. `ahi autoupdate` is an alias of that command. The pre-commit config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names.
+
+`ahi lock` resolves the `rev` already in the config and writes `ahi.lock`. It does not select a newer tag. `ahi update` selects a newer immutable tag, then writes the same lock fields: `requested` (that tag), `commit`, `tree`, and `digest`. The config may keep the tag so diffs stay readable. Upstream's `--freeze` (store the SHA in the config, with a comment naming the tag) is the model for what the lockfile records. `--bleeding-edge` is rejected.
+
+The determinism rule is the one [iancleary/forge](https://github.com/iancleary/forge) uses for `forge self update`, as documented in that repository's `docs/release.md`: resolve one immutable published tag, verify the bytes before accepting them, and fail closed instead of falling through to a weaker source. Applied to a hook repository:
+
+- The selected tag resolves to one full commit. A branch tip is rejected.
+- The fetched tree is checked against `commit`, `tree`, and the canonical `git ls-tree -r -z` digest before the lock row is accepted.
+- The same tag records the same commit, tree, and digest. A later `ahi update` that finds no newer tag leaves the lockfile unchanged.
+- `--dry-run` prints the tag and commit it would record and writes neither the lockfile nor the cache.
+- The lockfile is replaced by writing a temporary file in the same directory and renaming it.
+- A missing tag, a non-commit object, or a digest mismatch is a hard error.
+
+`ahi update` changes hook pins. Replacing the ahi binary is a later command, `ahi self-update`, which is the analogue of `forge self update`. v0.2 does not implement that command.
 
 ### Allowlist and offline run
 
@@ -568,7 +581,7 @@ Binary name: `ahi`. Global flags, matching the upstream shape where it exists:
 | `ahi list-checks` | v0.1 | Builtin ids, aliases, one-line descriptions. `--format text\|json`. |
 | `ahi explain <ID>` | v0.1 | Description, defaults, arguments, and the upstream hook it corresponds to, if any. |
 | `ahi install` / `uninstall` | shim phase (after v0.3, before relying on it in git) | v0.1 exits 1 with "not implemented until the hook shim phase". |
-| `ahi lock` / `verify` / `fetch` / `autoupdate` | v0.2 | v0.1 exits 1 naming v0.2. |
+| `ahi lock` / `verify` / `fetch` / `update` | v0.2 | v0.1 exits 1 naming v0.2. `ahi autoupdate` is an alias of `ahi update`. |
 | `ahi doctor` | v0.1 prints version, git version, config path, cache path, whether that cache is writable or read-only, the scratch directory, and `sandbox: not probed in this version` | v0.4 reports whether an outer sandbox was detected and which host backend, if any, would be used. |
 | `ahi migrate` | v0.1 | Best-effort suggestion. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Writes only with `--write`, and refuses to replace an existing file unless `--force` is set. Not upstream `migrate-config`. |
 | `ahi hook-impl` | with install | Hidden. Not in v0.1. |
@@ -704,7 +717,7 @@ A URL or `meta` hook fails the run with an explicit error. It is not skipped and
 
 ### v0.2 — lock and fetch
 
-`ahi.lock` as specified. `ahi lock`, `ahi verify`, `ahi fetch`, `ahi autoupdate`. Tag resolution happens here and only here. The image-build bake is this command's contract: exact version, per-architecture sha256, then a read-only store. Runtime network tests: `ahi run` with networking disabled after a populate. `repo_allow` enforced. A signature field on fetched hook repos is recorded when a verifier is available. Still no hook subprocesses. Loading config and the lockfile from a git ref, and refusing a config modified by the checked range, stay lower priority and are not required for v0.2.
+`ahi.lock` as specified. `ahi lock`, `ahi verify`, `ahi fetch`, `ahi update` (`ahi autoupdate` is an alias). Tag resolution happens here and only here. `ahi update` follows the deterministic tag rule in [Revisions and the lockfile](#revisions-and-the-lockfile). The image-build bake is this command's contract: exact version, per-architecture sha256, then a read-only store. Runtime network tests: `ahi run` with networking disabled after a populate. `repo_allow` enforced. A signature field on fetched hook repos is recorded when a verifier is available. Still no hook subprocesses. Loading config and the lockfile from a git ref, and refusing a config modified by the checked range, stay lower priority and are not required for v0.2.
 
 ### v0.3 — limited languages
 

@@ -33,7 +33,7 @@ The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi
 | `ahi explain <id>` | What one check reports. |
 | `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, policy summary. Sandbox detection is not in v0.1. |
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
-| `install`, `uninstall`, `lock`, `verify`, `fetch`, `autoupdate` | Exit 1. They are specified and not implemented. |
+| `install`, `uninstall`, `lock`, `verify`, `fetch`, `update` | Exit 1. They are specified and not implemented. `autoupdate` is an alias of `update`. |
 
 `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook. `repo: meta` and remote URLs fail with an explicit error and are not fetched. Languages planned for v0.3 say `not supported until v0.3`. Other languages, including Node, say `not supported by ahi`. Nothing is skipped silently.
 

@@ -298,6 +298,7 @@ fn later_commands_fail_closed() {
         "lock",
         "verify",
         "fetch",
+        "update",
         "autoupdate",
     ] {
         let output = ahi().arg(cmd).output().unwrap();

@@ -55,8 +55,9 @@ enum Command {
     Verify,
     /// Populate the cache. The only command that uses the network.
     Fetch,
-    /// Move locked repos to newer commits.
-    Autoupdate,
+    /// Move locked repos to a newer immutable tag and record the resolved commit.
+    #[command(name = "update", alias = "autoupdate")]
+    Update,
     /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
     ///
     /// Prints a report and a suggested config. Does not fetch remotes and does not
@@ -128,7 +129,7 @@ fn main() -> ExitCode {
         Command::Install | Command::Uninstall => {
             unimplemented_until("the hook shim phase (after hook execution exists)")
         }
-        Command::Lock | Command::Verify | Command::Fetch | Command::Autoupdate => {
+        Command::Lock | Command::Verify | Command::Fetch | Command::Update => {
             unimplemented_until("v0.2")
         }
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
