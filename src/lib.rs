@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod chat;
 pub mod check;
 pub mod config;
 pub mod error;

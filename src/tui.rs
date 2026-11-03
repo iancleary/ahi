@@ -1,8 +1,10 @@
-//! Provider picker for the single-machine harness.
+//! Provider picker and chat screen for the single-machine harness.
 //!
-//! A terminal shows OpenAI and the gateways from `models.json`. A pipe prints
-//! the same load as text, so tests do not need a terminal.
+//! A terminal shows OpenAI and the gateways from `models.json`, then opens the
+//! chat screen. A pipe prints the same load as text, so tests do not need a
+//! terminal.
 
+use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
+use crate::chat;
 use crate::error::{Error, Result};
 use crate::harness::{self, Registry};
 
@@ -21,18 +24,43 @@ pub fn run(state: &Path) -> Result<String> {
     if !io::stdout().is_terminal() {
         return Ok(harness::render_text(&registry));
     }
-    let selection = pick(&registry)?;
-    if let Some(selection) = &selection {
-        let path = state.join("selection");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                Error::new(format!("failed to create {}: {err}", parent.display()))
-            })?;
+    let picked = pick(&registry)?;
+    let selection = if let Some(value) = picked {
+        write_selection(state, &value)?;
+        value
+    } else if let Some(existing) = read_selection(state) {
+        existing
+    } else {
+        return Ok(harness::render_text(&registry));
+    };
+    chat::interact(state, &selection, || match pick(&registry)? {
+        Some(value) => {
+            write_selection(state, &value)?;
+            Ok(Some(value))
         }
-        std::fs::write(&path, format!("{selection}\n"))
-            .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))?;
-    }
+        None => Ok(None),
+    })?;
     Ok(harness::render_text(&registry))
+}
+
+fn write_selection(state: &Path, selection: &str) -> Result<()> {
+    let path = state.join("selection");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| Error::new(format!("failed to create {}: {err}", parent.display())))?;
+    }
+    fs::write(&path, format!("{selection}\n"))
+        .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))
+}
+
+fn read_selection(state: &Path) -> Option<String> {
+    let text = fs::read_to_string(state.join("selection")).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 fn pick(registry: &Registry) -> Result<Option<String>> {
