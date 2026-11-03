@@ -268,7 +268,11 @@ impl Picker {
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(4),
-                Constraint::Length(3),
+                Constraint::Length(if matches!(self.screen, Screen::Catalog { .. }) {
+                    5
+                } else {
+                    3
+                }),
             ])
             .split(frame.area());
         let rows = self.rows();
@@ -324,9 +328,7 @@ impl Picker {
             .collect();
         let title = match self.screen {
             Screen::Picker => "models.json — curated models (Enter saves and exits)",
-            Screen::Catalog { .. } => {
-                "catalog — curate models.json (Space toggle; Shift+↑/↓ or K/J reorder; Esc back)"
-            }
+            Screen::Catalog { .. } => "catalog — curate models.json (Space toggle; Esc back)",
         };
         frame.render_stateful_widget(
             List::new(items)
@@ -350,7 +352,7 @@ impl Picker {
         frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), chunks[1]);
         let help = match self.screen {
             Screen::Picker => "r refresh all  c catalog  e edit models.json  arrows move  Enter save & exit  q quit",
-            Screen::Catalog { .. } => "Space toggle  Shift+Up/Down or K/J reorder checked  y copy id  e edit  r refresh  Esc back  q quit",
+            Screen::Catalog { .. } => "Up/Down or j/k: move highlight\nShift+Up/Down or Shift+j/k: reorder highlighted checked model and save\nSpace toggle  y copy id  e edit  r refresh  Esc back  q quit",
         };
         frame.render_widget(
             Paragraph::new(format!("{}\n{help}", self.status)).wrap(Wrap { trim: false }),

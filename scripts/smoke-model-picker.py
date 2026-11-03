@@ -319,7 +319,7 @@ def main() -> None:
             session.close()
     print(
         "PASS: explicit refresh error, catalog browse/copy fallback, Space check/uncheck, "
-        "Shift+arrows and J/K reorder, quit/restart persistence, embedded-slash IDs, "
+        "Shift+arrows and Shift+j/k reorder, quit/restart persistence, embedded-slash IDs, "
         "missing-catalog ID retention/reorder/removal, save conflict/failure retention, "
         "editor resume/reload and byte preservation, "
         "invalid-edit retention, missing editor, explicit config creation, selection confirmation"
