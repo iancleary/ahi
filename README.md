@@ -33,9 +33,13 @@ The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi
 | `ahi explain <id>` | What one check reports. |
 | `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, policy summary. Sandbox detection is not in v0.1. |
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
-| `install`, `uninstall`, `lock`, `verify`, `fetch`, `update` | Exit 1. They are specified and not implemented. `autoupdate` is an alias of `update`. |
+| `ahi lock` | Resolve each URL `rev` to a commit, tree, and `git ls-tree -r -z` digest. Write `ahi.lock`. Does not select a newer tag. |
+| `ahi update` | Select a newer immutable version tag, rewrite that `rev` to the tag, and write the same lock fields. `autoupdate` is an alias. `--dry-run` writes nothing. `--bleeding-edge` is rejected. |
+| `ahi fetch` | Materialize each locked repo into the cache. This command may use the network. |
+| `ahi verify` | Check `ahi.lock` against the cache. Does not fetch. |
+| `install`, `uninstall` | Exit 1. They are specified for the hook shim and not implemented. |
 
-`repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook. `repo: meta` and remote URLs fail with an explicit error and are not fetched. Languages planned for v0.3 say `not supported until v0.3`. Other languages, including Node, say `not supported by ahi`. Nothing is skipped silently.
+`repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook. `repo: meta` fails with an explicit error. A URL repo is not executed. `ahi run` reads `ahi.lock` and the cache for that URL and does not fetch it. `ahi lock`, `ahi update`, and `ahi fetch` are the commands that resolve and cache it, and only when `repo_allow` lists the repo string exactly. Languages planned for v0.3 say `not supported until v0.3`. Other languages, including Node, say `not supported by ahi`. Nothing is skipped silently.
 
 ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 

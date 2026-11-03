@@ -292,20 +292,17 @@ fn list_checks_and_explain() {
 
 #[test]
 fn later_commands_fail_closed() {
-    for cmd in [
-        "install",
-        "uninstall",
-        "lock",
-        "verify",
-        "fetch",
-        "update",
-        "autoupdate",
-    ] {
+    for cmd in ["install", "uninstall"] {
         let output = ahi().arg(cmd).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{cmd}");
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("not implemented until"), "{cmd}: {err}");
     }
+    let bleeding = ahi().args(["update", "--bleeding-edge"]).output().unwrap();
+    assert_eq!(bleeding.status.code(), Some(1));
+    let err = String::from_utf8(bleeding.stderr).unwrap();
+    assert!(err.contains("bleeding-edge"), "{err}");
+    assert!(err.contains("branch tip"), "{err}");
 }
 
 #[test]
@@ -431,7 +428,7 @@ fn remote_and_language_hooks_are_not_skipped() {
     let dir = fixture();
     write(
         &dir.join(".pre-commit-config.yaml"),
-        b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: true\n    language: system\n- repo: https://example.invalid/hooks\n  rev: abc\n  hooks:\n  - id: remote-hook\n- repo: meta\n  hooks:\n  - id: identity\n",
+        b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: true\n    language: system\n- repo: meta\n  hooks:\n  - id: identity\n",
     );
     let output = run(&dir, &["run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));
@@ -442,10 +439,6 @@ fn remote_and_language_hooks_are_not_skipped() {
     assert!(text.contains("language `node`"));
     assert!(text.contains("trusted_system_hooks"));
     assert!(text.contains("repo: meta"));
-    assert!(
-        text.contains("remote repo is not executed until v0.3")
-            || text.contains("from a remote repo is not executed until v0.3")
-    );
     assert!(!text.contains("Skipped"));
     let _ = fs::remove_dir_all(dir);
 }

@@ -187,9 +187,13 @@ fn remote_without_substitution_is_not_fetched() {
     write(&dir.join("ok.yml"), b"a: 1\n");
     git(&dir, &["add", "-A"]);
     let output = run(&dir, &["run", "--all-files"]);
-    let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("not executed until v0.3"), "{text}");
-    assert!(!text.contains("substituted"), "{text}");
+    assert_eq!(output.status.code(), Some(1));
+    let err = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        err.contains("ahi.lock is missing") || err.contains("run ahi lock"),
+        "{err}"
+    );
+    assert!(!err.contains("substituted"), "{err}");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -239,7 +243,7 @@ repos:
     assert!(stdout.contains("rust-linting"), "{stdout}");
     assert!(stdout.contains("entry: \"cargo fmt --all --\""), "{stdout}");
     assert!(stdout.contains("check-ast"), "{stdout}");
-    assert!(stdout.contains("not fetched"), "{stdout}");
+    assert!(stdout.contains("does not fetch"), "{stdout}");
     assert!(stderr.contains("unchanged"), "{stderr}");
     let unchanged = fs::read_to_string(dir.join(".pre-commit-config.yaml")).unwrap();
     assert_eq!(unchanged, original);

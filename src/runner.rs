@@ -1,7 +1,8 @@
 //! Select files, filter them per hook, and run builtin checks or allowed local hooks.
 //!
 //! Hooks that need another language fail the run. They are not skipped.
-//! Remote repos are not fetched and are not substituted with builtins.
+//! Remote repos are checked against `ahi.lock` and the cache, then refused
+//! until v0.3. This runner does not fetch them and does not substitute builtins.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -73,6 +74,8 @@ pub struct RunRequest<'a> {
     /// `git add` rewritten paths. Used for the default staged run.
     pub stage_fixes: bool,
     pub verbose: bool,
+    /// Cache used to verify URL repos. Required when the config has a remote.
+    pub cache: Option<&'a Path>,
 }
 
 pub fn run(request: &RunRequest<'_>) -> Result<Report> {
@@ -81,6 +84,19 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
             "hook stage `{}` is not a pre-commit stage",
             request.stage
         )));
+    }
+    if request
+        .config
+        .repos
+        .iter()
+        .any(|repo| repo.kind == HookOriginKind::Remote)
+    {
+        let Some(cache) = request.cache else {
+            return Err(Error::new(
+                "internal error: remote repos require a cache directory",
+            ));
+        };
+        crate::remote::verify_for_run(request.root, request.config, cache)?;
     }
     let policy = policy::load_policy(request.root)?;
     let git_files = select_files(request)?;

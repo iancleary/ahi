@@ -80,7 +80,7 @@ OpenShell statements are not re-fetched here. They are used as already written i
 v0.1.3, as implemented and as specified:
 
 - `ahi run` reads `.pre-commit-config.yaml`, filters files, and runs builtin checks. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Remote hooks fail with an explicit error.
-- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, `lock`, `verify`, `fetch`, `update`, and `migrate`. `update` has the alias `autoupdate`. `install`, `uninstall`, `lock`, `verify`, `fetch`, and `update` exit 1 and name the phase that will implement them.
+- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, `lock`, `verify`, `fetch`, `update`, and `migrate`. `update` has the alias `autoupdate`. `install` and `uninstall` exit 1 and name the hook shim phase. `lock`, `verify`, `fetch`, and `update` resolve an immutable hook tag into `ahi.lock` and the cache.
 - `ahi.policy.yaml` version 1 is deny-by-default. Unknown keys are errors. The file is parsed. v0.1 consults `trusted_system_hooks` for local system and script hooks.
 - `ahi::store` is the content-addressed hook cache. It is not a conversation database.
 - `audit.log` is append-only JSON lines: time, command, repository, hook ids, outcome, finding count, local hook ids, and environment names. It does not record file contents or environment values.
@@ -590,7 +590,8 @@ The root package is `0.1.3`. **Decision:** agent work continues that same versio
 | --- | --- |
 | `ahi run` and its flags | Remain. Behavior stays the specification's behavior. |
 | `list-checks`, `explain`, `doctor`, `migrate` | Remain top-level. |
-| `install`, `uninstall`, `lock`, `verify`, `fetch`, `update` | Remain the phase stubs they are until v0.2 or the shim phase implements them. `autoupdate` is an alias of `update`. Agent work does not take those names, or the name `update`. |
+| `install`, `uninstall` | Remain hook-shim stubs until that phase implements them. |
+| `lock`, `verify`, `fetch`, `update` | v0.2 hook-pin commands. `autoupdate` is an alias of `update`. Agent work does not take those names, or the name `update`. |
 | `ahi hooks run` | An alias of `ahi run`, added when the grouped surface is added. The same alias pattern can cover the other hook commands. Aliases are additive. |
 | `ahi.policy.yaml` version 1 | Unchanged. Unknown keys remain errors. Agent keys do not go in this file. |
 | `ahi.actions.yaml` | New. Ignored by `ahi run`. |

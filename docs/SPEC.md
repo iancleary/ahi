@@ -356,7 +356,9 @@ Layout, relative to the cache directory:
   README
   audit.log            # append-only JSON lines; a read-only store skips new lines
   objects/sha256/ab/cd...   # content-addressed blobs
-  repos/<digest>/      # materialized tree for a locked repo
+  mirrors/<sha256 of the repo url>/   # bare mirror; lock, update, and fetch may write it
+  repos/<64 hex>/      # materialized tree from ahi fetch; the name is the digest without sha256:
+  repos/<64 hex>.ls-tree   # canonical git ls-tree -r -z bytes
   stash/               # partial-commit patches, outside the worktree
 ```
 
@@ -417,14 +419,14 @@ Trust boundaries:
 
 Specified in [Rev, lockfile, and cache](#rev-lockfile-and-cache). The v0.2 command is `ahi update`. `ahi autoupdate` is an alias of that command. The pre-commit config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names.
 
-`ahi lock` resolves the `rev` already in the config and writes `ahi.lock`. It does not select a newer tag. `ahi update` selects a newer immutable tag, then writes the same lock fields: `requested` (that tag), `commit`, `tree`, and `digest`. The config may keep the tag so diffs stay readable. Upstream's `--freeze` (store the SHA in the config, with a comment naming the tag) is the model for what the lockfile records. `--bleeding-edge` is rejected.
+`ahi lock` resolves the `rev` already in the config and writes `ahi.lock`. It does not select a newer tag. `ahi update` selects a newer immutable tag, then writes the same lock fields: `requested` (that tag), `commit`, `tree`, and `digest`. It rewrites that repo's config `rev` to the new tag, not to the commit SHA, so `requested` matches the config and the diff stays readable. A `rev` that is already a full 40-character lowercase commit is left unchanged. Upstream's `--freeze` (store the SHA in the config, with a comment naming the tag) is the model for what the lockfile records. `--bleeding-edge` is rejected.
 
 The determinism rule is the one [iancleary/forge](https://github.com/iancleary/forge) uses for `forge self update`, as documented in that repository's `docs/release.md`: resolve one immutable published tag, verify the bytes before accepting them, and fail closed instead of falling through to a weaker source. Applied to a hook repository:
 
 - The selected tag resolves to one full commit. A branch tip is rejected.
 - The fetched tree is checked against `commit`, `tree`, and the canonical `git ls-tree -r -z` digest before the lock row is accepted.
 - The same tag records the same commit, tree, and digest. A later `ahi update` that finds no newer tag leaves the lockfile unchanged.
-- `--dry-run` prints the tag and commit it would record and writes neither the lockfile nor the cache.
+- `--dry-run` prints the tag and commit it would record and writes neither the config, the lockfile, nor the cache.
 - The lockfile is replaced by writing a temporary file in the same directory and renaming it.
 - A missing tag, a non-commit object, or a digest mismatch is a hard error.
 
@@ -432,7 +434,7 @@ The determinism rule is the one [iancleary/forge](https://github.com/iancleary/f
 
 ### Allowlist and offline run
 
-`repo_allow` is an exact string match against the `repo` value (no implicit trailing `.git` equivalence in v0.2; `https://github.com/org/repo` and `https://github.com/org/repo.git` are different entries). **Recommendation, open to Ian:** also accept a single canonicalization (strip a trailing `.git`, lowercase the host) so the allowlist is not trivially bypassed by spelling. v0.2 should implement that canonicalization and say so in the lockfile.
+`repo_allow` is an exact string match against the `repo` value (no implicit trailing `.git` equivalence in v0.2; `https://github.com/org/repo` and `https://github.com/org/repo.git` are different entries). **Recommendation, open:** also accept a single canonicalization (strip a trailing `.git`, lowercase the host) so the allowlist is not trivially bypassed by spelling. v0.2 does not implement that canonicalization.
 
 `ahi fetch` is the command that fills the cache. After it succeeds, `ahi run` works with the network namespace unavailable. A test in v0.2 runs `ahi run` with the network blocked.
 
@@ -581,7 +583,7 @@ Binary name: `ahi`. Global flags, matching the upstream shape where it exists:
 | `ahi list-checks` | v0.1 | Builtin ids, aliases, one-line descriptions. `--format text\|json`. |
 | `ahi explain <ID>` | v0.1 | Description, defaults, arguments, and the upstream hook it corresponds to, if any. |
 | `ahi install` / `uninstall` | shim phase (after v0.3, before relying on it in git) | v0.1 exits 1 with "not implemented until the hook shim phase". |
-| `ahi lock` / `verify` / `fetch` / `update` | v0.2 | v0.1 exits 1 naming v0.2. `ahi autoupdate` is an alias of `ahi update`. |
+| `ahi lock` / `verify` / `fetch` / `update` | v0.2 | `ahi lock` records the configured rev. `ahi update` selects a newer immutable version tag and rewrites `rev` to that tag. `ahi fetch` materializes the locked tree. `ahi verify` and `ahi run` check the cache and do not fetch. `ahi autoupdate` is an alias of `ahi update`. `--dry-run` prints the tag and commit and writes nothing. `--bleeding-edge` is rejected. |
 | `ahi doctor` | v0.1 prints version, git version, config path, cache path, whether that cache is writable or read-only, the scratch directory, and `sandbox: not probed in this version` | v0.4 reports whether an outer sandbox was detected and which host backend, if any, would be used. |
 | `ahi migrate` | v0.1 | Best-effort suggestion. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Writes only with `--write`, and refuses to replace an existing file unless `--force` is set. Not upstream `migrate-config`. |
 | `ahi hook-impl` | with install | Hidden. Not in v0.1. |

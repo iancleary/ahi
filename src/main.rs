@@ -8,6 +8,7 @@ use ahi::check::{all_checks, builtin_by_id};
 use ahi::config::discover_config;
 use ahi::git::repo_root;
 use ahi::output::render;
+use ahi::remote::Workspace;
 use ahi::runner::{self, Selection};
 use ahi::store::{self, Store};
 use ahi::{config, migrate, policy, VERSION};
@@ -51,13 +52,26 @@ enum Command {
     Uninstall,
     /// Resolve tags to full commits and write ahi.lock.
     Lock,
-    /// Check ahi.lock against the cache.
-    Verify,
-    /// Populate the cache. The only command that uses the network.
+    /// Check ahi.lock against the cache. Does not fetch.
+    Verify {
+        /// Fail unless every locked repo has `signature: verified`.
+        #[arg(long)]
+        require_signatures: bool,
+    },
+    /// Materialize locked repos into the cache. May use the network.
     Fetch,
-    /// Move locked repos to a newer immutable tag and record the resolved commit.
+    /// Move hook pins to a newer immutable tag and record the resolved commit.
+    ///
+    /// `ahi autoupdate` is an alias. This command does not replace the ahi binary.
     #[command(name = "update", alias = "autoupdate")]
-    Update,
+    Update {
+        /// Print the tag and commit. Write neither the config, the lockfile, nor the cache.
+        #[arg(long)]
+        dry_run: bool,
+        /// Rejected. ahi does not record a branch tip.
+        #[arg(long)]
+        bleeding_edge: bool,
+    },
     /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
     ///
     /// Prints a report and a suggested config. Does not fetch remotes and does not
@@ -129,8 +143,20 @@ fn main() -> ExitCode {
         Command::Install | Command::Uninstall => {
             unimplemented_until("the hook shim phase (after hook execution exists)")
         }
-        Command::Lock | Command::Verify | Command::Fetch | Command::Update => {
-            unimplemented_until("v0.2")
+        Command::Lock => with_workspace(&cli, |workspace| ahi::remote::lock(&workspace)),
+        Command::Verify { require_signatures } => with_workspace(&cli, |workspace| {
+            ahi::remote::verify(&workspace, *require_signatures)
+        }),
+        Command::Fetch => with_workspace(&cli, |workspace| ahi::remote::fetch(&workspace)),
+        Command::Update {
+            dry_run,
+            bleeding_edge,
+        } => {
+            if *bleeding_edge {
+                eprintln!("error: --bleeding-edge is rejected; ahi will not record a branch tip");
+                return ExitCode::from(1);
+            }
+            with_workspace(&cli, |workspace| ahi::remote::update(&workspace, *dry_run))
         }
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
     }
@@ -139,6 +165,77 @@ fn main() -> ExitCode {
 fn unimplemented_until(phase: &str) -> ExitCode {
     eprintln!("error: not implemented until {phase}");
     ExitCode::from(1)
+}
+
+struct LoadedRepo {
+    root: PathBuf,
+    config_path: PathBuf,
+    config: config::Config,
+    cache: PathBuf,
+}
+
+fn load_repo(cli: &Cli) -> std::result::Result<LoadedRepo, ExitCode> {
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let root = match repo_root(&cwd) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let config_path = match discover_config(&root, cli.config.as_deref()) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let config = match config::load_config(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    Ok(LoadedRepo {
+        root,
+        config_path,
+        config,
+        cache: store::cache_dir(cli.cache_dir.as_deref()),
+    })
+}
+
+fn with_workspace(
+    cli: &Cli,
+    body: impl for<'a> FnOnce(Workspace<'a>) -> ahi::Result<Vec<String>>,
+) -> ExitCode {
+    let loaded = match load_repo(cli) {
+        Ok(loaded) => loaded,
+        Err(code) => return code,
+    };
+    match body(Workspace {
+        root: &loaded.root,
+        config_path: &loaded.config_path,
+        config: &loaded.config,
+        cache: &loaded.cache,
+    }) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            ExitCode::from(0)
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
@@ -204,6 +301,7 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
     } else {
         Selection::Staged
     };
+    let cache = store::cache_dir(cli.cache_dir.as_deref());
     let stage_fixes = matches!(selection, Selection::Staged);
     let mut skip = BTreeSet::new();
     if let Ok(raw) = env::var("SKIP") {
@@ -226,6 +324,7 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
         fix: args.fix,
         stage_fixes,
         verbose: args.verbose,
+        cache: Some(&cache),
     }) {
         Ok(report) => report,
         Err(err) => {
@@ -241,7 +340,6 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
         }
     };
     print!("{rendered}");
-    let cache = store::cache_dir(cli.cache_dir.as_deref());
     if let Ok(store) = Store::open(&cache) {
         let ids: Vec<String> = report.hooks.iter().map(|hook| hook.id.clone()).collect();
         let findings = report.hooks.iter().map(|hook| hook.findings.len()).sum();
@@ -461,7 +559,7 @@ fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> 
                     "local execution: system and script when the policy pins the hook id and the exact entry; other languages are refused"
                 );
                 println!(
-                    "remote hooks: not executed and not substituted; use repo: builtin or `ahi migrate` for a best-effort suggestion"
+                    "remote hooks: not executed until v0.3. ahi lock, ahi update, and ahi fetch record and cache a pin; ahi run does not fetch"
                 );
                 println!(
                     "fix: `ahi run --fix` rewrites end-of-file, trailing whitespace, and mixed line endings; other checks stay report-only"

@@ -335,7 +335,7 @@ fn copy_remote(
     };
     let Some(known) = equivalent(&id) else {
         skipped.push(format!(
-            "- `{id}` from `{url}` rev `{rev_text}`: no offline builtin for this id. Remote repos are not fetched and are not executed until v0.2"
+            "- `{id}` from `{url}` rev `{rev_text}`: no offline builtin for this id. ahi migrate does not fetch this repo. Remote hooks are not executed until v0.3"
         ));
         return;
     };
