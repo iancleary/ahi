@@ -10,7 +10,7 @@ A proposal to grow ahi from the hook runner into a public agent runtime and coor
 
 ## Build
 
-MSRV is Rust 1.83. A `justfile` wraps the same commands CI runs.
+MSRV is Rust 1.88. A `justfile` wraps the same commands CI runs.
 
 ```sh
 cargo test --all-features
@@ -20,7 +20,7 @@ cargo build --release
 
 `ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
 
-`scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself still builds with Rust 1.83. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
+`scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself builds with Rust 1.88. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
 
 The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi` when that variable is set, else the temporary directory joined with `ahi`. The hook cache does not fall back to a home directory. A store whose `objects/sha256` directory already exists can be opened read-only.
 

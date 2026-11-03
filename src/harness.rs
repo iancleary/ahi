@@ -792,16 +792,65 @@ mod tests {
         let body = body.to_vec();
         thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0_u8; 1024];
-            let _ = sock.read(&mut buf);
+            // A short read leaves request bytes queued. Closing that socket makes
+            // macOS reset the connection, and the client's next read returns
+            // EINVAL (os error 22) instead of the status line.
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            sock.set_nodelay(true).unwrap();
+            read_http_request(&mut sock);
             let header = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
                 body.len()
             );
             sock.write_all(header.as_bytes()).unwrap();
             sock.write_all(&body).unwrap();
+            sock.flush().unwrap();
+            let _ = sock.shutdown(std::net::Shutdown::Write);
+            let mut discard = [0_u8; 1024];
+            loop {
+                match sock.read(&mut discard) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
         });
         port
+    }
+
+    fn read_http_request(sock: &mut std::net::TcpStream) {
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 1024];
+        let header_end = loop {
+            let n = sock.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            if buf.len() > 64 * 1024 {
+                return;
+            }
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let mut content_length = 0usize;
+        for line in headers.lines() {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut received = buf.len() - header_end;
+        while received < content_length {
+            let n = sock.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            received += n;
+        }
     }
 
     #[test]

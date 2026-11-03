@@ -32,7 +32,7 @@ The following is **inferred** from the review brief for this proposal, not from 
 - The differentiator is ahi's existing declared, pinned, configuration-driven hooks, generalized to agent actions (tool calls, commands, file writes, pushes, and outbound messages), combined with sandbox-by-default execution and escalation governed by that same engine.
 - The existing pre-commit runner remains available, for example as an `ahi hooks` subcommand, so 0.1.x users keep working.
 
-Observed, not inferred: the repository is `https://github.com/iancleary/ahi`. The root `Cargo.toml` at the base of this proposal is version `0.1.3`, edition 2021, license `MIT`, MSRV `1.83`, `unsafe_code = "forbid"`. [docs/SPEC.md](SPEC.md) already records an MIT `LICENSE` with `Copyright (c) 2026 Ian Cleary`.
+Observed, not inferred: the repository is `https://github.com/iancleary/ahi`. The root `Cargo.toml` is edition 2021, license `MIT`, MSRV `1.88`, `unsafe_code = "forbid"`. [docs/SPEC.md](SPEC.md) already records an MIT `LICENSE` with `Copyright (c) 2026 Ian Cleary`.
 
 ## Research limits
 

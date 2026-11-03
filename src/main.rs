@@ -439,10 +439,9 @@ fn doctor(
         Ok(version) => println!("git: {version}"),
         Err(err) => println!("git: {err}"),
     }
-    match env::current_dir().and_then(|cwd| {
-        repo_root(&cwd)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
-    }) {
+    match env::current_dir()
+        .and_then(|cwd| repo_root(&cwd).map_err(|err| std::io::Error::other(err.to_string())))
+    {
         Ok(root) => {
             println!("root: {}", root.display());
             match discover_config(&root, config) {
@@ -473,10 +472,9 @@ fn doctor(
     println!(
         "network: not enforced in this version (no sandbox); local hook environments are scrubbed"
     );
-    match env::current_dir().and_then(|cwd| {
-        repo_root(&cwd)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
-    }) {
+    match env::current_dir()
+        .and_then(|cwd| repo_root(&cwd).map_err(|err| std::io::Error::other(err.to_string())))
+    {
         Ok(root) => match policy::load_policy(&root) {
             Ok(loaded) => {
                 let path = root.join("ahi.policy.yaml");
