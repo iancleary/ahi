@@ -1,7 +1,7 @@
 //! Line editor for the chat input.
 //!
-//! The screen translates terminal keys into `EditorKey`. This module does
-//! not read the terminal.
+//! `key_binding` translates a terminal key into `KeyAction::Edit`. This module
+//! does not read the terminal.
 
 const ROW_LIMIT: usize = 8;
 

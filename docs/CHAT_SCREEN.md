@@ -115,7 +115,7 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 
 ## Implementation constraints
 
-- No new dependencies. The input box is a small editor in `src/chat/input.rs` (a `Vec<String>` of lines and a cursor) on top of `ratatui` 0.30.0 and `crossterm` 0.29.0, which are already pinned. Do not add `tui-textarea` or an async runtime. The editor accepts an `EditorKey`. `src/chat/mod.rs` translates terminal events into that key.
+- No new dependencies. The input box is a small editor in `src/chat/input.rs` (a `Vec<String>` of lines and a cursor) on top of `ratatui` 0.30.0 and `crossterm` 0.29.0, which are already pinned. Do not add `tui-textarea` or an async runtime. The editor accepts an `EditorKey`. `src/chat/key_binding.rs` translates a terminal key into a `KeyAction`, which carries that `EditorKey` when the key edits the input.
 - The git branch is read from the repository's `HEAD` file, following a `gitdir:` file for worktrees, using the existing `src/git.rs` helpers where they fit. Do not spawn `git` on each frame; read once at start and again after each submitted message.
 - Keep the screen state in a plain struct (`ChatScreen`) separate from drawing, so key handling and layout are testable without a terminal.
 - Names follow the project naming rule: precise, descriptive, no slang (`CompletionBackend`, `EchoBackend`, `ThinkingLevel`, `render_session_row`).
@@ -127,7 +127,8 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 
 | File | Responsibility |
 |---|---|
-| `mod.rs` | `ChatScreen` state, the frame loop, key translation, and drawing |
+| `mod.rs` | `ChatScreen` state, the frame loop, applying a `KeyAction`, and drawing |
+| `key_binding.rs` | Translates a crossterm key into a `KeyAction` |
 | `input.rs` | The line editor. It accepts an `EditorKey`, not a terminal event |
 | `transcript.rs` | Messages, wrapping, and the scroll window. It returns plain text |
 | `status.rs` | Location-row and session-row text |
@@ -138,7 +139,7 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 | `backend/mod.rs` | `CompletionBackend`, `ChatRequest`, and `ResponseEvent` |
 | `backend/echo.rs` | `EchoBackend`, the stand-in |
 
-Only `mod.rs` and `status.rs` may import `ratatui` or `crossterm`. `status.rs` does not currently import either: it returns row text, and `mod.rs` applies the dim and normal styles when it draws. `transcript.rs` does not either: wrapping produces strings, and `mod.rs` places that string in a paragraph. `input.rs`, `usage.rs`, `command.rs`, `thinking.rs`, `location.rs`, and `backend/` are plain logic.
+`mod.rs` may import `ratatui` and `crossterm`. `key_binding.rs` may import `crossterm` and must not import `ratatui`. `status.rs` may import either; it currently imports neither and returns row text, and `mod.rs` applies the dim and normal styles when it draws. `transcript.rs` does not either: wrapping produces strings, and `mod.rs` places that string in a paragraph. `input.rs`, `usage.rs`, `command.rs`, `thinking.rs`, `location.rs`, and `backend/` are plain logic.
 
 ## Tests (part 1)
 

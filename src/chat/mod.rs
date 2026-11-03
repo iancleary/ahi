@@ -4,11 +4,13 @@
 //! echoes the operator's text and reports synthetic token counts. It does not
 //! call a model and it does not use the network.
 //!
-//! Terminal types stay in this module. The line editor receives `EditorKey`.
+//! Terminal drawing stays in this module. Key codes are translated by
+//! `key_binding` before the screen applies them.
 
 mod backend;
 mod command;
 mod input;
+mod key_binding;
 mod location;
 mod status;
 mod thinking;
@@ -21,7 +23,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -31,7 +33,8 @@ use backend::{
     parse_selection, ChatRequest, CompletionBackend, EchoBackend, ResponseEvent, Selection,
 };
 use command::ParsedCommand;
-use input::{EditorKey, InputEditor};
+use input::InputEditor;
+use key_binding::KeyAction;
 use thinking::ThinkingLevel;
 use transcript::{ChatMessage, TranscriptRole};
 use usage::SessionMeters;
@@ -140,21 +143,23 @@ impl ChatScreen {
         self.input = InputEditor::from_text(text);
     }
 
-    fn handle_key(
+    fn apply_key(
         &mut self,
         key: KeyEvent,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(ScreenAction::Continue);
-        }
-        if is_newline(&key) {
-            self.input.apply(EditorKey::Newline);
-            return Ok(ScreenAction::Continue);
-        }
-        match key.code {
-            KeyCode::Enter => self.submit_input(backend),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        self.apply_action(key_binding::translate(key), backend)
+    }
+
+    fn apply_action(
+        &mut self,
+        action: KeyAction,
+        backend: &mut dyn CompletionBackend,
+    ) -> Result<ScreenAction> {
+        match action {
+            KeyAction::Ignore | KeyAction::Cancel => Ok(ScreenAction::Continue),
+            KeyAction::Submit => self.submit_input(backend),
+            KeyAction::ClearInputOrExit => {
                 if self.input.is_blank() {
                     Ok(ScreenAction::Exit)
                 } else {
@@ -162,62 +167,33 @@ impl ChatScreen {
                     Ok(ScreenAction::Continue)
                 }
             }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::ExitIfInputEmpty => {
                 if self.input.is_blank() {
                     Ok(ScreenAction::Exit)
                 } else {
                     Ok(ScreenAction::Continue)
                 }
             }
-            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::CycleThinkingLevel => {
                 self.thinking = self.thinking.next();
                 thinking::write(&self.state_dir, self.thinking)?;
                 Ok(ScreenAction::Continue)
             }
-            KeyCode::Esc | KeyCode::PageUp | KeyCode::PageDown => {
-                self.handle_navigation(key.code);
+            KeyAction::ScrollTowardOlder => {
+                let page = self.transcript_height.max(1);
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(page);
+                self.clamp_scroll();
                 Ok(ScreenAction::Continue)
             }
-            KeyCode::Left => {
-                self.input.apply(EditorKey::Left);
+            KeyAction::ScrollTowardNewer => {
+                let page = self.transcript_height.max(1);
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(page);
                 Ok(ScreenAction::Continue)
             }
-            KeyCode::Right => {
-                self.input.apply(EditorKey::Right);
+            KeyAction::Edit(key) => {
+                self.input.apply(key);
                 Ok(ScreenAction::Continue)
             }
-            KeyCode::Up => {
-                self.input.apply(EditorKey::Up);
-                Ok(ScreenAction::Continue)
-            }
-            KeyCode::Down => {
-                self.input.apply(EditorKey::Down);
-                Ok(ScreenAction::Continue)
-            }
-            KeyCode::Home => {
-                self.input.apply(EditorKey::Home);
-                Ok(ScreenAction::Continue)
-            }
-            KeyCode::End => {
-                self.input.apply(EditorKey::End);
-                Ok(ScreenAction::Continue)
-            }
-            KeyCode::Backspace => {
-                self.input.apply(EditorKey::Backspace);
-                Ok(ScreenAction::Continue)
-            }
-            KeyCode::Delete => {
-                self.input.apply(EditorKey::Delete);
-                Ok(ScreenAction::Continue)
-            }
-            KeyCode::Char(ch)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                self.input.apply(EditorKey::Character(ch));
-                Ok(ScreenAction::Continue)
-            }
-            _ => Ok(ScreenAction::Continue),
         }
     }
 
@@ -394,22 +370,6 @@ impl ChatScreen {
         }
     }
 
-    fn handle_navigation(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::PageUp => {
-                let page = self.transcript_height.max(1);
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(page);
-                self.clamp_scroll();
-            }
-            KeyCode::PageDown => {
-                let page = self.transcript_height.max(1);
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(page);
-            }
-            KeyCode::Esc => {}
-            _ => {}
-        }
-    }
-
     fn apply_event(&mut self, event: ResponseEvent) -> bool {
         match event {
             ResponseEvent::TextDelta(text) => {
@@ -477,21 +437,6 @@ impl ChatScreen {
     }
 }
 
-fn is_newline(key: &KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Enter
-            if key
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-        {
-            true
-        }
-        KeyCode::Char('j' | 'J') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
-        KeyCode::Char('\n') => true,
-        _ => false,
-    }
-}
-
 fn rule_line(width: usize) -> String {
     "─".repeat(width)
 }
@@ -532,7 +477,7 @@ fn session_loop(
         if crossterm::event::poll(FRAME_INTERVAL).map_err(|err| Error::new(err.to_string()))? {
             let event = crossterm::event::read().map_err(|err| Error::new(err.to_string()))?;
             if let Event::Key(key) = event {
-                match screen.handle_key(key, backend)? {
+                match screen.apply_key(key, backend)? {
                     ScreenAction::Continue => {}
                     ScreenAction::Exit => return Ok(SessionEnd::Exit),
                     ScreenAction::ReopenModelPicker => {
@@ -556,14 +501,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
-    fn enter() -> KeyEvent {
-        key(KeyCode::Enter, KeyModifiers::NONE)
-    }
-
     struct RecordingBackend {
         requests: Vec<ChatRequest>,
     }
@@ -582,33 +519,91 @@ mod tests {
     }
 
     #[test]
-    fn enter_submits_and_newline_keys_do_not() {
+    fn submit_sends_the_input_and_a_newline_edit_does_not() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-keys");
         let mut screen = screen_in(&state);
         let mut backend = RecordingBackend {
             requests: Vec::new(),
         };
         screen.set_input_text("   ");
-        screen.handle_key(enter(), &mut backend).unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert!(backend.requests.is_empty());
         assert_eq!(screen.input_text(), "   ");
 
         screen.set_input_text("explain");
-        screen.handle_key(enter(), &mut backend).unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert_eq!(backend.requests.len(), 1);
         assert_eq!(backend.requests[0].messages[0].text, "explain");
         assert!(screen.input_text().is_empty());
 
-        for (label, event) in [
-            ("shift", key(KeyCode::Enter, KeyModifiers::SHIFT)),
-            ("alt", key(KeyCode::Enter, KeyModifiers::ALT)),
-            ("ctrl-j", key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
-        ] {
-            screen.set_input_text("one");
-            screen.handle_key(event, &mut backend).unwrap();
-            assert_eq!(screen.input_text(), "one\n", "{label}");
-            assert_eq!(backend.requests.len(), 1, "{label}");
+        screen.set_input_text("one");
+        screen
+            .apply_action(KeyAction::Edit(input::EditorKey::Newline), &mut backend)
+            .unwrap();
+        assert_eq!(screen.input_text(), "one\n");
+        assert_eq!(backend.requests.len(), 1);
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn clear_exit_scroll_and_thinking_actions_change_the_screen() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-actions");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("draft");
+        let action = screen
+            .apply_action(KeyAction::ClearInputOrExit, &mut backend)
+            .unwrap();
+        assert_eq!(action, ScreenAction::Continue);
+        assert!(screen.input_text().is_empty());
+        let action = screen
+            .apply_action(KeyAction::ClearInputOrExit, &mut backend)
+            .unwrap();
+        assert_eq!(action, ScreenAction::Exit);
+
+        screen.set_input_text("draft");
+        let action = screen
+            .apply_action(KeyAction::ExitIfInputEmpty, &mut backend)
+            .unwrap();
+        assert_eq!(action, ScreenAction::Continue);
+        assert_eq!(screen.input_text(), "draft");
+        screen.input.clear();
+        let action = screen
+            .apply_action(KeyAction::ExitIfInputEmpty, &mut backend)
+            .unwrap();
+        assert_eq!(action, ScreenAction::Exit);
+
+        screen.transcript_height = 1;
+        for text in ["one", "two", "three"] {
+            screen.messages.push(ChatMessage {
+                role: TranscriptRole::Notice,
+                text: text.to_string(),
+            });
         }
+        screen
+            .apply_action(KeyAction::ScrollTowardOlder, &mut backend)
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 1);
+        screen
+            .apply_action(KeyAction::ScrollTowardNewer, &mut backend)
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 0);
+
+        assert_eq!(screen.thinking(), ThinkingLevel::Medium);
+        screen
+            .apply_action(KeyAction::CycleThinkingLevel, &mut backend)
+            .unwrap();
+        assert_eq!(screen.thinking(), ThinkingLevel::High);
+        assert_eq!(
+            fs::read_to_string(state.join("thinking")).unwrap().trim(),
+            "high"
+        );
         let _ = fs::remove_dir_all(state);
     }
 
@@ -621,7 +616,9 @@ mod tests {
         };
 
         screen.set_input_text("/thinking high");
-        let action = screen.handle_key(enter(), &mut backend).unwrap();
+        let action = screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert_eq!(action, ScreenAction::Continue);
         assert_eq!(screen.thinking(), ThinkingLevel::High);
         assert_eq!(
@@ -630,7 +627,9 @@ mod tests {
         );
 
         screen.set_input_text("/thinking");
-        screen.handle_key(enter(), &mut backend).unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert!(screen
             .messages()
             .iter()
@@ -642,12 +641,16 @@ mod tests {
         });
         screen.meters.input_tokens = Some(12);
         screen.set_input_text("/clear");
-        screen.handle_key(enter(), &mut backend).unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert!(screen.messages().is_empty());
         assert_eq!(screen.meters().input_tokens, None);
 
         screen.set_input_text("/no-such");
-        screen.handle_key(enter(), &mut backend).unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert!(screen
             .messages()
             .iter()
@@ -655,11 +658,15 @@ mod tests {
         assert!(backend.requests.is_empty());
 
         screen.set_input_text("/model");
-        let action = screen.handle_key(enter(), &mut backend).unwrap();
+        let action = screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert_eq!(action, ScreenAction::ReopenModelPicker);
 
         screen.set_input_text("/exit");
-        let action = screen.handle_key(enter(), &mut backend).unwrap();
+        let action = screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
         assert_eq!(action, ScreenAction::Exit);
         let _ = fs::remove_dir_all(state);
     }
@@ -734,7 +741,7 @@ mod tests {
         let mut screen = screen_in(&state);
         screen.set_input_text("hello!!!!");
         let mut live = EchoBackend::new();
-        screen.handle_key(enter(), &mut live).unwrap();
+        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while screen.response_in_progress() && std::time::Instant::now() < deadline {
             screen.poll_backend();
@@ -754,9 +761,9 @@ mod tests {
         assert_eq!(screen.meters().context_window, Some(128_000));
 
         screen.set_input_text("/clear");
-        screen.handle_key(enter(), &mut live).unwrap();
+        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
         screen.set_input_text("again!!!");
-        screen.handle_key(enter(), &mut live).unwrap();
+        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while screen.response_in_progress() && std::time::Instant::now() < deadline {
             screen.poll_backend();
