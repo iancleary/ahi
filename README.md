@@ -34,8 +34,9 @@ The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi
 | `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, policy summary. Sandbox detection is not in v0.1. |
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
 | `install`, `uninstall` | Exit 1. They are specified for the hook shim and not implemented. |
+| `ahi update` | Exit 1. Reserved for replacing this ahi binary from an attested archive. It does not install or move hook repositories. |
 
-Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `ahi update`, and `autoupdate` are not commands. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `autoupdate`, and `self-update` are not commands. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
 
 ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 

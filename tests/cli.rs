@@ -292,13 +292,19 @@ fn list_checks_and_explain() {
 
 #[test]
 fn later_commands_fail_closed() {
-    for cmd in ["install", "uninstall"] {
+    for cmd in ["install", "uninstall", "update"] {
         let output = ahi().arg(cmd).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{cmd}");
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("not implemented until"), "{cmd}: {err}");
     }
-    for cmd in ["lock", "verify", "fetch", "update", "autoupdate"] {
+    let update = ahi().arg("update").output().unwrap();
+    let update_err = String::from_utf8(update.stderr).unwrap();
+    assert!(
+        update_err.contains("attested archive replacement"),
+        "{update_err}"
+    );
+    for cmd in ["lock", "verify", "fetch", "autoupdate", "self-update"] {
         let output = ahi().arg(cmd).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{cmd}");
         let err = String::from_utf8(output.stderr).unwrap();

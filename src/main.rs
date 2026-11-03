@@ -49,6 +49,12 @@ enum Command {
     Install,
     /// Remove the git hook shim.
     Uninstall,
+    /// Replace this ahi binary from an attested archive this repository publishes.
+    ///
+    /// Checks the published checksum and attestation, and refuses a target it
+    /// cannot verify. Does not accept a package name. Does not clone a hook
+    /// repository. Not implemented in this version.
+    Update,
     /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
     ///
     /// Prints a report and a suggested config. Does not fetch remotes and does not
@@ -119,6 +125,9 @@ fn main() -> ExitCode {
         Command::Doctor => doctor(cli.config.as_deref(), cli.cache_dir.as_deref()),
         Command::Install | Command::Uninstall => {
             unimplemented_until("the hook shim phase (after hook execution exists)")
+        }
+        Command::Update => {
+            unimplemented_until("the attested archive replacement of this ahi binary")
         }
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
     }

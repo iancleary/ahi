@@ -65,7 +65,7 @@ OpenShell statements are not re-fetched here. They are used as already written i
 ## Non-goals
 
 - Replacing [docs/SPEC.md](SPEC.md), renumbering v0.2, v0.3, or v0.4, or pulling agent execution into those phases.
-- A package manager, including a hook-repository installer. ahi does not install Node, Python, Go, Rust toolchains, npm packages, Pi packages, hook repositories, or third-party agents. Checkers are compiled into the binary and selected with `repo: builtin`. There is no `ahi fetch`, `ahi lock`, `ahi verify`, or `ahi update`.
+- A package manager, including a hook-repository installer. ahi does not install Node, Python, Go, Rust toolchains, npm packages, Pi packages, hook repositories, or third-party agents. Checkers are compiled into the binary and selected with `repo: builtin`. There is no `ahi fetch`, `ahi lock`, or `ahi verify`. `ahi update` replaces the ahi binary from an attested archive. It does not install hook repositories.
 - A drop-in copy of jessfraz/agent, of Rex, of Tailscale, of Nix, or of the Pi coding-agent terminal interface.
 - Byte-for-byte compatibility with a Pi session file. The store follows Pi Durable's logical model. Reading a Pi database file would be a later importer against a pinned schema, and it is not part of the first store.
 - An iOS client in this repository. The owner deferred that client. It is not part of the actions, sandbox, store, or coordinator work. Per the owner's comparison, the private copy changed `ios/README.md` only, with no Swift source changes relative to its baseline. Those documentation edits are not an iOS scope for ahi.
@@ -80,7 +80,7 @@ OpenShell statements are not re-fetched here. They are used as already written i
 v0.1.3, as implemented and as specified:
 
 - `ahi run` reads `.pre-commit-config.yaml`, filters files, and runs builtin checks. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Remote hooks fail with an explicit error.
-- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, and `migrate`. `install` and `uninstall` exit 1 and name the hook shim phase. `lock`, `verify`, `fetch`, `update`, and `autoupdate` are not commands.
+- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, `update`, and `migrate`. `install` and `uninstall` exit 1 and name the hook shim phase. `update` exits 1 and names the attested archive replacement of this binary. It does not clone a hook repository. `lock`, `verify`, `fetch`, `autoupdate`, and `self-update` are not commands.
 - `ahi.policy.yaml` version 1 is deny-by-default. Unknown keys are errors. The file is parsed. v0.1 consults `trusted_system_hooks` for local system and script hooks.
 - `ahi::store` is the content-addressed hook cache. It is not a conversation database.
 - `audit.log` is append-only JSON lines: time, command, repository, hook ids, outcome, finding count, local hook ids, and environment names. It does not record file contents or environment values.
@@ -91,7 +91,7 @@ Roadmap already committed in the specification:
 
 | Phase | Contract |
 | --- | --- |
-| v0.2 | Withdrawn. No `ahi.lock`, and no command that clones or moves a hook repository. Checkers stay `repo: builtin`. |
+| v0.2 | Withdrawn as a hook-repository installer. No `ahi.lock`. `ahi update` is the later replacement of the ahi binary from an attested archive, and it is not implemented. Checkers stay `repo: builtin`. |
 | v0.3 | More builtins compiled into ahi. This phase does not execute `python`, `rust`, `golang`, or `docker_image` from a cloned hook repository, and it does not install their packages. |
 | v0.4 | Detect an outer sandbox and do not nest. Optional host backends, with the limits in the specification. |
 
@@ -488,7 +488,7 @@ Proposed commands, additive, and absent until a later phase implements them. The
 | `ahi worker` | Connect to a coordinator through one catalogued transport and execute admitted effects. Does not open the store for write. |
 | `ahi task list` and `ahi task show` | Read the task registry through the coordinator. |
 | `ahi actions check` | Evaluate one action against `ahi.actions.yaml` and print the verdict. Does not execute it. |
-| `ahi self-update` | Replace this ahi binary, or another first-party artifact from the same release, after verification. |
+| `ahi update` | Replace this ahi binary from an attested archive this repository publishes, after verification. Not a hook-repository command. |
 
 `ahi serve` with no configuration starts a coordinator that has no provider and no sources, and listens on the local socket. That process can still answer `ahi actions check` once the actions file exists. It does not open a network connection by merely starting.
 
@@ -576,7 +576,7 @@ Three paths, all for ahi itself:
 2. **Attested archives.** The layout and the `gh attestation verify --repo iancleary/ahi` commands in [docs/release.md](release.md) stay the Linux `x86_64` and `aarch64` archives. **Decision:** Linux, macOS, and Windows all use `cargo install ahi`. This proposal does not add macOS or Windows archives. The Linux archives remain the extra path they already are.
 3. **ahi.dev.** The brief names this domain for an install document and for project documentation. In this environment `getent hosts ahi.dev` returned no address, and a request to `https://ahi.dev` produced no HTTP response. **Unverified** whether the domain is registered or serving. The document that should live there, when the domain is ready, is the same install and verify procedure as the README. It is not a second installer with a different trust model.
 
-`ahi self-update`, when it exists, downloads an attested archive for a target the release workflow publishes, checks `ahi-<version>-sha256sums.txt`, and verifies the attestation against `iancleary/ahi`. It then replaces the ahi executable. It refuses a target it cannot verify. macOS and Windows stay on `cargo install`. It does not run a remote shell script. It does not accept a package name argument. First-party components are artifacts this repository's release workflow publishes. A hook repository, a language runtime, and a Pi package are not first-party components.
+`ahi update` downloads an attested archive for a target the release workflow publishes, checks `ahi-<version>-sha256sums.txt`, and verifies the attestation against `iancleary/ahi`. It then replaces the ahi executable. It refuses a target it cannot verify. macOS and Windows stay on `cargo install`. It does not run a remote shell script. It does not accept a package name argument. The command is specified and not implemented. First-party components are artifacts this repository's release workflow publishes. A hook repository, a language runtime, and a Pi package are not first-party components.
 
 The pipe-to-shell line on [pi.dev](https://pi.dev/) is the pattern this section does not use.
 
@@ -591,7 +591,8 @@ The root package is `0.1.3`. **Decision:** agent work continues that same versio
 | `ahi run` and its flags | Remain. Behavior stays the specification's behavior. |
 | `list-checks`, `explain`, `doctor`, `migrate` | Remain top-level. |
 | `install`, `uninstall` | Remain hook-shim stubs until that phase implements them. |
-| `lock`, `verify`, `fetch`, `update` | These names are not commands. ahi does not install or move hook repositories. `autoupdate` is not an alias. Agent work does not add them. |
+| `update` | Replaces the ahi binary from an attested archive. This version exits 1. Agent work does not use this name for hook pins. `self-update` is not an alias. |
+| `lock`, `verify`, `fetch`, `autoupdate` | These names are not commands. ahi does not install or move hook repositories. |
 | `ahi hooks run` | An alias of `ahi run`, added when the grouped surface is added. The same alias pattern can cover the other hook commands. Aliases are additive. |
 | `ahi.policy.yaml` version 1 | Unchanged. Unknown keys remain errors. Agent keys do not go in this file. |
 | `ahi.actions.yaml` | New. Ignored by `ahi run`. |
@@ -613,7 +614,7 @@ These phases sit after the hook-runner work. They ship as later ahi releases on 
 | Conversation store | After the actions phase. | Rust-native commits, resume, one writer, grants and receipts, `synchronous = FULL` and `fullfsync = ON`. No Node child. No provider required to test resume. |
 | Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, with browser login. `models.json` and gateway discovery are specified above and are not required for that first provider. Neither runs merely because the process started. |
 | Intake | After the coordinator, one adapter at a time, each off by default. | Admit-before-cursor. A dismissal reason is data. The adapter does not install a tool. |
-| Distribution | When a release is cut. Not part of implementing the phases above. | `cargo install ahi` on Linux, macOS, and Windows. ahi.dev documents that path and the existing attested Linux archives. `ahi self-update` only for an archive the release workflow publishes. |
+| Distribution | When a release is cut. Not part of implementing the phases above. | `cargo install ahi` on Linux, macOS, and Windows. ahi.dev documents that path and the existing attested Linux archives. `ahi update` only for an archive the release workflow publishes. |
 
 Local `language: system` and `language: script` hooks are the external programs the runner already executes. v0.4 is the right predecessor for effect sandboxes because nesting policy is already specified there. Starting a second sandbox design beside v0.4 would fork the threat model.
 

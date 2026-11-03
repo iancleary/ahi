@@ -391,9 +391,9 @@ Trust boundaries:
 
 ### Revisions
 
-The pre-commit config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names so existing files still parse. ahi does not act on them. There is no `ahi update`, `ahi autoupdate`, `ahi lock`, `ahi verify`, or `ahi fetch`. Those commands would install or move hook repositories. Checkers are compiled into ahi and selected with `repo: builtin`.
+The pre-commit config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names so existing files still parse. ahi does not act on them. There is no `ahi autoupdate`, `ahi lock`, `ahi verify`, or `ahi fetch`. Those names would install or move hook repositories. Checkers are compiled into ahi and selected with `repo: builtin`.
 
-Replacing the ahi binary, if it is ever a command, is `ahi self-update` for an attested archive this repository publishes. That is a replacement of ahi itself. It is not a hook-repository installer, and it is not implemented.
+`ahi update` replaces this ahi binary from an attested archive this repository publishes. It checks `ahi-<version>-sha256sums.txt` and verifies the attestation against `iancleary/ahi`. It refuses a target it cannot verify. It does not accept a package name, does not run a remote shell script, and does not clone or move a hook repository. macOS and Windows stay on `cargo install` because those archives are not published. This version exits 1 with "not implemented until the attested archive replacement of this ahi binary". The command is not named `self-update`.
 
 ### Allowlist
 
@@ -533,7 +533,8 @@ Binary name: `ahi`. Global flags, matching the upstream shape where it exists:
 | `ahi list-checks` | v0.1 | Builtin ids, aliases, one-line descriptions. `--format text\|json`. |
 | `ahi explain <ID>` | v0.1 | Description, defaults, arguments, and the upstream hook it corresponds to, if any. |
 | `ahi install` / `uninstall` | shim phase (after v0.3, before relying on it in git) | v0.1 exits 1 with "not implemented until the hook shim phase". |
-| `ahi lock` / `verify` / `fetch` / `update` | absent | These names are not commands. ahi does not install or move hook repositories. `autoupdate` is not an alias. |
+| `ahi update` | later, name reserved | Replaces this ahi binary from an attested archive. This version exits 1 with "not implemented until the attested archive replacement of this ahi binary". It does not install or move hook repositories. `self-update` is not an alias. |
+| `ahi lock` / `verify` / `fetch` / `autoupdate` | absent | These names are not commands. ahi does not install or move hook repositories. |
 | `ahi doctor` | v0.1 prints version, git version, config path, cache path, whether that cache is writable or read-only, the scratch directory, and `sandbox: not probed in this version` | v0.4 reports whether an outer sandbox was detected and which host backend, if any, would be used. |
 | `ahi migrate` | v0.1 | Best-effort suggestion. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Writes only with `--write`, and refuses to replace an existing file unless `--force` is set. Not upstream `migrate-config`. |
 | `ahi hook-impl` | with install | Hidden. Not in v0.1. |
@@ -663,13 +664,13 @@ Other CI facts:
 
 ### v0.1 — this implementation slice
 
-Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), `ahi migrate` (best-effort, no parity guarantee), `install` and `uninstall` stubs, tests, `justfile`, `cargo deny`, CI matrix, README.
+Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), `ahi migrate` (best-effort, no parity guarantee), `install`, `uninstall`, and `update` stubs, tests, `justfile`, `cargo deny`, CI matrix, README.
 
 A URL or `meta` hook fails the run with an explicit error. It is not skipped and not substituted. `repo: local` with `language: system` or `script` runs when the policy pins the id and the exact entry. Other local languages fail the hook. `ahi run --fix` rewrites the three whitespace checks without the stash protocol; a file with unstaged changes is refused. Network is not blocked for a trusted local hook, because v0.4 is the sandbox. The environment is scrubbed to the base keep list plus the toolchain pass-through (`CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN` by default; more names only from `toolchain_env` in the policy). Credential names are never passed.
 
 ### v0.2 — no hook-repository installer
 
-Withdrawn. ahi does not grow `ahi.lock`, `ahi lock`, `ahi verify`, `ahi fetch`, or `ahi update`. Those commands are a package manager for other people's hook repositories. Checkers ship inside the ahi binary as `repo: builtin`, on the pattern of a linter that does not download its rules. A URL repo keeps failing with an explicit error.
+Withdrawn as a hook-repository installer. ahi does not grow `ahi.lock`, `ahi lock`, `ahi verify`, or `ahi fetch`. Checkers ship inside the ahi binary as `repo: builtin`, on the pattern of a linter that does not download its rules. A URL repo keeps failing with an explicit error. `ahi update` is reserved for replacing the ahi binary from an attested archive. That behavior is specified above and is not implemented.
 
 ### v0.3 — more builtins, not a language installer
 
