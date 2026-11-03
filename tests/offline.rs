@@ -171,7 +171,9 @@ fn wrong_entry_is_not_authorized_and_other_languages_stay_unsupported() {
         text.contains("does not match") || text.contains("entry: \"git status --porcelain\""),
         "{text}"
     );
-    assert!(text.contains("not supported until v0.3"), "{text}");
+    assert!(text.contains("language `python`"), "{text}");
+    assert!(text.contains("not supported by ahi"), "{text}");
+    assert!(!text.contains("until v0.3"), "{text}");
     assert!(text.contains("language `node`"), "{text}");
     assert!(text.contains("not supported by ahi"), "{text}");
     let _ = fs::remove_dir_all(dir);
@@ -187,13 +189,13 @@ fn remote_without_substitution_is_not_fetched() {
     write(&dir.join("ok.yml"), b"a: 1\n");
     git(&dir, &["add", "-A"]);
     let output = run(&dir, &["run", "--all-files"]);
-    assert_eq!(output.status.code(), Some(1));
-    let err = String::from_utf8(output.stderr).unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
     assert!(
-        err.contains("ahi.lock is missing") || err.contains("run ahi lock"),
-        "{err}"
+        text.contains("from a remote repo is not executed"),
+        "{text}"
     );
-    assert!(!err.contains("substituted"), "{err}");
+    assert!(!text.contains("substituted"), "{text}");
+    assert!(!text.contains("until v0.3"), "{text}");
     let _ = fs::remove_dir_all(dir);
 }
 

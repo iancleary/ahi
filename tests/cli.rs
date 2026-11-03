@@ -1,5 +1,5 @@
 //! CLI behavior that needs a git repository: golden `ahi run` output, and
-//! the v0.3 refusal for hooks this slice does not execute.
+//! the refusal for hooks this slice does not execute.
 //!
 //! JSON and SARIF snapshots include the crate version. Comparison substitutes
 //! `env!("CARGO_PKG_VERSION")` into that field. Text output is compared as
@@ -298,11 +298,12 @@ fn later_commands_fail_closed() {
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("not implemented until"), "{cmd}: {err}");
     }
-    let bleeding = ahi().args(["update", "--bleeding-edge"]).output().unwrap();
-    assert_eq!(bleeding.status.code(), Some(1));
-    let err = String::from_utf8(bleeding.stderr).unwrap();
-    assert!(err.contains("bleeding-edge"), "{err}");
-    assert!(err.contains("branch tip"), "{err}");
+    for cmd in ["lock", "verify", "fetch", "update", "autoupdate"] {
+        let output = ahi().arg(cmd).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{cmd}");
+        let err = String::from_utf8(output.stderr).unwrap();
+        assert!(err.contains("unrecognized subcommand"), "{cmd}: {err}");
+    }
 }
 
 #[test]
@@ -428,17 +429,21 @@ fn remote_and_language_hooks_are_not_skipped() {
     let dir = fixture();
     write(
         &dir.join(".pre-commit-config.yaml"),
-        b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: true\n    language: system\n- repo: meta\n  hooks:\n  - id: identity\n",
+        b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: true\n    language: system\n- repo: https://example.invalid/hooks\n  rev: abc\n  hooks:\n  - id: remote-hook\n- repo: meta\n  hooks:\n  - id: identity\n",
     );
     let output = run(&dir, &["run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("not supported until v0.3"), "{text}");
     assert!(text.contains("language `python`"));
-    assert!(text.contains("not supported by ahi"));
+    assert!(text.contains("not supported by ahi"), "{text}");
     assert!(text.contains("language `node`"));
     assert!(text.contains("trusted_system_hooks"));
     assert!(text.contains("repo: meta"));
+    assert!(
+        text.contains("from a remote repo is not executed"),
+        "{text}"
+    );
+    assert!(!text.contains("until v0.3"), "{text}");
     assert!(!text.contains("Skipped"));
     let _ = fs::remove_dir_all(dir);
 }

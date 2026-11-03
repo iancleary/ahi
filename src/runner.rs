@@ -1,8 +1,7 @@
 //! Select files, filter them per hook, and run builtin checks or allowed local hooks.
 //!
 //! Hooks that need another language fail the run. They are not skipped.
-//! Remote repos are checked against `ahi.lock` and the cache, then refused
-//! until v0.3. This runner does not fetch them and does not substitute builtins.
+//! Remote repos are not fetched and are not substituted with builtins.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -74,8 +73,6 @@ pub struct RunRequest<'a> {
     /// `git add` rewritten paths. Used for the default staged run.
     pub stage_fixes: bool,
     pub verbose: bool,
-    /// Cache used to verify URL repos. Required when the config has a remote.
-    pub cache: Option<&'a Path>,
 }
 
 pub fn run(request: &RunRequest<'_>) -> Result<Report> {
@@ -84,19 +81,6 @@ pub fn run(request: &RunRequest<'_>) -> Result<Report> {
             "hook stage `{}` is not a pre-commit stage",
             request.stage
         )));
-    }
-    if request
-        .config
-        .repos
-        .iter()
-        .any(|repo| repo.kind == HookOriginKind::Remote)
-    {
-        let Some(cache) = request.cache else {
-            return Err(Error::new(
-                "internal error: remote repos require a cache directory",
-            ));
-        };
-        crate::remote::verify_for_run(request.root, request.config, cache)?;
     }
     let policy = policy::load_policy(request.root)?;
     let git_files = select_files(request)?;
@@ -563,7 +547,7 @@ fn failed(hook: &Hook, findings: Vec<Finding>) -> HookReport {
 
 fn unsupported_message(hook: &Hook, policy: &Policy) -> String {
     if hook.kind == HookOriginKind::Meta {
-        return format!("hook `{}` (repo: meta) is not executed until v0.3", hook.id);
+        return format!("hook `{}` (repo: meta) is not executed", hook.id);
     }
     if let Some(language) = &hook.language {
         if language == "unsupported" || language == "unsupported_script" {
@@ -572,24 +556,15 @@ fn unsupported_message(hook: &Hook, policy: &Policy) -> String {
                 return policy::policy_snippet(&hook.id, &hook.entry, written);
             }
         }
-        if crate::config::language_is_planned(language) {
-            return format!(
-                "hook `{}` uses language `{language}`, which is not supported until v0.3",
-                hook.id
-            );
-        }
         return format!(
             "hook `{}` uses language `{language}`, which is not supported by ahi",
             hook.id
         );
     }
     if hook.kind == HookOriginKind::Remote {
-        format!(
-            "hook `{}` from a remote repo is not executed until v0.3",
-            hook.id
-        )
+        format!("hook `{}` from a remote repo is not executed", hook.id)
     } else {
-        format!("hook `{}` is not executed until v0.3", hook.id)
+        format!("hook `{}` is not executed", hook.id)
     }
 }
 

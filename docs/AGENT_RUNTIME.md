@@ -65,7 +65,7 @@ OpenShell statements are not re-fetched here. They are used as already written i
 ## Non-goals
 
 - Replacing [docs/SPEC.md](SPEC.md), renumbering v0.2, v0.3, or v0.4, or pulling agent execution into those phases.
-- A general package manager. ahi does not install Node, Python, Go, Rust toolchains, npm packages, Pi packages, hook repositories, or third-party agents. `ahi fetch` remains the pinned hook-cache bake specified for v0.2. It is not an installer for arbitrary tools.
+- A package manager, including a hook-repository installer. ahi does not install Node, Python, Go, Rust toolchains, npm packages, Pi packages, hook repositories, or third-party agents. Checkers are compiled into the binary and selected with `repo: builtin`. There is no `ahi fetch`, `ahi lock`, `ahi verify`, or `ahi update`.
 - A drop-in copy of jessfraz/agent, of Rex, of Tailscale, of Nix, or of the Pi coding-agent terminal interface.
 - Byte-for-byte compatibility with a Pi session file. The store follows Pi Durable's logical model. Reading a Pi database file would be a later importer against a pinned schema, and it is not part of the first store.
 - An iOS client in this repository. The owner deferred that client. It is not part of the actions, sandbox, store, or coordinator work. Per the owner's comparison, the private copy changed `ios/README.md` only, with no Swift source changes relative to its baseline. Those documentation edits are not an iOS scope for ahi.
@@ -80,7 +80,7 @@ OpenShell statements are not re-fetched here. They are used as already written i
 v0.1.3, as implemented and as specified:
 
 - `ahi run` reads `.pre-commit-config.yaml`, filters files, and runs builtin checks. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Remote hooks fail with an explicit error.
-- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, `lock`, `verify`, `fetch`, `update`, and `migrate`. `update` has the alias `autoupdate`. `install` and `uninstall` exit 1 and name the hook shim phase. `lock`, `verify`, `fetch`, and `update` resolve an immutable hook tag into `ahi.lock` and the cache.
+- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, and `migrate`. `install` and `uninstall` exit 1 and name the hook shim phase. `lock`, `verify`, `fetch`, `update`, and `autoupdate` are not commands.
 - `ahi.policy.yaml` version 1 is deny-by-default. Unknown keys are errors. The file is parsed. v0.1 consults `trusted_system_hooks` for local system and script hooks.
 - `ahi::store` is the content-addressed hook cache. It is not a conversation database.
 - `audit.log` is append-only JSON lines: time, command, repository, hook ids, outcome, finding count, local hook ids, and environment names. It does not record file contents or environment values.
@@ -91,8 +91,8 @@ Roadmap already committed in the specification:
 
 | Phase | Contract |
 | --- | --- |
-| v0.2 | `ahi.lock`, `ahi verify`, `ahi fetch`, `ahi update`. Tag resolution only there, by the deterministic rule in [docs/SPEC.md](SPEC.md). No hook subprocesses beyond what v0.1 already runs for pinned local hooks. |
-| v0.3 | Execute `fail`, `pygrep`, `python`, `rust`, `golang`, and `docker_image` under the runtime rules. No Node. No runtime downloads. |
+| v0.2 | Withdrawn. No `ahi.lock`, and no command that clones or moves a hook repository. Checkers stay `repo: builtin`. |
+| v0.3 | More builtins compiled into ahi. This phase does not execute `python`, `rust`, `golang`, or `docker_image` from a cloned hook repository, and it does not install their packages. |
 | v0.4 | Detect an outer sandbox and do not nest. Optional host backends, with the limits in the specification. |
 
 ## Architecture
@@ -591,7 +591,7 @@ The root package is `0.1.3`. **Decision:** agent work continues that same versio
 | `ahi run` and its flags | Remain. Behavior stays the specification's behavior. |
 | `list-checks`, `explain`, `doctor`, `migrate` | Remain top-level. |
 | `install`, `uninstall` | Remain hook-shim stubs until that phase implements them. |
-| `lock`, `verify`, `fetch`, `update` | v0.2 hook-pin commands. `autoupdate` is an alias of `update`. Agent work does not take those names, or the name `update`. |
+| `lock`, `verify`, `fetch`, `update` | These names are not commands. ahi does not install or move hook repositories. `autoupdate` is not an alias. Agent work does not add them. |
 | `ahi hooks run` | An alias of `ahi run`, added when the grouped surface is added. The same alias pattern can cover the other hook commands. Aliases are additive. |
 | `ahi.policy.yaml` version 1 | Unchanged. Unknown keys remain errors. Agent keys do not go in this file. |
 | `ahi.actions.yaml` | New. Ignored by `ahi run`. |
@@ -603,19 +603,19 @@ The root package is `0.1.3`. **Decision:** agent work continues that same versio
 
 ## Milestones
 
-These phases sit after the existing roadmap, or beside it only where the work is documentation and schema design. They do not replace v0.2, v0.3, or v0.4. They ship as later ahi releases on the version line the crate already uses. The labels below are phase names. This document does not assign the next version number.
+These phases sit after the hook-runner work. They ship as later ahi releases on the version line the crate already uses. The labels below are phase names. This document does not assign the next version number.
 
 | Phase | Relation to the roadmap | Delivered behavior |
 | --- | --- | --- |
-| Specification phases v0.2, v0.3, v0.4 | Unchanged, and first | Lockfile and fetch, limited hook languages, sandbox detection and optional host backends. |
-| Actions | After the v0.3 subprocess runner exists, so external hook programs have one process builder. Can be designed beside v0.2. | `ahi.actions.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
+| Specification phases v0.2, v0.3, v0.4 | v0.2 is withdrawn. v0.3 adds builtins. v0.4 is the sandbox. | Builtin checks, then sandbox detection and optional host backends. No lockfile and no language installer. |
+| Actions | Uses the local system and script process builder that already exists. It does not wait on a language installer. | `ahi.actions.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
 | Sandbox for effects | After v0.4, reusing its detection and backends. | An approved `command`, `file_write`, or `pre_commit` runs in the default sandbox. Escalation only by rule. The direction is less prompting as the policy and the sandbox cover the effect. Tests follow the specification's Linux, macOS, and Windows honesty table. |
 | Conversation store | After the actions phase. | Rust-native commits, resume, one writer, grants and receipts, `synchronous = FULL` and `fullfsync = ON`. No Node child. No provider required to test resume. |
 | Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, with browser login. `models.json` and gateway discovery are specified above and are not required for that first provider. Neither runs merely because the process started. |
 | Intake | After the coordinator, one adapter at a time, each off by default. | Admit-before-cursor. A dismissal reason is data. The adapter does not install a tool. |
 | Distribution | When a release is cut. Not part of implementing the phases above. | `cargo install ahi` on Linux, macOS, and Windows. ahi.dev documents that path and the existing attested Linux archives. `ahi self-update` only for an archive the release workflow publishes. |
 
-v0.3 is the right predecessor for external action hooks because it is the phase that executes pinned programs. v0.4 is the right predecessor for effect sandboxes because nesting policy is already specified there. Starting a second sandbox design beside v0.4 would fork the threat model.
+Local `language: system` and `language: script` hooks are the external programs the runner already executes. v0.4 is the right predecessor for effect sandboxes because nesting policy is already specified there. Starting a second sandbox design beside v0.4 would fork the threat model.
 
 ## Licensing and attribution
 

@@ -270,7 +270,7 @@ fn classify_repo(
                     .as_mapping()
                     .and_then(|hook| mapping_str(hook, "id"))
                     .unwrap_or_else(|| "(missing id)".to_string());
-                skipped.push(format!("- `{id}` (repo: meta): not executed until v0.3"));
+                skipped.push(format!("- `{id}` (repo: meta): not executed"));
             }
         }
         _ => {
@@ -335,7 +335,7 @@ fn copy_remote(
     };
     let Some(known) = equivalent(&id) else {
         skipped.push(format!(
-            "- `{id}` from `{url}` rev `{rev_text}`: no offline builtin for this id. ahi migrate does not fetch this repo. Remote hooks are not executed until v0.3"
+            "- `{id}` from `{url}` rev `{rev_text}`: no offline builtin for this id. ahi migrate does not fetch this repo. Remote hooks are not executed"
         ));
         return;
     };
@@ -387,8 +387,7 @@ fn copy_local(
     }
     if !carries_local(&language) {
         skipped.push(format!(
-            "- `{id}` (repo: local) language `{language}`: {}",
-            language_reason(&language)
+            "- `{id}` (repo: local) language `{language}`: not supported by ahi"
         ));
         return;
     }
@@ -409,16 +408,6 @@ fn carries_local(language: &str) -> bool {
         language,
         "system" | "script" | "unsupported" | "unsupported_script"
     )
-}
-
-fn language_reason(language: &str) -> &'static str {
-    if crate::config::language_is_planned(language)
-        && !matches!(language, "unsupported" | "unsupported_script")
-    {
-        "not supported until v0.3"
-    } else {
-        "not supported by ahi"
-    }
 }
 
 fn legacy_stage_in(map: &Mapping) -> Option<String> {
@@ -592,7 +581,7 @@ repos:
         assert!(suggestion.report.contains("id: rust-linting"));
         assert!(suggestion.report.contains("entry: \"cargo fmt --all --\""));
         assert!(suggestion.report.contains("check-ast"));
-        assert!(suggestion.report.contains("not supported until v0.3"));
+        assert!(suggestion.report.contains("not supported by ahi"));
         assert!(suggestion.suggested.contains("repo: builtin"));
         assert!(suggestion.suggested.contains("repo: local"));
         assert!(suggestion.suggested.contains("rust-clippy"));
