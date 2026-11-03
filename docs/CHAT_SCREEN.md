@@ -1,6 +1,6 @@
 # Chat screen
 
-Status: Part 1 (screen with a stand-in backend) is implemented. Part 2 (real completions) follows the model catalog work in `docs/MODEL_CATALOG.md`. The baseline is `src/tui.rs` at tag `v0.2.0`, plus `src/chat.rs`.
+Status: Part 1 (screen with a stand-in backend) is implemented. Part 2 (real completions) follows the model catalog work in `docs/MODEL_CATALOG.md`. The baseline is `src/tui.rs` at tag `v0.2.0`, plus `src/chat/`.
 
 ## Purpose
 
@@ -76,7 +76,7 @@ In part 1 the level is display and storage only. In part 2 it maps to the provid
 
 ## Backend interface
 
-`src/chat.rs` talks to a model through one trait, so the screen can be built and tested before real completions exist.
+`src/chat/` talks to a model through one trait, so the screen can be built and tested before real completions exist.
 
 ```rust
 pub struct ChatRequest {
@@ -115,11 +115,30 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 
 ## Implementation constraints
 
-- No new dependencies. The input box is a small editor in `src/chat.rs` (a `Vec<String>` of lines and a cursor) on top of `ratatui` 0.30.0 and `crossterm` 0.29.0, which are already pinned. Do not add `tui-textarea` or an async runtime.
+- No new dependencies. The input box is a small editor in `src/chat/input.rs` (a `Vec<String>` of lines and a cursor) on top of `ratatui` 0.30.0 and `crossterm` 0.29.0, which are already pinned. Do not add `tui-textarea` or an async runtime. The editor accepts an `EditorKey`. `src/chat/mod.rs` translates terminal events into that key.
 - The git branch is read from the repository's `HEAD` file, following a `gitdir:` file for worktrees, using the existing `src/git.rs` helpers where they fit. Do not spawn `git` on each frame; read once at start and again after each submitted message.
 - Keep the screen state in a plain struct (`ChatScreen`) separate from drawing, so key handling and layout are testable without a terminal.
 - Names follow the project naming rule: precise, descriptive, no slang (`CompletionBackend`, `EchoBackend`, `ThinkingLevel`, `render_session_row`).
 - `unsafe_code` stays forbidden. Clippy must pass with the existing lint set.
+
+## Module layout
+
+`src/chat/` is the conversation screen.
+
+| File | Responsibility |
+|---|---|
+| `mod.rs` | `ChatScreen` state, the frame loop, key translation, and drawing |
+| `input.rs` | The line editor. It accepts an `EditorKey`, not a terminal event |
+| `transcript.rs` | Messages, wrapping, and the scroll window. It returns plain text |
+| `status.rs` | Location-row and session-row text |
+| `usage.rs` | Session token, cost, and context figures |
+| `location.rs` | Working directory and the git label read from `HEAD` |
+| `command.rs` | Parsing of `/model`, `/thinking`, `/clear`, and `/exit` |
+| `thinking.rs` | `ThinkingLevel` and `<state>/thinking` |
+| `backend/mod.rs` | `CompletionBackend`, `ChatRequest`, and `ResponseEvent` |
+| `backend/echo.rs` | `EchoBackend`, the stand-in |
+
+Only `mod.rs` and `status.rs` may import `ratatui` or `crossterm`. `status.rs` does not currently import either: it returns row text, and `mod.rs` applies the dim and normal styles when it draws. `transcript.rs` does not either: wrapping produces strings, and `mod.rs` places that string in a paragraph. `input.rs`, `usage.rs`, `command.rs`, `thinking.rs`, `location.rs`, and `backend/` are plain logic.
 
 ## Tests (part 1)
 
