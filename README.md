@@ -6,6 +6,8 @@ Ian floated "agent hook interface" as an expansion. That expansion is not confir
 
 The design, the compatibility matrix, and the open decisions are in [docs/SPEC.md](docs/SPEC.md). The release script is described in [docs/release.md](docs/release.md) and is not run by ordinary development.
 
+A proposal to grow ahi from the hook runner into a public agent runtime and coordinator is in [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md). That document is for review. It is not the design of record, and it does not change the v0.1 through v0.4 contract.
+
 ## Build
 
 MSRV is Rust 1.83. A `justfile` wraps the same commands CI runs.
