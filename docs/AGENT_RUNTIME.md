@@ -437,11 +437,14 @@ The first provider is OpenAI, selected as `openai/<model>`. ahi does not ship Pi
 
 The name `qwen/qwen-3.5` means Qwen's public gateway and the model `qwen-3.5`. That meaning does not include the URL. The first built-in origin is OpenAI's. A later provider adds its own public origin under the same rule. Until that origin exists, a well-known public id names the gateway and cannot be called.
 
-### Registering a local or on-prem gateway
+### Registering a gateway
 
-The two-layer name selects a gateway and a model. Registration is a separate file, because the name has no URL. The operator edits that file in the coordinator's state directory. Proposed name: `model.json`. There is no settings subcommand. ahi does not read `~/.pi`. That directory can hold another product's credentials, and this proposal does not ingest it.
+The two-layer name selects a gateway and a model. It does not contain a URL. Registration has two sources. Both are part of this design. Neither is implemented in this change, and neither is required for the OpenAI browser login.
 
-The shape is the provider map Pi documents, at the researched commit, as `~/.pi/agent/models.json`. The owner described the same pattern as `~/.pi/agent/model.json`. Public Pi's filename is `models.json`. ahi's file uses the owner's name, `model.json`, and the same map.
+1. A `models.json` file in the coordinator's state directory.
+2. Discovery from a gateway that publishes its catalog.
+
+ahi does not read `~/.pi`. Pi's directory can hold another product's credentials. ahi keeps its own `models.json`. The shape of that file is the provider map Pi documents, at the researched commit, as `~/.pi/agent/models.json`. There is no settings subcommand. The operator edits the file, or a later discovery step writes the model list it learned.
 
 ```json
 {
@@ -455,7 +458,7 @@ The shape is the provider map Pi documents, at the researched commit, as `~/.pi/
 }
 ```
 
-The object key `lab` is the gateway id. The selection for that model is `lab/qwen-3.5`. One entry can list many model ids. Two on-prem servers are two gateway ids, each with its own `baseUrl`. That is the whole registration. A third path segment is not required.
+The object key `lab` is the gateway id. The selection for that model is `lab/qwen-3.5`. One entry can list many model ids. Two on-prem servers are two gateway ids, each with its own `baseUrl`. A third path segment is not required.
 
 The first registered `api` is `openai-completions`, matching the catalog contract already carried: an OpenAI-compatible completions endpoint. A local or on-prem server that speaks that API is registered by this file. A server with a different wire protocol needs a later provider implementation. The file does not add that protocol.
 
@@ -463,9 +466,17 @@ A literal loopback `baseUrl` may be `http`. Any other origin is `https`. Redirec
 
 `apiKey` in this file is a non-secret marker for a server that ignores it, or an environment reference `$NAME`. The file does not run a shell command. A long-term secret is not written into it. Optional headers, when a server requires them, use the same environment reference.
 
-A gateway that publishes a catalog can be registered with an origin instead of a pasted model list. The catalog path from the comparison is `<origin>/pi/agent/model.json`. That fetch carries no credential. The catalog's provider id must equal the gateway id. A mismatch is a rejected catalog, not an alias. Refresh failure keeps the last accepted catalog. For a fetched catalog, the model id in the catalog is the string sent upstream. The selection syntax stays the two-layer form.
-
 An entry whose key is `openai` changes that provider's origin, for a proxy in front of the same id. It does not create a second name for OpenAI, and it is not required for the browser login.
+
+### Discovering models from a gateway
+
+A pasted model list drifts when the gateway adds or removes a model. Discovery is the other registration source: ahi asks the gateway for its catalog and registers the models under that gateway id. The owner has Go gateways that already publish models. Putting discovery in ahi means an operator registers the gateway once, and other people do not each build a client for that catalog.
+
+The fetch is the origin contract from the comparison. The request carries no credential. Redirects are not followed. The timeout is 15 seconds and the body cap is 1 MiB. The catalog schema is strict: OpenAI-compatible completions, an API-key field that is a gateway marker rather than a secret, zero costs, and capability flags. The comparison names the catalog path `<origin>/pi/agent/model.json`. The catalog's provider id must equal the gateway id. A mismatch is rejected. It is not an alias. Refresh failure keeps the last accepted catalog. The model id in the catalog is the string sent upstream. The selection syntax stays the two-layer form.
+
+A `models.json` entry can name the origin and omit `models`. Discovery fills that list. An entry that already lists models keeps those ids and still accepts a refresh of the same gateway id. Discovery writes into ahi's state. It does not write into a git repository and it does not read `~/.pi`.
+
+This proposal does not implement discovery, and it does not implement creating or editing `models.json`. The coordinator phase can ship OpenAI login without either. The contract above is the one those later commands implement, so the gateway client lives in ahi.
 
 ## Coordinator, tasks, and workers
 
@@ -490,7 +501,7 @@ Worker attachment is a catalog of transports. Each entry is a way a worker reach
 
 Model selection, per the owner's comparison and adapted as above: presets name concrete `gateway/model` selections, and the roles `chat`, `delegation`, and `background` point at presets. Bootstrap sends the resolved selection to a worker. A worker does not invent a gateway. A scheduled job, when that feature exists, uses the background role unless the job names its own model. The first concrete provider behind a preset is OpenAI.
 
-`ahi login` is the OpenAI browser sign-in. It prints the authorization URL and leaves the login pending if no browser opens. The stored credential stays in the state directory. A registered local or on-prem gateway uses the `model.json` marker or `$NAME` reference, not this login.
+`ahi login` is the OpenAI browser sign-in. It prints the authorization URL and leaves the login pending if no browser opens. The stored credential stays in the state directory. A registered local or on-prem gateway uses the `models.json` marker or `$NAME` reference, not this login.
 
 Worktree allocation is an admitted effect. The receipt records the owner. A cleanup that the engine refuses stays recorded as held.
 
@@ -534,7 +545,7 @@ Boundaries:
 | Conversation store | One writer. Commits are atomic. A crash resumes from the last commit. External mutations with outcome `uncertain` stay uncertain. |
 | Grants | Written by an operator action or by a file the operator placed. Not written by the model or by a source event. |
 | Network | Denied in the default sandbox. `ahi serve` does not open a provider connection until a provider is configured. Source polls run only for configured accounts. |
-| Credentials | Not copied into the transcript, the receipt, or `audit.log`. OpenAI's credential comes from `ahi login` and stays in the state directory. A registered gateway's secret is an environment reference in `model.json`, not a literal in that file or in the repository. |
+| Credentials | Not copied into the transcript, the receipt, or `audit.log`. OpenAI's credential comes from `ahi login` and stays in the state directory. A registered gateway's secret is an environment reference in `models.json`, not a literal in that file or in the repository. A gateway catalog fetch carries no credential. |
 | Hook programs | Pinned entry, no shell, fail closed, scrubbed environment using the name rules already in the specification. |
 | Distribution | ahi replaces only its own release artifacts, and only after checksum and attestation checks. It does not execute a downloaded install script as the trust root. |
 
@@ -599,7 +610,7 @@ These phases sit after the existing roadmap, or beside it only where the work is
 | Actions | After the v0.3 subprocess runner exists, so external hook programs have one process builder. Can be designed beside v0.2. | `ahi.actions.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
 | Sandbox for effects | After v0.4, reusing its detection and backends. | An approved `command`, `file_write`, or `pre_commit` runs in the default sandbox. Escalation only by rule. The direction is less prompting as the policy and the sandbox cover the effect. Tests follow the specification's Linux, macOS, and Windows honesty table. |
 | Conversation store | After the actions phase. | Rust-native commits, resume, one writer, grants and receipts, `synchronous = FULL` and `fullfsync = ON`. No Node child. No provider required to test resume. |
-| Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, with browser login. `model.json` registers other OpenAI-compatible gateways. Neither runs merely because the process started. |
+| Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, with browser login. `models.json` and gateway discovery are specified above and are not required for that first provider. Neither runs merely because the process started. |
 | Intake | After the coordinator, one adapter at a time, each off by default. | Admit-before-cursor. A dismissal reason is data. The adapter does not install a tool. |
 | Distribution | When a release is cut. Not part of implementing the phases above. | `cargo install ahi` on Linux, macOS, and Windows. ahi.dev documents that path and the existing attested Linux archives. `ahi self-update` only for an archive the release workflow publishes. |
 
@@ -647,7 +658,7 @@ Deferred. No iOS target in this repository during the actions, sandbox, store, a
 
 Do not use Pi's default model list. The first provider is OpenAI, selected as `openai/<model>`. Sign-in is the browser login: `ahi login` prints the URL and does not abort when no browser opens. The credential stays in the state directory. There is no settings subcommand.
 
-A model selection is two layers, split on the first slash, with no alias. A local or on-prem gateway is registered in the state directory's `model.json`: gateway id, `baseUrl`, `api` of `openai-completions`, and model ids. The two-layer name selects that entry. It does not by itself contain the URL. ahi does not read `~/.pi`. A fetched catalog's provider id must equal the gateway id. Only OpenAI has a built-in public origin in the first provider. See [Gateway and model names](#gateway-and-model-names).
+A model selection is two layers, split on the first slash, with no alias. Registration has two sources, both specified and neither implemented here. The state directory's `models.json` maps a gateway id to an OpenAI-compatible origin and model ids. ahi does not read `~/.pi`. Discovery fetches a gateway catalog and registers the returned models under that gateway id, so a shared gateway is learned once inside ahi. The catalog's provider id must equal the gateway id. Only OpenAI has a built-in public origin in the first provider. See [Gateway and model names](#gateway-and-model-names).
 
 ### Further decisions
 
@@ -656,7 +667,7 @@ A model selection is two layers, split on the first slash, with no alias. A loca
 | Worker transport | A catalog. The local socket and Tailscale are both entries. An unconfigured coordinator listens on the local socket. ahi does not install or require Tailscale. |
 | Interactive `ask` | Only a rule that sets `ask: true` prompts. The default is deny with no prompt. The direction is a sandbox and declared policy, with less confirmation later. |
 | SQLite synchronous mode | Maximum durability. For WAL that is `FULL` and `fullfsync`. `EXTRA` is the same as `FULL` in WAL mode. |
-| Provider registration | State-directory `model.json` maps a gateway id to an OpenAI-compatible origin and model ids. The selection is the two-layer name. |
+| Provider registration | State-directory `models.json`, not `~/.pi/`. Gateway discovery fills a model list from the gateway's catalog. Both are specified. Neither is implemented in this change. |
 | OpenAI sign-in | Browser login through `ahi login`. The URL is printed. A missing browser does not abort the login. |
 | Where ahi runs | Linux, macOS, and Windows, through `cargo install ahi`. Existing attested archives stay Linux-only. |
 | Versioning | Continue ahi's existing version line. No separate runtime version. This document does not assign the next number. |
@@ -679,7 +690,7 @@ Fetched or cloned on 2026-11-03 unless noted.
 - AgentHarness specification, a different model: <https://github.com/earendil-works/pi/blob/main/packages/agent/docs/harness.md>.
 - Coding-agent session format: <https://pi.dev/docs/latest/session-format> and <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md>.
 - Pi product page, including the install line and the provider list: <https://pi.dev/>.
-- Pi coding-agent model configuration at the same `9c9ce854` commit: `packages/coding-agent/docs/models.md`. The user file documented there is `~/.pi/agent/models.json`, with a `providers` map of `baseUrl`, `api`, `apiKey`, and `models`. Read 2026-11-03. ahi adapts the map and does not read that directory.
+- Pi coding-agent model configuration at the same `9c9ce854` commit: `packages/coding-agent/docs/models.md`. The user file documented there is `~/.pi/agent/models.json`, with a `providers` map of `baseUrl`, `api`, `apiKey`, and `models`. Read 2026-11-03. ahi adapts the map into its own state-directory `models.json` and does not read `~/.pi`.
 - How Pi works, for the coding-agent loop rather than the Pi Durable tables: <https://pi.dev/docs/latest/how-pi-works>.
 - crates.io name check recorded in the specification on 2026-10-25. Not reconfirmed on 2026-11-03 (HTTP 403 from this environment).
 
