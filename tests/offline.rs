@@ -171,7 +171,9 @@ fn wrong_entry_is_not_authorized_and_other_languages_stay_unsupported() {
         text.contains("does not match") || text.contains("entry: \"git status --porcelain\""),
         "{text}"
     );
-    assert!(text.contains("not supported until v0.3"), "{text}");
+    assert!(text.contains("language `python`"), "{text}");
+    assert!(text.contains("not supported by ahi"), "{text}");
+    assert!(!text.contains("until v0.3"), "{text}");
     assert!(text.contains("language `node`"), "{text}");
     assert!(text.contains("not supported by ahi"), "{text}");
     let _ = fs::remove_dir_all(dir);
@@ -188,8 +190,12 @@ fn remote_without_substitution_is_not_fetched() {
     git(&dir, &["add", "-A"]);
     let output = run(&dir, &["run", "--all-files"]);
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("not executed until v0.3"), "{text}");
+    assert!(
+        text.contains("from a remote repo is not executed"),
+        "{text}"
+    );
     assert!(!text.contains("substituted"), "{text}");
+    assert!(!text.contains("until v0.3"), "{text}");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -239,7 +245,7 @@ repos:
     assert!(stdout.contains("rust-linting"), "{stdout}");
     assert!(stdout.contains("entry: \"cargo fmt --all --\""), "{stdout}");
     assert!(stdout.contains("check-ast"), "{stdout}");
-    assert!(stdout.contains("not fetched"), "{stdout}");
+    assert!(stdout.contains("does not fetch"), "{stdout}");
     assert!(stderr.contains("unchanged"), "{stderr}");
     let unchanged = fs::read_to_string(dir.join(".pre-commit-config.yaml")).unwrap();
     assert_eq!(unchanged, original);

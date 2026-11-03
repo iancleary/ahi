@@ -53,9 +53,7 @@ impl Store {
 
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
         if !self.writable {
-            return Err(Error::new(
-                "cache is read-only; populate it with ahi fetch or bake it into the image before run",
-            ));
+            return Err(Error::new("cache is read-only"));
         }
         let digest = sha256_hex(bytes);
         let path = self.object_path(&digest)?;

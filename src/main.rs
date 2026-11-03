@@ -49,14 +49,12 @@ enum Command {
     Install,
     /// Remove the git hook shim.
     Uninstall,
-    /// Resolve tags to full commits and write ahi.lock.
-    Lock,
-    /// Check ahi.lock against the cache.
-    Verify,
-    /// Populate the cache. The only command that uses the network.
-    Fetch,
-    /// Move locked repos to newer commits.
-    Autoupdate,
+    /// Replace this ahi binary from an attested archive this repository publishes.
+    ///
+    /// Checks the published checksum and attestation, and refuses a target it
+    /// cannot verify. Does not accept a package name. Does not clone a hook
+    /// repository. Not implemented in this version.
+    Update,
     /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
     ///
     /// Prints a report and a suggested config. Does not fetch remotes and does not
@@ -128,8 +126,8 @@ fn main() -> ExitCode {
         Command::Install | Command::Uninstall => {
             unimplemented_until("the hook shim phase (after hook execution exists)")
         }
-        Command::Lock | Command::Verify | Command::Fetch | Command::Autoupdate => {
-            unimplemented_until("v0.2")
+        Command::Update => {
+            unimplemented_until("the attested archive replacement of this ahi binary")
         }
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
     }
@@ -203,6 +201,7 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
     } else {
         Selection::Staged
     };
+    let cache = store::cache_dir(cli.cache_dir.as_deref());
     let stage_fixes = matches!(selection, Selection::Staged);
     let mut skip = BTreeSet::new();
     if let Ok(raw) = env::var("SKIP") {
@@ -240,7 +239,6 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
         }
     };
     print!("{rendered}");
-    let cache = store::cache_dir(cli.cache_dir.as_deref());
     if let Ok(store) = Store::open(&cache) {
         let ids: Vec<String> = report.hooks.iter().map(|hook| hook.id.clone()).collect();
         let findings = report.hooks.iter().map(|hook| hook.findings.len()).sum();
@@ -460,7 +458,7 @@ fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> 
                     "local execution: system and script when the policy pins the hook id and the exact entry; other languages are refused"
                 );
                 println!(
-                    "remote hooks: not executed and not substituted; use repo: builtin or `ahi migrate` for a best-effort suggestion"
+                    "remote hooks: not executed and not fetched. Checkers are repo: builtin. ahi migrate can suggest a builtin id"
                 );
                 println!(
                     "fix: `ahi run --fix` rewrites end-of-file, trailing whitespace, and mixed line endings; other checks stay report-only"

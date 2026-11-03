@@ -68,18 +68,6 @@ const LANGUAGES: &[&str] = &[
     "unsupported_script",
 ];
 
-/// Languages the v0.3 runner is planned to execute. v0.1 parses them and refuses to run them.
-pub const PLANNED_LANGUAGES: &[&str] = &[
-    "docker_image",
-    "fail",
-    "golang",
-    "pygrep",
-    "python",
-    "rust",
-    "unsupported",
-    "unsupported_script",
-];
-
 const META_HOOKS: &[&str] = &["check-hooks-apply", "check-useless-excludes", "identity"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,10 +225,6 @@ pub fn stage_selects_files(stage: &str) -> bool {
         stage,
         "post-checkout" | "post-commit" | "post-merge" | "post-rewrite" | "pre-rebase"
     )
-}
-
-pub fn language_is_planned(language: &str) -> bool {
-    PLANNED_LANGUAGES.contains(&language)
 }
 
 fn materialize_config(raw: RawConfig, origin: &str) -> Result<Config> {

@@ -1,5 +1,5 @@
 //! CLI behavior that needs a git repository: golden `ahi run` output, and
-//! the v0.3 refusal for hooks this slice does not execute.
+//! the refusal for hooks this slice does not execute.
 //!
 //! JSON and SARIF snapshots include the crate version. Comparison substitutes
 //! `env!("CARGO_PKG_VERSION")` into that field. Text output is compared as
@@ -292,18 +292,23 @@ fn list_checks_and_explain() {
 
 #[test]
 fn later_commands_fail_closed() {
-    for cmd in [
-        "install",
-        "uninstall",
-        "lock",
-        "verify",
-        "fetch",
-        "autoupdate",
-    ] {
+    for cmd in ["install", "uninstall", "update"] {
         let output = ahi().arg(cmd).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{cmd}");
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("not implemented until"), "{cmd}: {err}");
+    }
+    let update = ahi().arg("update").output().unwrap();
+    let update_err = String::from_utf8(update.stderr).unwrap();
+    assert!(
+        update_err.contains("attested archive replacement"),
+        "{update_err}"
+    );
+    for cmd in ["lock", "verify", "fetch", "autoupdate", "self-update"] {
+        let output = ahi().arg(cmd).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{cmd}");
+        let err = String::from_utf8(output.stderr).unwrap();
+        assert!(err.contains("unrecognized subcommand"), "{cmd}: {err}");
     }
 }
 
@@ -435,16 +440,16 @@ fn remote_and_language_hooks_are_not_skipped() {
     let output = run(&dir, &["run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("not supported until v0.3"), "{text}");
     assert!(text.contains("language `python`"));
-    assert!(text.contains("not supported by ahi"));
+    assert!(text.contains("not supported by ahi"), "{text}");
     assert!(text.contains("language `node`"));
     assert!(text.contains("trusted_system_hooks"));
     assert!(text.contains("repo: meta"));
     assert!(
-        text.contains("remote repo is not executed until v0.3")
-            || text.contains("from a remote repo is not executed until v0.3")
+        text.contains("from a remote repo is not executed"),
+        "{text}"
     );
+    assert!(!text.contains("until v0.3"), "{text}");
     assert!(!text.contains("Skipped"));
     let _ = fs::remove_dir_all(dir);
 }
