@@ -76,10 +76,15 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Load OpenAI and the gateways in models.json.
+    /// Pick only models curated in models.json. Startup performs no network requests.
     ///
-    /// A terminal opens a picker. A pipe prints one line per provider.
-    Tui,
+    /// A terminal opens a picker; Enter saves a selection and exits, not a chat.
+    /// A pipe prints providers and model catalog membership.
+    Tui {
+        /// Explicitly refresh reference catalogs before opening the picker or printing.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Print the OpenAI browser login URL and wait for the redirect.
     ///
     /// Opening a browser is attempted and is not required. The credential is
@@ -160,7 +165,7 @@ fn main() -> ExitCode {
             unimplemented_until("the attested archive replacement of this ahi binary")
         }
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
-        Command::Tui => tui(cli.state_dir.as_deref()),
+        Command::Tui { refresh } => tui(cli.state_dir.as_deref(), *refresh),
         Command::Login => login(cli.state_dir.as_deref()),
     }
 }
@@ -510,7 +515,7 @@ fn doctor(
     ExitCode::from(0)
 }
 
-fn tui(state: Option<&std::path::Path>) -> ExitCode {
+fn tui(state: Option<&std::path::Path>, refresh: bool) -> ExitCode {
     let state = match harness::state_dir(state) {
         Ok(dir) => dir,
         Err(err) => {
@@ -518,10 +523,12 @@ fn tui(state: Option<&std::path::Path>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match ahi::tui::run(&state) {
-        Ok(text) => {
-            println!("{text}");
-            ExitCode::from(0)
+    match ahi::tui::run(&state, refresh) {
+        Ok(output) => {
+            if !output.text.is_empty() {
+                println!("{}", output.text);
+            }
+            ExitCode::from(u8::from(output.refresh_failed))
         }
         Err(err) => {
             eprintln!("error: {err}");

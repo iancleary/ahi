@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ahi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "crossterm",
@@ -19,6 +19,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "thiserror 1.0.69",
+ "time",
  "toml",
  "ureq",
  "yaml-rust2",
@@ -1621,6 +1622,7 @@ version = "1.0.134"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d00f4175c42ee48b15416f6193a959ba3a0d67fc699a0db9ad12df9f83991c7d"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "ryu",
@@ -1946,6 +1948,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -1953,6 +1956,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tinystr"

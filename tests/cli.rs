@@ -350,13 +350,77 @@ fn tui_on_a_pipe_lists_openai_and_a_configured_gateway() {
     assert!(text.contains("provider lab"), "{text}");
     assert!(text.contains("models qwen-3.5"), "{text}");
     assert!(
-        text.contains("kept-config")
-            || text.contains("last-good")
-            || text.contains("unavailable")
-            || text.contains("fetched"),
+        text.contains("model qwen-3.5 status catalog unavailable"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no models in models.json: press e to edit, c to browse the catalog"),
         "{text}"
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tui_refresh_on_a_pipe_preserves_curated_ids_and_reports_partial_failure() {
+    use std::io::{Read, Write};
+    let dir = fixture();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let body = r#"{"provider":"lab","api":"openai-completions","apiKey":"gateway","models":[{"id":"reported-not-curated"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let config = format!(
+        r#"{{"providers":{{"lab":{{"baseUrl":"{base_url}","api":"openai-completions"}}}}}}"#
+    );
+    write(&dir.join("models.json"), config.as_bytes());
+    let output = ahi()
+        .args(["--state-dir", dir.to_str().unwrap(), "tui", "--refresh"])
+        .output()
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("GET /pi/agent/model.json HTTP/1.1"));
+    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(text.contains("provider lab"), "{text}");
+    assert!(
+        text.contains("OpenAI credential unavailable: run ahi login"),
+        "{text}"
+    );
+    assert!(!text.contains("reported-not-curated"), "{text}");
+    let catalog_path = dir.join("catalogs/lab.json");
+    let saved = fs::read(&catalog_path).unwrap();
+    let catalog: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(
+        catalog["models"],
+        serde_json::json!(["reported-not-curated"])
+    );
+    assert_eq!(catalog["provider"], "lab");
+    assert_eq!(fs::read_to_string(dir.join("models.json")).unwrap(), config);
+    let output = ahi()
+        .args(["--state-dir", dir.to_str().unwrap(), "tui", "--refresh"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(fs::read(catalog_path).unwrap(), saved);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

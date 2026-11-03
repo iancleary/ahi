@@ -20,6 +20,8 @@ cargo build --release
 
 `ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
 
+For a real terminal-picker smoke check on POSIX, run `cargo build` then `python3 scripts/smoke-model-picker.py` (Python 3.10+). It uses a disposable state directory and PTY to check catalog browsing, clipboard fallback, checkbox/reorder persistence across restart, stale-save failures, editor suspend/resume, invalid-edit retention, and selection saving. It does not use your credentials, editor settings, or the network.
+
 `scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself builds with Rust 1.88. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
 
 The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi` when that variable is set, else the temporary directory joined with `ahi`. The hook cache does not fall back to a home directory. A store whose `objects/sha256` directory already exists can be opened read-only.
@@ -37,8 +39,36 @@ The harness state directory is `--state-dir`, else `AHI_STATE_DIR`, else `$XDG_S
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
 | `ahi hooks install`, `ahi hooks uninstall` | Exit 1. They are the hook shim commands and are not implemented. Top-level `install` and `uninstall` are not commands. |
 | `ahi update` | Exit 1. Reserved for replacing this ahi binary from an attested archive. It does not install or move hook repositories. |
-| `ahi tui` | Load OpenAI and gateways from the state directory's `models.json`. A pipe prints one line per provider. |
-| `ahi login` | Print the OpenAI browser login URL. A missing browser does not abort the login. |
+| `ahi tui [--refresh]` | Pick curated models from `models.json`. Load is local-only; `--refresh` explicitly refreshes reference catalogs. Enter saves a selection and exits, not a chat. A pipe prints the load and catalog membership. |
+| `ahi login` | Sign in with ChatGPT using the current direct-token browser flow. Prints the URL and accepts a pasted full callback URL when the browser cannot reach ahi. |
+
+In 0.3.0, model catalogs and curated selections are separate. The main picker offers **only** `providers.<id>.models` from `models.json`, in saved order, for OpenAI and every gateway. An omitted list stays empty even after refresh. Reference catalogs never supply picker defaults; their curation view lets you explicitly choose the saved list. See [CHANGELOG.md](CHANGELOG.md) for the breaking gateway-loading change.
+
+In the picker, `r` refreshes catalogs and `c` opens a provider's curation view. Checked models appear first in saved order, followed by unchecked catalog IDs. **Space** checks/unchecks and immediately saves; **Shift+Up/Down** (or **K/J**) reorders checked models and saves. Configured IDs missing from the catalog remain checked and removable. `y` copies an ID (or prints it on exit if no clipboard tool succeeds), and Esc returns to the main picker. Each curated ID shows `listed`, `absent from catalog`, or `catalog unavailable`.
+
+Explicit checkbox/reorder saves atomically replace `<state>/models.json`, pretty-printing JSON while preserving object-key order, other providers and settings. Stale external edits or save failures leave the file and loaded list unchanged; press `e` to review/reload before retrying. Merely browsing does not create a file; an explicit checkbox action can.
+
+`e` opens `models.json` in `$VISUAL` or `$EDITOR` (notepad fallback on Windows). Other systems ask for an editor when neither is set. Editor-only reload never rewrites the editor's bytes and never fetches. Invalid edits retain the previous registry and display the file path and line.
+
+For example, save this in the state directory's `models.json` (replace the example id with the model you want):
+
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "models": [{"id": "gpt-4.1"}]
+    }
+  }
+}
+```
+
+**OpenAI login now uses the current Sign in with ChatGPT direct-token flow**, not the older Codex fixed-client flow. `ahi login` binds `http://127.0.0.1:1455/auth/callback` before opening the browser, requests an issued client for this installation and the `https://api.openai.com/v1` resource with `chatgpt.tokens.use.direct`. When automatic callback is unavailable, paste the full final callback URL, including `state` and `client_id`; a bare code is not sufficient. Old credentials remain untouched until a new login succeeds; explicit refresh asks you to run `ahi login` to migrate. Browser tokens are never forwarded to proxies: a conflicting OpenAI `baseUrl` causes an error. Register proxies as separate gateways.
+
+Explicit OpenAI refresh attempts `GET https://api.openai.com/v1/models` only with new direct-token credentials. **A live request with a new direct-token credential returned HTTP 200 and model metadata.** That response used `models[].slug`; ahi accepts this shape as well as the standard `data[].id` format, preserving every reported ID in order. The earlier HTTP 403 was from an old Codex-flow credential, not the new grant. A 403 preserves the catalog and curated IDs and reports unavailable discovery. Expiry is checked before requests; authentication failures permit at most one renewal and retry. Requests refuse redirects, have a 15-second timeout and a 1 MiB response cap. Pi uses this grant for Responses, not Decisions; ahi still has no inference/conversation runner. `auth signed-in` means only a credential file exists.
+
+`ahi tui` never fetches on startup. `ahi tui --refresh` explicitly requests refreshes, preserves old catalogs on failure, and in a pipe exits 1 if any refresh failed while still printing the local load. Catalogs are atomically replaced objects containing provider, source URL, retrieval timestamp, and reported ids; old array-format catalogs remain readable. `retrieval time unknown (old catalog format)` means that the cached array lacks a timestamp, not that authentication is old. Refresh never edits the curated file.
 
 Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `autoupdate`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
 
