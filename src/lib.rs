@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod filter;
 pub mod git;
+pub mod harness;
 pub mod identify;
 mod local_hook;
 pub mod migrate;
@@ -19,6 +20,7 @@ pub mod policy;
 pub mod runner;
 mod shlex;
 pub mod store;
+pub mod tui;
 mod yaml_safe;
 
 #[cfg(test)]
