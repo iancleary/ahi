@@ -1,10 +1,10 @@
 //! Conversation screen shown after the model picker.
 //!
-//! Part 1 draws the screen and answers through [`backend::EchoBackend`]. That
-//! backend echoes the operator's text and reports synthetic token counts. It
-//! does not call a model and it does not use the network.
+//! Part 1 draws the screen and answers through `EchoBackend`. That backend
+//! echoes the operator's text and reports synthetic token counts. It does not
+//! call a model and it does not use the network.
 //!
-//! Terminal types stay in this module. The line editor receives [`input::EditorKey`].
+//! Terminal types stay in this module. The line editor receives `EditorKey`.
 
 mod backend;
 mod command;

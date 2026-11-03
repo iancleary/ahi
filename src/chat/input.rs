@@ -1,6 +1,6 @@
 //! Line editor for the chat input.
 //!
-//! The screen translates terminal keys into [`EditorKey`]. This module does
+//! The screen translates terminal keys into `EditorKey`. This module does
 //! not read the terminal.
 
 const ROW_LIMIT: usize = 8;

@@ -1,6 +1,6 @@
 //! Backend contract for one completion turn.
 //!
-//! The screen drains a [`std::sync::mpsc::Receiver`] on each frame. No async
+//! The screen drains a `std::sync::mpsc::Receiver` on each frame. No async
 //! runtime is involved.
 
 mod echo;
