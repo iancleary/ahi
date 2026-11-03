@@ -187,7 +187,7 @@ Per the owner's comparison, the private copy keeps the public split: Rust owns t
 | Carry | Gateway fetch is native HTTP. HTTPS only, except a literal loopback origin. The request carries no credential. Redirects are not followed. Timeout 15 seconds. Body cap 1 MiB. The catalog schema is strict: OpenAI-compatible completions, an API-key field that is a gateway marker rather than a secret, zero costs, and capability flags. | The same origin contract. The catalog path in the comparison is `<origin>/pi/agent/model.json`. |
 | Carry (adapt) | Each gateway keeps its last accepted catalog when a refresh fails. Registrations persist. A gateway's local name and the provider identifier in the catalog are different fields. Legacy single-URL cache files are migrated in place. | Retain the last-good catalog per registration. Reimplement validation in Rust. Do not take a JavaScript schema library. ahi does not keep a local name beside the provider id. The catalog's provider id must equal the gateway id used to fetch it. A mismatch is a rejected catalog, not an alias. |
 | Carry (adapt) | Worktree allocation is recorded. A refused cleanup stays held, and the refusal is recorded. | An allocation and a refused cleanup are action receipts. Cleanup does not run unless the engine approves it. The held state remains until a later receipt says otherwise. |
-| Carry | Login always prints the authorization URL. It may try a browser, then the default browser. Failure to open a browser does not abort the pending login. | `ahi login` prints the URL on standard error and waits. Headless and SSH sessions stay able to finish sign-in. The comparison says this path was verified live on the private copy. This environment did not verify it. |
+| Carry | Login always prints the authorization URL. It may try a browser, then the default browser. Failure to open a browser does not abort the pending login. | This is the OpenAI browser login. `ahi login` prints the URL on standard error and waits. Headless and SSH sessions stay able to finish sign-in. The comparison says this path was verified live on the private copy. This environment did not verify it. |
 | Drop for ahi | A managed-settings apply overlays private machine configuration on declarative settings. | The owner has no settings subcommand in mind. This proposal does not add `ahi settings` or `ahi settings apply`, and it does not define a settings file format. Credentials and gateway origins still do not belong in a git repository. |
 | Drop | Provider construction through `pi-ai`, JavaScript schema validation, and generated TypeScript bindings. | Replaced by the Rust provider interface and Rust types. |
 | Drop | Node bridge dispatch of gateway commands. | No Node bridge and no sidecar. Gateway fetch and provider calls are Rust. |
@@ -293,11 +293,13 @@ ahi additions, stored as documents or as entries in that same commit stream, not
 
 Argument hashes, rule ids, and paths that are not secret belong in the receipt. Secret values, raw credentials, and full file contents do not. That continues the `audit.log` rule already implemented in `src/audit.rs`. The hook-runner `audit.log` stays the log for `ahi run`. It is not the conversation store.
 
-**Decision:** `PRAGMA synchronous = FULL` and `PRAGMA fullfsync = ON` for the conversation database, including grants and external-effect commits.
+**Decision:** maximum durability for the conversation database, including grants and external-effect commits. For this WAL database that setting is `PRAGMA synchronous = FULL` and `PRAGMA fullfsync = ON`.
 
-`synchronous` chooses when SQLite waits for bytes to reach stable storage. `NORMAL`, in WAL mode, returns from a commit once the frames are handed to the operating system. A killed process still recovers those commits. A power loss or kernel panic can drop the newest ones. `FULL` does not return from the commit until those frames have been synced. A commit that succeeded is still there after that failure, if the drive honors the flush.
+`synchronous` chooses when SQLite waits for bytes to reach stable storage. `NORMAL`, in WAL mode, returns from a commit once the frames are handed to the operating system. A killed process still recovers those commits. A power loss or kernel panic can drop the newest ones. `FULL` does not return from the commit until those frames have been synced. In WAL mode, SQLite documents `FULL` as the durable setting: the extra sync is what makes a commit survive power loss. A commit that succeeded is still there after that failure, if the drive honors the flush.
 
-`fullfsync` is the macOS half of that promise. On macOS, `fsync` does not always push data through the drive's own cache. SQLite's `fullfsync` flag uses `F_FULLFSYNC`, which asks for that stronger flush. On Linux the flag has no effect. `FULL` is the control that matters there. The cost is one wait per commit. This store commits grants and effect receipts, not a row per token. That wait is what keeps "this grant exists" and "this push was sent" from disappearing after a power loss. The later public jessfraz/agent tree sets both pragmas in `runtime/src/conversation-database.ts` at `e671f61`. Pi Durable's README still documents `NORMAL`. Per the owner's comparison, the private copy has neither that file nor this setting. The decision follows the stricter opener.
+SQLite also has `synchronous = EXTRA`. In WAL mode, SQLite documents `EXTRA` as the same as `FULL`. The directory sync that `EXTRA` adds applies when a rollback journal is deleted in DELETE journal mode. This store uses WAL, so `EXTRA` is not a stronger setting here. `PRAGMA checkpoint_fullfsync` is also not an additional step once `fullfsync` is on. SQLite documents that `fullfsync` makes every sync, including a checkpoint, use `F_FULLFSYNC` on macOS, and that the checkpoint flag then does not matter.
+
+`fullfsync` is the macOS half of the same promise. On macOS, `fsync` does not always push data through the drive's own cache. SQLite's `fullfsync` flag uses `F_FULLFSYNC`, which asks for that stronger flush. On Linux the flag has no effect. `FULL` is the control that matters there. The cost is one wait per commit. This store commits grants and effect receipts, not a row per token. That wait is what keeps "this grant exists" and "this push was sent" from disappearing after a power loss. The later public jessfraz/agent tree sets both pragmas in `runtime/src/conversation-database.ts` at `e671f61`. Pi Durable's README still documents `NORMAL`. Per the owner's comparison, the private copy has neither that file nor this setting. The decision is the WAL maximum, which is those two pragmas. A drive that reports a flush it did not perform is outside them.
 
 ### Upstream drift
 
@@ -427,17 +429,43 @@ The `unsafe_code = "forbid"` lint is in the root `Cargo.toml`. Landlock and secc
 
 ## Gateway and model names
 
-**Decision:** a model selection is two layers, `gateway/model`. The gateway has no alias. `qwen/qwen-3.5` names gateway `qwen` and model `qwen-3.5`. It does not also carry a local nickname that points at a different provider id.
+**Decision:** a model selection is two layers, written `gateway/model` and split on the first slash. The gateway has no alias. `qwen/qwen-3.5` names gateway `qwen` and model `qwen-3.5`. The remainder after the first slash is the model id, so a model id may itself contain a slash: `lab/qwen/qwen-3.5` is gateway `lab` and model `qwen/qwen-3.5`. There is no third name and no local nickname.
 
-The first provider is OpenAI, selected as `openai/<model>`. ahi does not ship Pi's default model list and does not embed a table of other vendors' models. The string sent to the OpenAI API is the model segment, such as `gpt-4.1` for a selection `openai/gpt-4.1`. OpenAI's API does not take the `openai/` prefix. The credential is the operator's OpenAI credential already available to the process. This proposal does not add a settings command to store it, and it does not adopt Pi's ChatGPT login as the default path.
+The first provider is OpenAI, selected as `openai/<model>`. ahi does not ship Pi's default model list and does not embed a table of other vendors' models. The string sent to the OpenAI API is the model segment, such as `gpt-4.1` for a selection `openai/gpt-4.1`. OpenAI's API does not take the `openai/` prefix.
 
-The name `qwen/qwen-3.5` means Qwen's public gateway and the model `qwen-3.5`. That meaning does not include the URL. The first built-in origin is OpenAI's. A later provider adds its own public origin under the same rule. Until that origin exists, the selection names the gateway and cannot be called. A private or loopback gateway is its own id, with an origin the operator supplies. That origin still has to meet the fetch contract: HTTPS, except a literal loopback; no credential on the catalog request; no redirects; 15 second timeout; 1 MiB cap; strict catalog schema. The catalog path from the comparison is `<origin>/pi/agent/model.json`.
+**Decision:** OpenAI signs in through the browser login. `ahi login` prints the authorization URL, may open a browser, and leaves the login pending when no browser opens. Headless and SSH sessions finish by using that URL. The resulting credential is stored in the coordinator's state directory. It is not written into the repository, the transcript, or an action receipt. There is still no `ahi settings` subcommand. An environment API key is not the OpenAI path this decision selects.
 
-The catalog's provider id must equal the gateway id used to fetch it. A catalog that names a different provider is rejected. That is the alias case the comparison left uncertain. ahi does not guess a winner between a local label and a catalog id, because it does not keep the label.
+The name `qwen/qwen-3.5` means Qwen's public gateway and the model `qwen-3.5`. That meaning does not include the URL. The first built-in origin is OpenAI's. A later provider adds its own public origin under the same rule. Until that origin exists, a well-known public id names the gateway and cannot be called.
 
-Refresh failure keeps the last accepted catalog. The fetch does not send credentials. No gateway origin is embedded from the private copy, and this repository does not gain one.
+### Registering a local or on-prem gateway
 
-For a fetched catalog, the model id in the catalog is the string sent upstream. That string is a property of the gateway. It can differ from the bare segment a built-in provider sends. The selection syntax in ahi stays `gateway/model` either way.
+The two-layer name selects a gateway and a model. Registration is a separate file, because the name has no URL. The operator edits that file in the coordinator's state directory. Proposed name: `model.json`. There is no settings subcommand. ahi does not read `~/.pi`. That directory can hold another product's credentials, and this proposal does not ingest it.
+
+The shape is the provider map Pi documents, at the researched commit, as `~/.pi/agent/models.json`. The owner described the same pattern as `~/.pi/agent/model.json`. Public Pi's filename is `models.json`. ahi's file uses the owner's name, `model.json`, and the same map.
+
+```json
+{
+  "providers": {
+    "lab": {
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "api": "openai-completions",
+      "models": [{ "id": "qwen-3.5" }]
+    }
+  }
+}
+```
+
+The object key `lab` is the gateway id. The selection for that model is `lab/qwen-3.5`. One entry can list many model ids. Two on-prem servers are two gateway ids, each with its own `baseUrl`. That is the whole registration. A third path segment is not required.
+
+The first registered `api` is `openai-completions`, matching the catalog contract already carried: an OpenAI-compatible completions endpoint. A local or on-prem server that speaks that API is registered by this file. A server with a different wire protocol needs a later provider implementation. The file does not add that protocol.
+
+A literal loopback `baseUrl` may be `http`. Any other origin is `https`. Redirects are not followed. The timeout is 15 seconds and the body cap is 1 MiB, the same bounds as a fetched catalog. The example above is loopback. This repository does not gain a private origin.
+
+`apiKey` in this file is a non-secret marker for a server that ignores it, or an environment reference `$NAME`. The file does not run a shell command. A long-term secret is not written into it. Optional headers, when a server requires them, use the same environment reference.
+
+A gateway that publishes a catalog can be registered with an origin instead of a pasted model list. The catalog path from the comparison is `<origin>/pi/agent/model.json`. That fetch carries no credential. The catalog's provider id must equal the gateway id. A mismatch is a rejected catalog, not an alias. Refresh failure keeps the last accepted catalog. For a fetched catalog, the model id in the catalog is the string sent upstream. The selection syntax stays the two-layer form.
+
+An entry whose key is `openai` changes that provider's origin, for a proxy in front of the same id. It does not create a second name for OpenAI, and it is not required for the browser login.
 
 ## Coordinator, tasks, and workers
 
@@ -462,7 +490,7 @@ Worker attachment is a catalog of transports. Each entry is a way a worker reach
 
 Model selection, per the owner's comparison and adapted as above: presets name concrete `gateway/model` selections, and the roles `chat`, `delegation`, and `background` point at presets. Bootstrap sends the resolved selection to a worker. A worker does not invent a gateway. A scheduled job, when that feature exists, uses the background role unless the job names its own model. The first concrete provider behind a preset is OpenAI.
 
-When a provider's own sign-in is a browser flow, `ahi login` prints the authorization URL and leaves the login pending if no browser opens. OpenAI's starting path is the credential already in the process environment, not that flow, and not a settings subcommand.
+`ahi login` is the OpenAI browser sign-in. It prints the authorization URL and leaves the login pending if no browser opens. The stored credential stays in the state directory. A registered local or on-prem gateway uses the `model.json` marker or `$NAME` reference, not this login.
 
 Worktree allocation is an admitted effect. The receipt records the owner. A cleanup that the engine refuses stays recorded as held.
 
@@ -506,7 +534,7 @@ Boundaries:
 | Conversation store | One writer. Commits are atomic. A crash resumes from the last commit. External mutations with outcome `uncertain` stay uncertain. |
 | Grants | Written by an operator action or by a file the operator placed. Not written by the model or by a source event. |
 | Network | Denied in the default sandbox. `ahi serve` does not open a provider connection until a provider is configured. Source polls run only for configured accounts. |
-| Credentials | Not copied into the transcript, the receipt, or `audit.log`. The first provider credential is the operator's OpenAI credential already available to the process. ahi does not add a settings command to store it. |
+| Credentials | Not copied into the transcript, the receipt, or `audit.log`. OpenAI's credential comes from `ahi login` and stays in the state directory. A registered gateway's secret is an environment reference in `model.json`, not a literal in that file or in the repository. |
 | Hook programs | Pinned entry, no shell, fail closed, scrubbed environment using the name rules already in the specification. |
 | Distribution | ahi replaces only its own release artifacts, and only after checksum and attestation checks. It does not execute a downloaded install script as the trust root. |
 
@@ -571,7 +599,7 @@ These phases sit after the existing roadmap, or beside it only where the work is
 | Actions | After the v0.3 subprocess runner exists, so external hook programs have one process builder. Can be designed beside v0.2. | `ahi.actions.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
 | Sandbox for effects | After v0.4, reusing its detection and backends. | An approved `command`, `file_write`, or `pre_commit` runs in the default sandbox. Escalation only by rule. The direction is less prompting as the policy and the sandbox cover the effect. Tests follow the specification's Linux, macOS, and Windows honesty table. |
 | Conversation store | After the actions phase. | Rust-native commits, resume, one writer, grants and receipts, `synchronous = FULL` and `fullfsync = ON`. No Node child. No provider required to test resume. |
-| Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, wired when a provider is in scope, not at process start. |
+| Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, with browser login. `model.json` registers other OpenAI-compatible gateways. Neither runs merely because the process started. |
 | Intake | After the coordinator, one adapter at a time, each off by default. | Admit-before-cursor. A dismissal reason is data. The adapter does not install a tool. |
 | Distribution | When a release is cut. Not part of implementing the phases above. | `cargo install ahi` on Linux, macOS, and Windows. ahi.dev documents that path and the existing attested Linux archives. `ahi self-update` only for an archive the release workflow publishes. |
 
@@ -597,7 +625,7 @@ The owner recorded these on review of this document. They are decisions for the 
 
 ### 1. Conversation store
 
-Rust-native, following Pi Durable's logical model. No Node.js sidecar and no Node bridge. Byte-level import of a Pi database is later work, not a requirement of the first store. Coding-agent JSONL and the AgentHarness register schema are not this model. Durability is `synchronous = FULL` and `fullfsync = ON`. The nuance is in [Conversation store](#conversation-store).
+Rust-native, following Pi Durable's logical model. No Node.js sidecar and no Node bridge. Byte-level import of a Pi database is later work, not a requirement of the first store. Coding-agent JSONL and the AgentHarness register schema are not this model. Durability is the WAL maximum: `synchronous = FULL` and `fullfsync = ON`. `EXTRA` matches `FULL` in WAL mode. The nuance is in [Conversation store](#conversation-store).
 
 ### 2. Crate
 
@@ -617,9 +645,9 @@ Deferred. No iOS target in this repository during the actions, sandbox, store, a
 
 ### 6. Providers
 
-Do not use Pi's default model list. The first provider is OpenAI, selected as `openai/<model>`, with the operator's OpenAI credential already available to the process. No settings subcommand stores that credential.
+Do not use Pi's default model list. The first provider is OpenAI, selected as `openai/<model>`. Sign-in is the browser login: `ahi login` prints the URL and does not abort when no browser opens. The credential stays in the state directory. There is no settings subcommand.
 
-A model selection is `gateway/model`, with no alias. The catalog's provider id must equal the gateway id. A private or loopback gateway is its own id plus an origin under the fetch contract. Only OpenAI has a built-in public origin in the first provider. See [Gateway and model names](#gateway-and-model-names).
+A model selection is two layers, split on the first slash, with no alias. A local or on-prem gateway is registered in the state directory's `model.json`: gateway id, `baseUrl`, `api` of `openai-completions`, and model ids. The two-layer name selects that entry. It does not by itself contain the URL. ahi does not read `~/.pi`. A fetched catalog's provider id must equal the gateway id. Only OpenAI has a built-in public origin in the first provider. See [Gateway and model names](#gateway-and-model-names).
 
 ### Further decisions
 
@@ -627,11 +655,13 @@ A model selection is `gateway/model`, with no alias. The catalog's provider id m
 | --- | --- |
 | Worker transport | A catalog. The local socket and Tailscale are both entries. An unconfigured coordinator listens on the local socket. ahi does not install or require Tailscale. |
 | Interactive `ask` | Only a rule that sets `ask: true` prompts. The default is deny with no prompt. The direction is a sandbox and declared policy, with less confirmation later. |
-| SQLite synchronous mode | `FULL` and `fullfsync` for the conversation database. |
+| SQLite synchronous mode | Maximum durability. For WAL that is `FULL` and `fullfsync`. `EXTRA` is the same as `FULL` in WAL mode. |
+| Provider registration | State-directory `model.json` maps a gateway id to an OpenAI-compatible origin and model ids. The selection is the two-layer name. |
+| OpenAI sign-in | Browser login through `ahi login`. The URL is printed. A missing browser does not abort the login. |
 | Where ahi runs | Linux, macOS, and Windows, through `cargo install ahi`. Existing attested archives stay Linux-only. |
 | Versioning | Continue ahi's existing version line. No separate runtime version. This document does not assign the next number. |
 | Task routing | Exact task id or exact source link to start. No semantic search in the first coordinator. |
-| Gateway names | No alias. `gateway/model` is the only name. A catalog that disagrees with the gateway id is rejected. |
+| Gateway names | Two layers, split on the first slash. No alias. A catalog that disagrees with the gateway id is rejected. |
 | Node | No bridge and no sidecar. |
 | Settings command | None in this proposal. |
 | Hook contract | One actions contract. `pre_commit` is one kind, beside tool calls, commands, file writes, pushes, and outbound messages. `ahi run` stays the local runner. |
@@ -649,6 +679,7 @@ Fetched or cloned on 2026-11-03 unless noted.
 - AgentHarness specification, a different model: <https://github.com/earendil-works/pi/blob/main/packages/agent/docs/harness.md>.
 - Coding-agent session format: <https://pi.dev/docs/latest/session-format> and <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md>.
 - Pi product page, including the install line and the provider list: <https://pi.dev/>.
+- Pi coding-agent model configuration at the same `9c9ce854` commit: `packages/coding-agent/docs/models.md`. The user file documented there is `~/.pi/agent/models.json`, with a `providers` map of `baseUrl`, `api`, `apiKey`, and `models`. Read 2026-11-03. ahi adapts the map and does not read that directory.
 - How Pi works, for the coding-agent loop rather than the Pi Durable tables: <https://pi.dev/docs/latest/how-pi-works>.
 - crates.io name check recorded in the specification on 2026-10-25. Not reconfirmed on 2026-11-03 (HTTP 403 from this environment).
 
