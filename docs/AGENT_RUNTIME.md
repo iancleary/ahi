@@ -27,7 +27,7 @@ The following is **inferred** from the review brief for this proposal, not from 
 - ahi becomes the public agent runtime and coordinator. The role is comparable to the product described at [pi.dev](https://pi.dev/): a harness an operator adapts, distributed as a program the operator installs. The fetched pi.dev page calls Pi "a minimal agent harness" and says "We've shipped Pi 1.0 with Pi Durable."
 - Distribution targets named in the brief: crates.io (`cargo install ahi`), the domain ahi.dev (install instructions and documentation), and the attested static release binaries this repository already defines.
 - ahi installs and updates only itself and its first-party components. It does not become a general package manager. It stays useful for repositories that are not Rust projects.
-- The coordinator, task and session registry, worker model, event intake, and the principle that authorization carries forward are to be molded from [jessfraz/agent](https://github.com/jessfraz/agent) and from Ian's private derivative `https://github.com/iancleary/agent`. They are not to be copied.
+- The coordinator, task and session registry, worker model, event intake, and the principle that authorization carries forward are to be molded from [jessfraz/agent](https://github.com/jessfraz/agent) and from Ian's private copy `https://github.com/iancleary/agent`. They are not to be copied. The private repository was not readable in this environment. What this document says about it comes from the owner's comparison on the review, cited below, and is marked as such.
 - The conversation and provider layer follows Pi Durable at `https://github.com/earendil-works/pi`. The brief states that Ian is leaning toward a Rust-native store that follows Pi's data model, with a Node.js sidecar as the alternative.
 - The differentiator is ahi's existing declared, pinned, configuration-driven hooks, generalized to agent actions (tool calls, commands, file writes, pushes, and outbound messages), combined with sandbox-by-default execution and escalation governed by that same engine.
 - The existing pre-commit runner remains available, for example as an `ahi hooks` subcommand, so 0.1.x users keep working.
@@ -36,7 +36,15 @@ Observed, not inferred: the repository is `https://github.com/iancleary/ahi`. Th
 
 ## Research limits
 
-`GET https://api.github.com/repos/iancleary/agent` returned HTTP 404 on 2026-11-03. This environment cannot tell a missing repository from a private repository. The private derivative was not read. This proposal relies on the public repository [jessfraz/agent](https://github.com/jessfraz/agent) (MIT), shallow-cloned at commit `e671f61d54ffe3b1361db79e7cc79a68ac252b23` (committer date 2026-11-02T18:14:05-08:00).
+`GET https://api.github.com/repos/iancleary/agent` returned HTTP 404 on 2026-11-03. This environment cannot tell a missing repository from a private repository. The private tree was not read, and this document does not repeat hostnames, addresses, gateway origins, machine names, state-file contents, or conversation text from it.
+
+The owner compared that tree with public jessfraz/agent in a review comment: <https://github.com/iancleary/ahi/pull/6#issuecomment-6594868422> (comment `6594868422`, 2026-11-03). Per that comparison, and not from an independent reading:
+
+- The baseline is jessfraz/agent at `d4ef2fb5af0b44531e771a6c3ba4bb7959caf966`, imported verbatim on 2026-10-31 as commit `f4adc30` per the comparison. The committer date of the public baseline is 2026-10-31T15:32:22Z. This environment confirmed that public commit. It did not confirm `f4adc30`.
+- The compared tree is `iancleary/agent` version 0.1.0 at `0b47b63`. The histories are disjoint. The repository was seeded from a copy, not from a git fork. The comment reports a direct tree-to-tree diff of 46 files, +2,636/−201.
+- That copy predates public `main` at `e671f61`, which is the commit this proposal read. Files that exist only on the later public tree are upstream drift, not changes made in the copy. See [Upstream drift](#upstream-drift).
+
+Statements taken from the comment are attributed as **per the owner's comparison**. Public jessfraz/agent facts below still come from the shallow clone at `e671f61d54ffe3b1361db79e7cc79a68ac252b23` (committer date 2026-11-02T18:14:05-08:00), unless a line names the comparison.
 
 Pi Durable was read from [earendil-works/pi](https://github.com/earendil-works/pi) `main` at commit `9c9ce8547e5a88cbe834a53e9a6d83a789d08e47` (committer date 2026-11-02T23:53:07Z). jessfraz/agent pins the npm packages `@earendil-works/pi-durable`, `@earendil-works/pi-ai`, `@earendil-works/chord`, `@earendil-works/pi-mcp`, and `@earendil-works/pi-telemetry` at version `1.4.0`. This research did not diff that tarball against `main`. Schema details below are from `main`, not from a claim that `1.4.0` has the same tables.
 
@@ -60,7 +68,8 @@ OpenShell statements are not re-fetched here. They are used as already written i
 - A general package manager. ahi does not install Node, Python, Go, Rust toolchains, npm packages, Pi packages, hook repositories, or third-party agents. `ahi fetch` remains the pinned hook-cache bake specified for v0.2. It is not an installer for arbitrary tools.
 - A drop-in copy of jessfraz/agent, of Rex, of Tailscale, of Nix, or of the Pi coding-agent terminal interface.
 - Byte-for-byte compatibility with a Pi session file, unless the open store decision explicitly selects that. See [Conversation store](#conversation-store).
-- An iOS client in the first milestones. Whether to build one later is an open decision.
+- An iOS client in the first milestones. Whether to build one later is an open decision. Per the owner's comparison, the private copy changed `ios/README.md` only, with no Swift source changes relative to its baseline. Those documentation edits are not an iOS scope for ahi.
+- Ingesting private state from `iancleary/agent`, from an operator's agent state directory, or from a personal instructions file. ahi does not read or copy credentials, gateway origins, hostnames, addresses, machine names, conversation transcripts, embedding indexes, or the contents of state files. A design fact in this document is not permission to import that state. Personal deployment notes and skills from the private copy are not part of ahi.
 - Hosting a multi-tenant service. The coordinator is a process the operator runs, in the same spirit as the current single-user hook runner. **Inferred** from the brief and from the existing specification's lack of a third-party hook service.
 - Publishing, tagging, or cutting a release as part of accepting this document.
 
@@ -137,7 +146,7 @@ The hook runner does not go through the conversation store. `ahi run` remains a 
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| Coordinator | Process lifetime, the single writer, task routing, client admission, source polling when enabled | Model HTTP, sandbox filters, hook-repository downloads |
+| Coordinator | Process lifetime, the single writer, task routing, client admission, source polling when enabled, model presets and role defaults, gateway catalog refresh | Model HTTP inside a worker, sandbox filters, hook-repository downloads |
 | Conversation store | Atomic commits of entries, documents, tasks, and submissions | Tool execution |
 | Policy and hook engine | The verdict for one action, including rewrite | The decision to hide a denial from the audit |
 | Sandbox | The process boundary for an effect that was approved | A second Landlock or seccomp filter inside OpenShell |
@@ -162,6 +171,28 @@ Read at commit `e671f61d54ffe3b1361db79e7cc79a68ac252b23`. The README describes 
 | Phone client | `ios/README.md` describes a SwiftUI client for the main conversation over the coordinator's authenticated connection, with a private TestFlight distribution. | No phone client until the coordinator protocol is stable, and only if that open decision says to build one. |
 
 This research did not find a grant record beside `TaskRecord` in `src/protocol.rs`. The carry-forward principle is stated in the README and the architecture document. A search of the Rust tree found Tailscale peer checks and source-helper authorization, not a separate approval ledger. That search does not prove the TypeScript runtime lacks every check. **Unverified:** whether jessfraz/agent enforces the principle in code or only in model instructions.
+
+### From the owner's comparison of the private copy
+
+Per the owner's comparison, the private copy keeps the public split: Rust owns types, the wire protocol, and the command-line interface; the TypeScript runtime owns provider construction and execution. New Rust types are mirrored by generated bindings. ahi's leading option removes that split. The designs below are the ones the comparison marks to carry, adapted into the Rust runtime. Carry-over is in scope only where the license permits it. See [Licensing and attribution](#licensing-and-attribution).
+
+| Comparison verdict | Design, per the owner's comparison | What ahi adopts |
+| --- | --- | --- |
+| Carry | Coordinator settings send model preferences and the gateway registration to workers with bootstrap. | The coordinator is the source of those settings. A worker does not invent a model or a gateway. |
+| Carry | `ModelPreferences`: a map of preset label to model selection, plus roles `chat`, `delegation`, and `background`. Labels are trimmed and non-empty. A role label must name an existing preset. Resolution takes a label and a fallback. | The same three roles and the same validation. Example preset labels in the comparison are `plan`, `build`, `simple`, and `feature`. Those labels are examples, not a required set. |
+| Carry | Scheduled-job model is optional. A job with no model uses the background role. Setting a provider, a reasoning effort, or a fast mode without a model is a validation error. An explicit job model still wins. | The same inheritance rule, once scheduled jobs exist. They are not a first milestone. |
+| Carry (adapt) | `ModelProvider` gains `Custom(ProviderId)`. The identifier is a validated ASCII string on the wire, not a fixed enum. | Provider identifiers are data. The validation rules are the ones to reuse. Built-in names and gateway names share that string space and must not collide. |
+| Carry | Gateway fetch is native HTTP. HTTPS only, except a literal loopback origin. The request carries no credential. Redirects are not followed. Timeout 15 seconds. Body cap 1 MiB. The catalog schema is strict: OpenAI-compatible completions, an API-key field that is a gateway marker rather than a secret, zero costs, and capability flags. | The same origin contract. The catalog path in the comparison is `<origin>/pi/agent/model.json`. |
+| Carry (adapt) | Each gateway keeps its last accepted catalog when a refresh fails. Registrations persist. A gateway's local name and the provider identifier in the catalog are different fields. Legacy single-URL cache files are migrated in place. | Retain the last-good catalog per registration. Reimplement validation in Rust. Do not take a JavaScript schema library. The provider identifier in the catalog is authoritative. The local name is only a label. The comparison marks some aliasing cases as uncertain; ahi does not guess them. |
+| Carry (adapt) | Worktree allocation is recorded. A refused cleanup stays held, and the refusal is recorded. | An allocation and a refused cleanup are action receipts. Cleanup does not run unless the engine approves it. The held state remains until a later receipt says otherwise. |
+| Carry | Login always prints the authorization URL. It may try a browser, then the default browser. Failure to open a browser does not abort the pending login. | `ahi login` prints the URL on standard error and waits. Headless and SSH sessions stay able to finish sign-in. The comparison says this path was verified live on the private copy. This environment did not verify it. |
+| Carry | A managed-settings apply overlays private machine configuration on declarative settings. | Declarative settings can live with the operator's shared configuration. Private machine values, including model preferences and gateway registrations, apply on top and are not written back into a repository. Proposed command: `ahi settings apply`. |
+| Drop | Provider construction through `pi-ai`, JavaScript schema validation, and generated TypeScript bindings. | Replaced by the Rust provider interface and Rust types. |
+| Drop | Node bridge dispatch of gateway commands. | Absent in the Rust-native store. Present only if the sidecar alternative is chosen, and then only behind that process boundary. |
+| Drop | The terminal selection-picker implementation. | No terminal-interface phase. Listing presets or conversations does not submit a turn. |
+| Drop | iOS edits in the private copy, and its skill and handoff files. | Out of scope. See the non-goal on private state. |
+
+The comparison also says slash commands work in the plain line interface, not only in the terminal interface. ahi's first coordinator commands are line commands. A picker is not required for them to run.
 
 ### From Pi Durable
 
@@ -262,7 +293,20 @@ ahi additions, stored as documents or as entries in that same commit stream, not
 
 Argument hashes, rule ids, and paths that are not secret belong in the receipt. Secret values, raw credentials, and full file contents do not. That continues the `audit.log` rule already implemented in `src/audit.rs`. The hook-runner `audit.log` stays the log for `ahi run`. It is not the conversation store.
 
-**Recommendation for durability, stricter than Pi Durable's documented `synchronous = NORMAL`:** fsync the commit that records a grant or an external effect. A lost grant or a lost "push already sent" bit is the failure mode this runtime is trying to avoid. **Inferred** as the right bar for a security log. Ian can keep Pi's `NORMAL` if he prefers Pi's crash behavior exactly. That choice sits inside the store decision.
+**Recommendation for durability, stricter than Pi Durable's documented `synchronous = NORMAL`:** fsync the commit that records a grant or an external effect. A lost grant or a lost "push already sent" bit is the failure mode this runtime is trying to avoid. The later public jessfraz/agent tree does the same class of thing for its Pi database: `runtime/src/conversation-database.ts` at `e671f61` sets `PRAGMA synchronous = FULL` and `PRAGMA fullfsync = ON`, and its comment says canonical Pi commits request full synchronization and macOS `F_FULLFSYNC`. That file was read here. Per the owner's comparison, the private copy does not contain it. The recommendation follows the later public opener and the security-log requirement, not the private copy's older tree.
+
+### Upstream drift
+
+Per the owner's comparison, public jessfraz/agent moved after the baseline `d4ef2fb` that the private copy imported. This proposal's public reading is `e671f61`. The comparison names these additions as files the private copy never had. They are not changes made in the copy.
+
+| Public file at `e671f61` | What this environment read | Why it matters to the store decision |
+| --- | --- | --- |
+| `runtime/src/conversation-database.ts` | Opens the Node SQLite database and sets `synchronous = FULL` and `fullfsync = ON`. It does not declare a new table schema in the portion read (the whole file is the opener). | The private copy is not evidence about this durability setting. Pi Durable's README still documents `synchronous = NORMAL`. The public agent tree that wraps Pi has already asked for full synchronization. A Rust store should choose its own mode with that conflict visible. |
+| `runtime/src/startup-diagnostics.ts` | Appends a private bounded log of fixed stages and numeric failure codes. The file comment says diagnostics never own recovery. | Useful as a separate log. It is not the conversation store, and it does not decide resume. |
+
+The comparison also names iOS source-status views and tests that the private copy lacks. Those are product drift, not store schema. A re-port of the private copy onto later public jessfraz/agent would meet the dynamic provider-identifier change, which the comparison expects to conflict. That is a reason for ahi to own provider identifiers as data in Rust, rather than to track the TypeScript provider enum.
+
+The private copy's use of `@earendil-works/pi-durable` 1.4.0, per the comparison, is the sidecar the leading option declines. It predates the public opener above. Choosing the sidecar to "match the private copy" would freeze an older Node store. Choosing it to "match current public jessfraz/agent" would track a moving bridge, including the full-synchronization opener. Neither is the Rust-native store.
 
 ### Alternative: Node.js sidecar
 
@@ -390,6 +434,14 @@ Proposed commands, additive, and absent until a later phase implements them:
 
 `ahi serve` with no configuration starts a coordinator that has no provider and no sources. That process can still answer `ahi actions check` once the actions file exists. It does not open a network connection by merely starting.
 
+Model selection, per the owner's comparison and adapted as above: presets name concrete models, and the roles `chat`, `delegation`, and `background` point at presets. Bootstrap sends the resolved settings to a worker. A scheduled job, when that feature exists, uses the background role unless the job names its own model.
+
+Gateway catalogs use the origin contract in the comparison table. Refresh failure keeps the last accepted catalog. The fetch does not send credentials and does not follow redirects.
+
+`ahi login` prints the authorization URL and leaves the login pending if no browser opens. `ahi settings apply` overlays private machine settings, including preferences and gateway registrations, onto declarative settings and does not write those private values into the repository.
+
+Worktree allocation is an admitted effect. The receipt records the owner. A cleanup that the engine refuses stays recorded as held.
+
 Task record, molded from the fields actually present on jessfraz/agent's `TaskRecord`, without Rex:
 
 | Field | Purpose |
@@ -505,17 +557,31 @@ These phases sit after the existing roadmap, or beside it only where the work is
 
 v0.3 is the right predecessor for external action hooks because it is the phase that executes pinned programs. v0.4 is the right predecessor for effect sandboxes because nesting policy is already specified there. Starting a second sandbox design beside v0.4 would fork the threat model.
 
+## Licensing and attribution
+
+The owner conditioned carry-over from jessfraz/agent and from the private copy on the license permitting it. This section states the license texts that were read and the attribution those texts require. It is not a license opinion, and it does not relicense anyone's code.
+
+ahi today: root `LICENSE` and `Cargo.toml` say MIT. The copyright line is `Copyright (c) 2026 Ian Cleary`. The MIT condition in that file is that the copyright notice and the permission notice appear in all copies or substantial portions of the software.
+
+jessfraz/agent: `LICENSE` at public baseline `d4ef2fb5af0b44531e771a6c3ba4bb7959caf966` and at `e671f61d54ffe3b1361db79e7cc79a68ac252b23` is the MIT license. Both files begin `Copyright (c) 2026 Agent contributors`. The condition read in the file is the MIT condition: the copyright notice and the permission notice must be included in all copies or substantial portions of the software. <https://github.com/jessfraz/agent/blob/d4ef2fb5af0b44531e771a6c3ba4bb7959caf966/LICENSE>
+
+Pi: `LICENSE` on `main` is the MIT license. The copyright line read from that file is `Copyright (c) 2025 Mario Zechner`. The same MIT condition follows: include the copyright notice and the permission notice in all copies or substantial portions. <https://github.com/earendil-works/pi/blob/main/LICENSE>. The `license` field of `packages/durable/package.json` on `main` is `MIT`. That field was read on 2026-11-03. The package version in that file was `1.5.0`, which is newer than the `1.4.0` pin in jessfraz/agent. The field is not a claim that every Pi file header was checked.
+
+This proposal copies neither repository's source. Describing a data model or an origin contract in this file does not attach those copyright lines to this file. A later change that copies or substantially reproduces source from either project must keep that project's copyright notice and permission notice with the copied portion. The private copy is not a license source. It was not read, and its texts are not available to attribute.
+
+The open choice for ahi remains MIT, as the file stands, or MIT OR Apache-2.0, as [docs/SPEC.md](SPEC.md) recommends and does not apply. That choice is about ahi's own license. It does not remove the MIT notice from a portion that came from jessfraz/agent or from Pi.
+
 ## Open decisions
 
 Each item is open. The recommendation is the proposal, not a change already made in the tree.
 
 ### 1. Conversation store: Rust-native or Node.js sidecar
 
-**Leading option:** a Rust-native store that follows the Pi Durable logical model and the SQLite record types cited above. Byte-level import of a Pi database is later work against a pinned schema. Coding-agent JSONL and the AgentHarness register schema are not that model.
+**Leading option:** a Rust-native store that follows the Pi Durable logical model and the SQLite record types cited above. Byte-level import of a Pi database is later work against a pinned schema. Coding-agent JSONL and the AgentHarness register schema are not that model. Durability follows the later public jessfraz opener (`synchronous = FULL`), not Pi Durable's documented `NORMAL`, and not the private copy: per the owner's comparison that copy predates `conversation-database.ts`.
 
-**Alternative:** a Node.js sidecar with the same supervisor shape as jessfraz/agent (`node` plus `@earendil-works/pi-durable`).
+**Alternative:** a Node.js sidecar with the same supervisor shape as jessfraz/agent (`node` plus `@earendil-works/pi-durable`). Matching the private copy would mean the `1.4.0` packages the comparison names. Matching public `e671f61` would mean a newer bridge. Both stay the alternative.
 
-Tradeoffs are in [Conversation store](#conversation-store). The brief states that Ian is leaning toward the Rust-native store. **Decision: open.**
+Tradeoffs are in [Conversation store](#conversation-store) and [Upstream drift](#upstream-drift). The brief states that Ian is leaning toward the Rust-native store. **Decision: open.**
 
 ### 2. Crate split or a single crate
 
@@ -527,15 +593,15 @@ Tradeoffs are in [Conversation store](#conversation-store). The brief states tha
 
 ### 3. License: MIT, or MIT OR Apache-2.0
 
-Unchanged from the specification. The tree contains MIT, `Copyright (c) 2026 Ian Cleary`. jessfraz/agent is MIT (`Copyright (c) 2026 Agent contributors` in its `LICENSE`). The Pi repository's GitHub metadata reports MIT. The specification's recommendation is dual MIT OR Apache-2.0, and its provisional choice is MIT only, because the file is already in the tree.
+Unchanged from the specification. The texts and the attribution they require are in [Licensing and attribution](#licensing-and-attribution). The specification's recommendation is dual MIT OR Apache-2.0, and its provisional choice is MIT only, because the file is already in the tree. Carry-over from jessfraz/agent or Pi stays under those projects' MIT notices.
 
 **Decision: open.** This proposal does not add `LICENSE-APACHE`.
 
 ### 4. Relationship to `iancleary/agent`, including privacy
 
-The private repository was not readable here (HTTP 404). This document does not describe its contents.
+The private repository was not readable here (HTTP 404). Per the owner's comparison it is a copy of jessfraz/agent at `d4ef2fb`, described there as version 0.1.0 at `0b47b63`, and it is not a git fork. This document uses that comparison for design facts only.
 
-**Recommendation:** public ahi does not depend on that repository and does not receive copies of its conversations, credentials, account names, or private workflows. If the private tree is a personal deployment, it can depend on public ahi later. Whether to keep it private, archive it, or publish parts of it is a separate choice. Publishing it is not required for this proposal, and this proposal does not request access.
+**Recommendation:** public ahi does not depend on that repository. It does not ingest the private state listed in the comparison's privacy section: runbooks, tailnet names and addresses, gateway origins, session material, conversation text, state-directory contents, embedding data, or personal instruction files. One line in the private repository names a machine, per the comparison; this document does not repeat it. If the private tree is a personal deployment, it can depend on public ahi later. Whether to keep it private, archive it, or publish parts of it is a separate choice. Publishing it is not required for this proposal, and this proposal does not request access.
 
 **Decision: open.**
 
@@ -543,7 +609,7 @@ The private repository was not readable here (HTTP 404). This document does not 
 
 jessfraz/agent includes a SwiftUI client (`ios/README.md`) that attaches to the coordinator's main conversation. That shows a phone client is a possible product. It is not a requirement for the runtime.
 
-**Recommendation:** no iOS target in this repository during the actions, sandbox, store, and coordinator phases. Revisit after `ahi serve` has a stable local protocol. A client, if built, talks to the coordinator. It does not hold the store.
+**Recommendation:** no iOS target in this repository during the actions, sandbox, store, and coordinator phases. The owner's comparison reaches the same drop: the private copy's iOS delta is documentation, and it is not carried. Revisit after `ahi serve` has a stable local protocol. A client, if built, talks to the coordinator. It does not hold the store.
 
 **Decision: open.**
 
@@ -551,9 +617,11 @@ jessfraz/agent includes a SwiftUI client (`ios/README.md`) that attaches to the 
 
 pi.dev lists many hosted providers. jessfraz/agent's setup document says ChatGPT is the default, that `agent login` opens ChatGPT sign-in, and that other Pi providers can use environment or ambient credentials. Agent does not provide an interactive login for every provider. Those are facts about those projects. They are not a selection for ahi.
 
-**Recommendation:** define a small provider interface in the store phase, and ship no network provider until the store decision is made. The first provider should be one the operator already has credentials for, plus a local OpenAI-compatible HTTP endpoint so the coordinator can be tested without choosing a vendor. Do not port Pi's provider matrix, and do not take a dependency on `pi-ai` unless the sidecar option is chosen.
+Per the owner's comparison, the private copy makes provider identifiers data (`Custom(ProviderId)`) and adds a gateway catalog under the origin contract above. That sharpens this decision. The interface should accept a provider identifier string, not a closed enum, so a gateway can be registered without a release. The gateway is one provider behind that interface. Its fetch rules are part of the security posture, not a list of vendors to bundle. Login prints a URL and does not abort when a browser is absent. The comparison's TypeScript provider construction is a drop for the Rust-native option.
 
-**Decision: open.**
+**Recommendation:** define that identifier-based interface in the store phase, and ship no network provider until the store decision is made. The first concrete providers are one the operator already has credentials for, and a gateway or loopback catalog that satisfies the origin contract. Do not port Pi's provider matrix. Do not depend on `pi-ai` unless the sidecar option is chosen. Do not embed a gateway origin in the binary or in this repository.
+
+**Decision: open.** Which hosted vendor, if any, is still open. The shape of an identifier plus a credential-free gateway catalog is the part the comparison settles as the design to carry.
 
 ### Further open items
 
@@ -563,7 +631,7 @@ These are narrower than the six decisions above. They still need an owner before
 | --- | --- |
 | Remote worker transport | Local socket first. An authenticated remote listener later. Do not require Tailscale in the first coordinator. |
 | Interactive `ask` | Only rules that set `ask: true` prompt. Default is deny with no prompt. |
-| SQLite synchronous mode | fsync grants and external-effect commits, which is stricter than Pi Durable's documented `synchronous = NORMAL`. |
+| SQLite synchronous mode | `FULL` for the conversation database, including grants and external-effect commits. Pi Durable's README documents `NORMAL`. Public jessfraz/agent at `e671f61` sets `FULL` and `fullfsync`. The private copy, per the owner's comparison, has neither that file nor a vote on this row. |
 | Release archives for macOS and Windows | Not in this proposal. `cargo install` covers those systems until a release change adds archives. |
 | Phase version numbers after v0.4 | Do not assign them until the preceding specification phases land. |
 | Semantic search of past tasks | Not in the first coordinator. Exact id and exact source link only. |
@@ -573,7 +641,10 @@ These are narrower than the six decisions above. They still need an owner before
 Fetched or cloned on 2026-11-03 unless noted.
 
 - This repository's contract: [docs/SPEC.md](SPEC.md), [docs/release.md](release.md), root `Cargo.toml` version `0.1.3`, `src/main.rs`, `src/policy.rs`, `src/audit.rs`.
-- jessfraz/agent commit `e671f61d54ffe3b1361db79e7cc79a68ac252b23`: <https://github.com/jessfraz/agent>. Files used: `README.md`, `docs/architecture.md`, `docs/setup.md`, `docs/roadmap.md`, `ios/README.md`, `LICENSE`, `runtime/package.json`, `runtime/src/bridge.ts`, `src/runtime.rs`, `src/protocol.rs` (`TaskRecord`, `WorkerRef`, `SourceRef`), `src/sources/mod.rs`.
+- jessfraz/agent commit `e671f61d54ffe3b1361db79e7cc79a68ac252b23`: <https://github.com/jessfraz/agent>. Files used: `README.md`, `docs/architecture.md`, `docs/setup.md`, `docs/roadmap.md`, `ios/README.md`, `LICENSE`, `runtime/package.json`, `runtime/src/bridge.ts`, `runtime/src/conversation-database.ts`, `runtime/src/startup-diagnostics.ts`, `src/runtime.rs`, `src/protocol.rs` (`TaskRecord`, `WorkerRef`, `SourceRef`), `src/sources/mod.rs`.
+- jessfraz/agent `LICENSE` at baseline `d4ef2fb5af0b44531e771a6c3ba4bb7959caf966`: <https://github.com/jessfraz/agent/blob/d4ef2fb5af0b44531e771a6c3ba4bb7959caf966/LICENSE>. MIT, `Copyright (c) 2026 Agent contributors`.
+- Owner's comparison of the private copy, comment `6594868422`: <https://github.com/iancleary/ahi/pull/6#issuecomment-6594868422>. Design facts about `iancleary/agent` are from this comment only.
+- Pi `LICENSE`: <https://github.com/earendil-works/pi/blob/main/LICENSE>. MIT, `Copyright (c) 2025 Mario Zechner`. `packages/durable/package.json` `license` field `MIT`, read 2026-11-03.
 - Pi repository `main` at `9c9ce8547e5a88cbe834a53e9a6d83a789d08e47`: <https://github.com/earendil-works/pi>. Package README: <https://github.com/earendil-works/pi/blob/main/packages/durable/README.md>. Schema: `packages/durable/src/storage/sqlite/schema.ts`, `packages/durable/src/storage/sqlite/migrations.ts`, `packages/durable/src/storage/store/tables.ts`. Records: `packages/durable/src/types.ts`.
 - AgentHarness specification, a different model: <https://github.com/earendil-works/pi/blob/main/packages/agent/docs/harness.md>.
 - Coding-agent session format: <https://pi.dev/docs/latest/session-format> and <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md>.
@@ -583,7 +654,8 @@ Fetched or cloned on 2026-11-03 unless noted.
 
 ## Unverified
 
-- Contents of `https://github.com/iancleary/agent`. The API returned 404.
+- The tree of `https://github.com/iancleary/agent`. The API returned 404. Facts about it are per the owner's comparison and were not checked against the repository.
+- The import commit the comparison names, and the live login check the comparison reports. The public baseline commit `d4ef2fb` was confirmed. The private commit `0b47b63` was not.
 - Whether `@earendil-works/pi-durable` `1.4.0` has the same SQLite tables as `main` at `9c9ce854`.
 - `packages/durable/docs/spec.md` was not read through. Chord's `CREATE TABLE` for `durable_schema` was not read.
 - Whether jessfraz/agent enforces "authorization carries forward" in code, or only states it and instructs the model.
