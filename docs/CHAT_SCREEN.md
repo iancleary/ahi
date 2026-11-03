@@ -19,7 +19,7 @@ Reference: Ian's screenshot of pi.dev's Claude Code-style screen. Match that arr
 █ input (no frame, no prompt character)
 ────────────────────────────────────────────────────────────────
 ~/Work/gh/ahi (main)
-↑139k ↓11k R1.2M CH99.8% $0.502 (sub) 28.4%/272k (auto)     (openai) gpt-6.1-sol • medium
+↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)     (openai) gpt-6.1-sol • medium
 ```
 
 From top to bottom:
@@ -32,7 +32,6 @@ From top to bottom:
    - `↑<n>` session input tokens
    - `↓<n>` session output tokens
    - `R<n>` cached input tokens read
-   - `CH<p>%` cache hit ratio, cached read divided by total input
    - `$<cost>` session cost, followed by `(sub)` when the credential is a subscription sign-in rather than metered API billing
    - `<p>%/<window>` context used as a percent of the model's window, for example `28.4%/272k`. Context used is the input token count of the most recent response.
    - `(auto)` when automatic context compaction is on (display only until compaction exists)
@@ -40,7 +39,7 @@ From top to bottom:
    Counts use `k` and `M` suffixes with at most one decimal. An unknown value is omitted together with its label, never shown as zero.
    Right segment: `(gateway) model • thinking-level`, right-aligned.
 
-   When the row is too narrow, drop left-segment fields from the right end (`(auto)` first, then context, cost, cache hit ratio, cache read) until it fits. If the input and output counts still leave no room for the whole model segment, those counts are omitted as well. The model segment is never truncated. The cache-hit percentage is the cached-read count divided by the session input count, not a separately chosen display figure.
+   When the row is too narrow, drop left-segment fields from the right end (`(auto)` first, then context, cost, cache read) until it fits. If the input and output counts still leave no room for the whole model segment, those counts are omitted as well. The model segment is never truncated.
 
 Both status rows use the dim style except the model segment.
 

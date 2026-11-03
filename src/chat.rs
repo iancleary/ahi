@@ -797,13 +797,6 @@ fn session_fields(meters: &SessionMeters) -> Vec<String> {
     if let Some(count) = meters.cached_input_tokens {
         fields.push(format!("R{}", format_count(count)));
     }
-    if let (Some(cached), Some(input)) = (meters.cached_input_tokens, meters.input_tokens) {
-        if input > 0 {
-            if let Some(percent) = format_percent(cached, input) {
-                fields.push(format!("CH{percent}%"));
-            }
-        }
-    }
     if let Some(cost) = meters.cost_usd {
         let mut field = format!("${cost:.3}");
         if meters.subscription_sign_in {
@@ -1426,7 +1419,7 @@ mod tests {
 
     #[test]
     fn session_row_matches_the_reference_order_and_drops_fields() {
-        let left = "↑139k ↓11k R1.2M CH863.3% $0.502 (sub) 28.4%/272k (auto)";
+        let left = "↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)";
         let right = "(openai) gpt-6.1-sol • medium";
         let wide = render_session_row(
             120,
@@ -1437,8 +1430,9 @@ mod tests {
         assert_eq!(wide.chars().count(), 120);
         assert!(wide.starts_with(left), "{wide}");
         assert!(wide.ends_with(right), "{wide}");
+        assert!(!wide.contains("CH"), "{wide}");
         let mut previous = 0;
-        for marker in ["↑", "↓", "R", "CH", "$", "(sub)", "28.4%/", "(auto)"] {
+        for marker in ["↑", "↓", "R", "$", "(sub)", "28.4%/", "(auto)"] {
             let position = wide
                 .find(marker)
                 .unwrap_or_else(|| panic!("missing {marker} in {wide}"));
@@ -1450,11 +1444,10 @@ mod tests {
             render_session_row(60, &reference_meters(), &selection(), ThinkingLevel::Medium);
         assert_eq!(narrow.chars().count(), 60, "{narrow}");
         assert!(narrow.ends_with(right), "{narrow}");
-        assert!(narrow.contains("↑139k ↓11k R1.2M CH863.3%"), "{narrow}");
+        assert!(narrow.contains("↑139k ↓11k R1.2M $0.502 (sub)"), "{narrow}");
         assert!(!narrow.contains("(auto)"), "{narrow}");
         assert!(!narrow.contains("28.4%"), "{narrow}");
-        assert!(!narrow.contains("(sub)"), "{narrow}");
-        assert!(!narrow.contains("$0.502"), "{narrow}");
+        assert!(!narrow.contains("CH"), "{narrow}");
     }
 
     #[test]
@@ -1478,7 +1471,7 @@ mod tests {
         known_zero.cached_input_tokens = Some(0);
         let row = render_session_row(80, &known_zero, &selection(), ThinkingLevel::Medium);
         assert!(row.contains("R0"), "{row}");
-        assert!(row.contains("CH0%"), "{row}");
+        assert!(!row.contains("CH"), "{row}");
     }
 
     #[test]
