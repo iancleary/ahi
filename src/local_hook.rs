@@ -192,7 +192,7 @@ fn append_log(root: &Path, log_file: &str, text: &str) -> Result<()> {
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|err| Error::new(format!("failed to open log file `{}`: {err}", log_file)))?;
+        .map_err(|err| Error::new(format!("failed to open log file `{log_file}`: {err}")))?;
     file.write_all(text.as_bytes())
         .map_err(|err| Error::new(format!("failed to write log file `{log_file}`: {err}")))?;
     Ok(())

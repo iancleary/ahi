@@ -4,7 +4,7 @@ description = "Fail-closed pre-commit runner. Reads .pre-commit-config.yaml and 
 version = "0.1.4"
 edition = "2021"
 license = "MIT"
-rust-version = "1.83"
+rust-version = "1.88"
 repository = "https://github.com/iancleary/ahi"
 authors = ["Ian Cleary"]
 readme = "README.md"
@@ -17,17 +17,22 @@ path = "src/lib.rs"
 name = "ahi"
 path = "src/main.rs"
 
-# Exact pins. Caret ranges resolve to 2026 releases whose MSRV is above 1.83.
+# Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
 clap = { version = "=4.5.23", features = ["derive"] }
+crossterm = "=0.29.0"
+getrandom = "=0.2.16"
 quick-xml = "=0.41.0"
+# 0.30.0 is the release that no longer depends on the unmaintained paste crate.
+ratatui = "=0.30.0"
 regex = "=1.11.1"
-serde = { version = "=1.0.216", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.134"
 serde_yaml = "=0.9.34"
 sha2 = "=0.10.8"
 thiserror = "=1.0.69"
 toml = "=0.8.23"
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
 yaml-rust2 = "=0.10.0"
 
 [target.'cfg(unix)'.dependencies]

@@ -10,7 +10,7 @@ A proposal to grow ahi from the hook runner into a public agent runtime and coor
 
 ## Build
 
-MSRV is Rust 1.83. A `justfile` wraps the same commands CI runs.
+MSRV is Rust 1.88. A `justfile` wraps the same commands CI runs.
 
 ```sh
 cargo test --all-features
@@ -20,9 +20,11 @@ cargo build --release
 
 `ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
 
-`scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself still builds with Rust 1.83. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
+`scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself builds with Rust 1.88. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
 
-The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi` when that variable is set, else the temporary directory joined with `ahi`. ahi does not write under a home directory. A store whose `objects/sha256` directory already exists can be opened read-only.
+The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi` when that variable is set, else the temporary directory joined with `ahi`. The hook cache does not fall back to a home directory. A store whose `objects/sha256` directory already exists can be opened read-only.
+
+The harness state directory is `--state-dir`, else `AHI_STATE_DIR`, else `$XDG_STATE_HOME/ahi`, else `%LOCALAPPDATA%\ahi` on Windows, else `$HOME/.local/share/ahi`. `models.json` and the OpenAI credential live there. ahi does not read `~/.pi`.
 
 ## Commands in this version
 
@@ -31,12 +33,14 @@ The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi
 | `ahi run` | Staged files. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets. `--format` is `text`, `json`, or `sarif`. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings. |
 | `ahi list-checks` | Builtin check ids. |
 | `ahi explain <id>` | What one check reports. |
-| `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, policy summary. Sandbox detection is not in v0.1. |
+| `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, state directory, policy summary. Sandbox detection is not in v0.1. |
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
-| `install`, `uninstall` | Exit 1. They are specified for the hook shim and not implemented. |
+| `ahi hooks install`, `ahi hooks uninstall` | Exit 1. They are the hook shim commands and are not implemented. Top-level `install` and `uninstall` are not commands. |
 | `ahi update` | Exit 1. Reserved for replacing this ahi binary from an attested archive. It does not install or move hook repositories. |
+| `ahi tui` | Load OpenAI and gateways from the state directory's `models.json`. A pipe prints one line per provider. |
+| `ahi login` | Print the OpenAI browser login URL. A missing browser does not abort the login. |
 
-Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `autoupdate`, and `self-update` are not commands. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `autoupdate`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
 
 ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 

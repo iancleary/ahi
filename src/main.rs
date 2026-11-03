@@ -7,6 +7,7 @@ use ahi::audit::AuditEvent;
 use ahi::check::{all_checks, builtin_by_id};
 use ahi::config::discover_config;
 use ahi::git::repo_root;
+use ahi::harness;
 use ahi::output::render;
 use ahi::runner::{self, Selection};
 use ahi::store::{self, Store};
@@ -23,6 +24,11 @@ struct Cli {
     /// Cache directory. Overrides AHI_HOME. There is no home-directory fallback.
     #[arg(long, global = true)]
     cache_dir: Option<PathBuf>,
+
+    /// State directory for models.json and the OpenAI credential.
+    /// Overrides AHI_STATE_DIR.
+    #[arg(long, global = true)]
+    state_dir: Option<PathBuf>,
 
     /// Color: auto, always, or never. v0.1 prints plain text either way.
     #[arg(long, global = true, default_value = "auto")]
@@ -45,10 +51,11 @@ enum Command {
     Explain { id: String },
     /// Show the local environment. Sandboxes are not implemented in v0.1.
     Doctor,
-    /// Install the git hook shim.
-    Install,
-    /// Remove the git hook shim.
-    Uninstall,
+    /// Git hook shim commands.
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
     /// Replace this ahi binary from an attested archive this repository publishes.
     ///
     /// Checks the published checksum and attestation, and refuses a target it
@@ -69,6 +76,23 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Load OpenAI and the gateways in models.json.
+    ///
+    /// A terminal opens a picker. A pipe prints one line per provider.
+    Tui,
+    /// Print the OpenAI browser login URL and wait for the redirect.
+    ///
+    /// Opening a browser is attempted and is not required. The credential is
+    /// written under the state directory.
+    Login,
+}
+
+#[derive(Subcommand)]
+enum HooksCommand {
+    /// Install the git hook shim. Not implemented.
+    Install,
+    /// Remove the git hook shim. Not implemented.
+    Uninstall,
 }
 
 #[derive(clap::Args)]
@@ -122,14 +146,22 @@ fn main() -> ExitCode {
         Command::Run(args) => run(&cli, args),
         Command::ListChecks { format } => list_checks(format),
         Command::Explain { id } => explain(id),
-        Command::Doctor => doctor(cli.config.as_deref(), cli.cache_dir.as_deref()),
-        Command::Install | Command::Uninstall => {
-            unimplemented_until("the hook shim phase (after hook execution exists)")
-        }
+        Command::Doctor => doctor(
+            cli.config.as_deref(),
+            cli.cache_dir.as_deref(),
+            cli.state_dir.as_deref(),
+        ),
+        Command::Hooks { command } => match command {
+            HooksCommand::Install | HooksCommand::Uninstall => {
+                unimplemented_until("the hook shim phase (after hook execution exists)")
+            }
+        },
         Command::Update => {
             unimplemented_until("the attested archive replacement of this ahi binary")
         }
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
+        Command::Tui => tui(cli.state_dir.as_deref()),
+        Command::Login => login(cli.state_dir.as_deref()),
     }
 }
 
@@ -397,16 +429,19 @@ fn print_local_env(policy: Option<&ahi::policy::Policy>) {
     }
 }
 
-fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> ExitCode {
+fn doctor(
+    config: Option<&std::path::Path>,
+    cache: Option<&std::path::Path>,
+    state: Option<&std::path::Path>,
+) -> ExitCode {
     println!("ahi {VERSION}");
     match ahi::git::git_version() {
         Ok(version) => println!("git: {version}"),
         Err(err) => println!("git: {err}"),
     }
-    match env::current_dir().and_then(|cwd| {
-        repo_root(&cwd)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
-    }) {
+    match env::current_dir()
+        .and_then(|cwd| repo_root(&cwd).map_err(|err| std::io::Error::other(err.to_string())))
+    {
         Ok(root) => {
             println!("root: {}", root.display());
             match discover_config(&root, config) {
@@ -429,14 +464,17 @@ fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> 
         Err(err) => println!("cache: {} ({err})", cache.display()),
     }
     println!("scratch: {}", store::scratch_dir().display());
+    match harness::state_dir(state) {
+        Ok(dir) => println!("state: {}", dir.display()),
+        Err(err) => println!("state: {err}"),
+    }
     println!("sandbox: not probed in this version");
     println!(
         "network: not enforced in this version (no sandbox); local hook environments are scrubbed"
     );
-    match env::current_dir().and_then(|cwd| {
-        repo_root(&cwd)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
-    }) {
+    match env::current_dir()
+        .and_then(|cwd| repo_root(&cwd).map_err(|err| std::io::Error::other(err.to_string())))
+    {
         Ok(root) => match policy::load_policy(&root) {
             Ok(loaded) => {
                 let path = root.join("ahi.policy.yaml");
@@ -470,6 +508,43 @@ fn doctor(config: Option<&std::path::Path>, cache: Option<&std::path::Path>) -> 
         Err(err) => println!("policy: {err}"),
     }
     ExitCode::from(0)
+}
+
+fn tui(state: Option<&std::path::Path>) -> ExitCode {
+    let state = match harness::state_dir(state) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match ahi::tui::run(&state) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::from(0)
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn login(state: Option<&std::path::Path>) -> ExitCode {
+    let state = match harness::state_dir(state) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match harness::login(&state) {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn migrate_config(config: Option<&std::path::Path>, write: bool, force: bool) -> ExitCode {

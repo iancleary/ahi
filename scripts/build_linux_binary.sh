@@ -67,6 +67,18 @@ case "$target" in
     ;;
 esac
 
+# ring, used by ureq's rustls, compiles C for the musl target. The runners are
+# native, so musl-gcc from the distro musl-tools package is the C compiler.
+# Rust's self-contained musl linker stays in place; this does not cross-compile.
+if ! command -v musl-gcc >/dev/null 2>&1; then
+  echo "error: musl-gcc was not found. Install the musl-tools package." >&2
+  exit 1
+fi
+# The cc crate reads CC_<triple>, with hyphens in the triple replaced by
+# underscores. A hyphenated name is not a shell variable.
+cc_var="CC_${target//-/_}"
+export "${cc_var}=musl-gcc"
+
 if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
   echo "error: source-date-epoch must be a unix timestamp" >&2
   exit 2

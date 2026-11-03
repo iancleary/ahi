@@ -5,7 +5,7 @@
 version = 2
 yanked = "deny"
 ignore = [
-    { id = "RUSTSEC-2024-0449", reason = "serde_yaml 0.9.34 is the typed YAML parser that still builds on the 1.83 MSRV. Maintained replacements require Rust 1.85 or newer. yaml-rust2 rejects aliases, anchors, and duplicate keys before serde_yaml parses a config. This advisory is unmaintained, not a vulnerability." },
+    { id = "RUSTSEC-2024-0449", reason = "serde_yaml 0.9.34 is the typed YAML parser the config loader already uses. yaml-rust2 rejects aliases, anchors, and duplicate keys before serde_yaml parses a config. This advisory is unmaintained, not a vulnerability. Replacing the parser is separate work." },
 ]
 
 [licenses]
@@ -14,8 +14,10 @@ allow = [
     "MIT",
     "Apache-2.0",
     "BSD-3-Clause",
+    "ISC",
     "Unicode-3.0",
     "Zlib",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

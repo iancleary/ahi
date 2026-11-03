@@ -33,7 +33,7 @@ jobs:
       - name: rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
         with:
-          toolchain: 1.83.0
+          toolchain: 1.88.0
           components: rustfmt, clippy
 
       - name: Check formatting
@@ -70,7 +70,7 @@ jobs:
       - name: rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
         with:
-          toolchain: 1.83.0
+          toolchain: 1.88.0
 
       - name: Publish to crates.io
         # The token is mapped only in this step, only in this job, and only

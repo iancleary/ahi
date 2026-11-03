@@ -32,7 +32,7 @@ The following is **inferred** from the review brief for this proposal, not from 
 - The differentiator is ahi's existing declared, pinned, configuration-driven hooks, generalized to agent actions (tool calls, commands, file writes, pushes, and outbound messages), combined with sandbox-by-default execution and escalation governed by that same engine.
 - The existing pre-commit runner remains available, for example as an `ahi hooks` subcommand, so 0.1.x users keep working.
 
-Observed, not inferred: the repository is `https://github.com/iancleary/ahi`. The root `Cargo.toml` at the base of this proposal is version `0.1.3`, edition 2021, license `MIT`, MSRV `1.83`, `unsafe_code = "forbid"`. [docs/SPEC.md](SPEC.md) already records an MIT `LICENSE` with `Copyright (c) 2026 Ian Cleary`.
+Observed, not inferred: the repository is `https://github.com/iancleary/ahi`. The root `Cargo.toml` is edition 2021, license `MIT`, MSRV `1.88`, `unsafe_code = "forbid"`. [docs/SPEC.md](SPEC.md) already records an MIT `LICENSE` with `Copyright (c) 2026 Ian Cleary`.
 
 ## Research limits
 
@@ -80,7 +80,7 @@ OpenShell statements are not re-fetched here. They are used as already written i
 v0.1.3, as implemented and as specified:
 
 - `ahi run` reads `.pre-commit-config.yaml`, filters files, and runs builtin checks. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Remote hooks fail with an explicit error.
-- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `install`, `uninstall`, `update`, and `migrate`. `install` and `uninstall` exit 1 and name the hook shim phase. `update` exits 1 and names the attested archive replacement of this binary. It does not clone a hook repository. `lock`, `verify`, `fetch`, `autoupdate`, and `self-update` are not commands.
+- The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `hooks`, `update`, `migrate`, `tui`, and `login`. `ahi hooks install` and `ahi hooks uninstall` exit 1 and name the hook shim phase. Top-level `install` and `uninstall` are not commands. `update` exits 1 and names the attested archive replacement of this binary. `tui` loads OpenAI and gateways from `models.json`. `login` is the OpenAI browser sign-in. `lock`, `verify`, `fetch`, `autoupdate`, and `self-update` are not commands.
 - `ahi.policy.yaml` version 1 is deny-by-default. Unknown keys are errors. The file is parsed. v0.1 consults `trusted_system_hooks` for local system and script hooks.
 - `ahi::store` is the content-addressed hook cache. It is not a conversation database.
 - `audit.log` is append-only JSON lines: time, command, repository, hook ids, outcome, finding count, local hook ids, and environment names. It does not record file contents or environment values.
@@ -91,8 +91,8 @@ Roadmap already committed in the specification:
 
 | Phase | Contract |
 | --- | --- |
-| v0.2 | Withdrawn as a hook-repository installer. No `ahi.lock`. `ahi update` is the later replacement of the ahi binary from an attested archive, and it is not implemented. Checkers stay `repo: builtin`. |
-| v0.3 | More builtins compiled into ahi. This phase does not execute `python`, `rust`, `golang`, or `docker_image` from a cloned hook repository, and it does not install their packages. |
+| v0.2 | Withdrawn as a hook-repository installer. No `ahi.lock`. No new builtins. `ahi update` remains the later replacement of the ahi binary. |
+| v0.3 | Single-machine harness. `ahi tui` loads OpenAI and a custom gateway. `ahi login` is the browser sign-in. Not more builtins, and not a language installer. |
 | v0.4 | Detect an outer sandbox and do not nest. Optional host backends, with the limits in the specification. |
 
 ## Architecture
@@ -187,11 +187,11 @@ Per the owner's comparison, the private copy keeps the public split: Rust owns t
 | Carry | Gateway fetch is native HTTP. HTTPS only, except a literal loopback origin. The request carries no credential. Redirects are not followed. Timeout 15 seconds. Body cap 1 MiB. The catalog schema is strict: OpenAI-compatible completions, an API-key field that is a gateway marker rather than a secret, zero costs, and capability flags. | The same origin contract. The catalog path in the comparison is `<origin>/pi/agent/model.json`. |
 | Carry (adapt) | Each gateway keeps its last accepted catalog when a refresh fails. Registrations persist. A gateway's local name and the provider identifier in the catalog are different fields. Legacy single-URL cache files are migrated in place. | Retain the last-good catalog per registration. Reimplement validation in Rust. Do not take a JavaScript schema library. ahi does not keep a local name beside the provider id. The catalog's provider id must equal the gateway id used to fetch it. A mismatch is a rejected catalog, not an alias. |
 | Carry (adapt) | Worktree allocation is recorded. A refused cleanup stays held, and the refusal is recorded. | An allocation and a refused cleanup are action receipts. Cleanup does not run unless the engine approves it. The held state remains until a later receipt says otherwise. |
-| Carry | Login always prints the authorization URL. It may try a browser, then the default browser. Failure to open a browser does not abort the pending login. | This is the OpenAI browser login. `ahi login` prints the URL on standard error and waits. Headless and SSH sessions stay able to finish sign-in. The comparison says this path was verified live on the private copy. This environment did not verify it. |
+| Carry | Login always prints the authorization URL. It may try a browser, then the default browser. Failure to open a browser does not abort the pending login. | This is the OpenAI browser login. `ahi login` prints the URL on standard error, listens on the localhost callback, and accepts a pasted redirect at the same time. Headless and SSH sessions stay able to finish sign-in. The comparison says this path was verified live on the private copy. This environment did not verify it. |
 | Drop for ahi | A managed-settings apply overlays private machine configuration on declarative settings. | The owner has no settings subcommand in mind. This proposal does not add `ahi settings` or `ahi settings apply`, and it does not define a settings file format. Credentials and gateway origins still do not belong in a git repository. |
 | Drop | Provider construction through `pi-ai`, JavaScript schema validation, and generated TypeScript bindings. | Replaced by the Rust provider interface and Rust types. |
 | Drop | Node bridge dispatch of gateway commands. | No Node bridge and no sidecar. Gateway fetch and provider calls are Rust. |
-| Drop | The terminal selection-picker implementation. | No terminal-interface phase. Listing presets or conversations does not submit a turn. |
+| Drop | The terminal selection-picker implementation copied from the private TUI. | The single-machine harness has its own provider and model picker, `ahi tui`. It is not a port of the private terminal, and it does not start a conversation. |
 | Drop | iOS edits in the private copy, and its skill and handoff files. | Out of scope. See the non-goal on private state. |
 
 The comparison also says slash commands work in the plain line interface, not only in the terminal interface. ahi's first coordinator commands are line commands. A picker is not required for them to run.
@@ -212,7 +212,7 @@ Borrowed invariants for the Rust-native store:
 Deliberately different:
 
 - ahi does not adopt Pi's package installer. The fetched [pi.dev](https://pi.dev/) page shows `pi install npm:@foo/pi-tools` and `pi install git:github.com/badlogic/pi-doom`, and an install line `curl -fsSL https://pi.dev/install.sh | sh`. ahi does not grow an installer for third-party packages, and it does not use a pipe-to-shell install. The existing specification already refuses `curl | sh` for hook downloads.
-- ahi does not vendor Pi's provider list or Pi's default model list. The same page names Anthropic, OpenAI, Google, Azure, Bedrock, Mistral, Groq, Cerebras, xAI, Hugging Face, Kimi For Coding, MiniMax, NVIDIA, OpenRouter, Ollama, "and more." The first provider ahi implements is OpenAI. Another gateway is a later `gateway/model` id with its own origin, not an entry copied from that list.
+- ahi does not vendor Pi's provider list or Pi's default model list. The same page names Anthropic, OpenAI, Google, Azure, Bedrock, Mistral, Groq, Cerebras, xAI, Hugging Face, Kimi For Coding, MiniMax, NVIDIA, OpenRouter, Ollama, "and more." The first provider ahi implements is OpenAI. Another gateway is a `gateway/model` id whose origin comes from `models.json`, not an entry copied from that list.
 - ahi's hook engine is the policy boundary. Pi Durable hooks can block or rewrite a tool (`beforeTool`) and replace a result (`afterTool`). That is a useful shape. ahi's rules are configuration the operator declares, audited as grants, and tied to the sandbox. They are not only extension code loaded into the process.
 - The hook cache (`ahi::store`) stays a content-addressed blob store. The conversation store is a different module and a different file.
 
@@ -439,7 +439,7 @@ The name `qwen/qwen-3.5` means Qwen's public gateway and the model `qwen-3.5`. T
 
 ### Registering a gateway
 
-The two-layer name selects a gateway and a model. It does not contain a URL. Registration has two sources. Both are part of this design. Neither is implemented in this change, and neither is required for the OpenAI browser login.
+The two-layer name selects a gateway and a model. It does not contain a URL. Registration has two sources. The single-machine harness reads `models.json` and fetches a catalog when `models` is omitted. Neither source is required for the OpenAI browser login. ahi does not write `models.json`; the operator does.
 
 1. A `models.json` file in the coordinator's state directory.
 2. Discovery from a gateway that publishes its catalog.
@@ -474,9 +474,9 @@ A pasted model list drifts when the gateway adds or removes a model. Discovery i
 
 The fetch is the origin contract from the comparison. The request carries no credential. Redirects are not followed. The timeout is 15 seconds and the body cap is 1 MiB. The catalog schema is strict: OpenAI-compatible completions, an API-key field that is a gateway marker rather than a secret, zero costs, and capability flags. The comparison names the catalog path `<origin>/pi/agent/model.json`. The catalog's provider id must equal the gateway id. A mismatch is rejected. It is not an alias. Refresh failure keeps the last accepted catalog. The model id in the catalog is the string sent upstream. The selection syntax stays the two-layer form.
 
-A `models.json` entry can name the origin and omit `models`. Discovery fills that list. An entry that already lists models keeps those ids and still accepts a refresh of the same gateway id. Discovery writes into ahi's state. It does not write into a git repository and it does not read `~/.pi`.
+A `models.json` entry can name the origin and omit `models`. `ahi tui` fetches that catalog and registers the returned models under the gateway id. An entry that already lists models keeps those ids when the refresh fails, and replaces them when the refresh succeeds. Discovery writes into ahi's state directory (`catalogs/<gateway-id>.json`). It does not write into a git repository and it does not read `~/.pi`.
 
-This proposal does not implement discovery, and it does not implement creating or editing `models.json`. The coordinator phase can ship OpenAI login without either. The contract above is the one those later commands implement, so the gateway client lives in ahi.
+The single-machine harness implements this load. It does not implement a coordinator, a worker, or a conversation store. OpenAI login does not require `models.json`. A gateway does.
 
 ## Coordinator, tasks, and workers
 
@@ -489,6 +489,9 @@ Proposed commands, additive, and absent until a later phase implements them. The
 | `ahi task list` and `ahi task show` | Read the task registry through the coordinator. |
 | `ahi actions check` | Evaluate one action against `ahi.actions.yaml` and print the verdict. Does not execute it. |
 | `ahi update` | Replace this ahi binary from an attested archive this repository publishes, after verification. Not a hook-repository command. |
+| `ahi tui` | Load OpenAI and the gateways in `models.json` on this machine. A terminal opens a picker. A pipe prints the load. |
+| `ahi login` | OpenAI browser sign-in. Prints the URL, may open a browser, and stores the credential in the state directory. |
+| `ahi hooks install` / `ahi hooks uninstall` | Git hook shim. Stubs until that phase. |
 
 `ahi serve` with no configuration starts a coordinator that has no provider and no sources, and listens on the local socket. That process can still answer `ahi actions check` once the actions file exists. It does not open a network connection by merely starting.
 
@@ -590,7 +593,7 @@ The root package is `0.1.3`. **Decision:** agent work continues that same versio
 | --- | --- |
 | `ahi run` and its flags | Remain. Behavior stays the specification's behavior. |
 | `list-checks`, `explain`, `doctor`, `migrate` | Remain top-level. |
-| `install`, `uninstall` | Remain hook-shim stubs until that phase implements them. |
+| `install`, `uninstall` | Not top-level commands. The hook shim, when it exists, is `ahi hooks install` and `ahi hooks uninstall`. Those stubs exit 1. |
 | `update` | Replaces the ahi binary from an attested archive. This version exits 1. Agent work does not use this name for hook pins. `self-update` is not an alias. |
 | `lock`, `verify`, `fetch`, `autoupdate` | These names are not commands. ahi does not install or move hook repositories. |
 | `ahi hooks run` | An alias of `ahi run`, added when the grouped surface is added. The same alias pattern can cover the other hook commands. Aliases are additive. |
@@ -608,7 +611,7 @@ These phases sit after the hook-runner work. They ship as later ahi releases on 
 
 | Phase | Relation to the roadmap | Delivered behavior |
 | --- | --- | --- |
-| Specification phases v0.2, v0.3, v0.4 | v0.2 is withdrawn. v0.3 adds builtins. v0.4 is the sandbox. | Builtin checks, then sandbox detection and optional host backends. No lockfile and no language installer. |
+| Specification phases v0.2, v0.3, v0.4 | v0.2 is withdrawn. v0.3 is the single-machine harness. v0.4 is the sandbox. | OpenAI and a custom gateway in `ahi tui`, then sandbox detection. No new builtins in v0.3. No lockfile and no language installer. |
 | Actions | Uses the local system and script process builder that already exists. It does not wait on a language installer. | `ahi.actions.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
 | Sandbox for effects | After v0.4, reusing its detection and backends. | An approved `command`, `file_write`, or `pre_commit` runs in the default sandbox. Escalation only by rule. The direction is less prompting as the policy and the sandbox cover the effect. Tests follow the specification's Linux, macOS, and Windows honesty table. |
 | Conversation store | After the actions phase. | Rust-native commits, resume, one writer, grants and receipts, `synchronous = FULL` and `fullfsync = ON`. No Node child. No provider required to test resume. |
@@ -634,7 +637,7 @@ This proposal copies neither repository's source. Describing a data model or an 
 
 ## Recorded decisions
 
-The owner recorded these on review of this document. They are decisions for the proposal. They are not a change already made in the tree, and they do not edit [docs/SPEC.md](SPEC.md).
+The owner recorded these on review of this document. They are decisions for the proposal. The single-machine harness in [docs/SPEC.md](SPEC.md) implements OpenAI login, `models.json`, and catalog fetch. The store, the sandbox, and the coordinator are not in the tree yet.
 
 ### 1. Conversation store
 
@@ -660,7 +663,7 @@ Deferred. No iOS target in this repository during the actions, sandbox, store, a
 
 Do not use Pi's default model list. The first provider is OpenAI, selected as `openai/<model>`. Sign-in is the browser login: `ahi login` prints the URL and does not abort when no browser opens. The credential stays in the state directory. There is no settings subcommand.
 
-A model selection is two layers, split on the first slash, with no alias. Registration has two sources, both specified and neither implemented here. The state directory's `models.json` maps a gateway id to an OpenAI-compatible origin and model ids. ahi does not read `~/.pi`. Discovery fetches a gateway catalog and registers the returned models under that gateway id, so a shared gateway is learned once inside ahi. The catalog's provider id must equal the gateway id. Only OpenAI has a built-in public origin in the first provider. See [Gateway and model names](#gateway-and-model-names).
+A model selection is two layers, split on the first slash, with no alias. The state directory's `models.json` maps a gateway id to an OpenAI-compatible origin and model ids. `ahi tui` reads that file and fetches a catalog when `models` is omitted. ahi does not read `~/.pi`. The catalog's provider id must equal the gateway id. Only OpenAI has a built-in public origin in the first provider. Model-preference roles are not implemented. See [Gateway and model names](#gateway-and-model-names).
 
 ### Further decisions
 
@@ -669,7 +672,7 @@ A model selection is two layers, split on the first slash, with no alias. Regist
 | Worker transport | A catalog. The local socket and Tailscale are both entries. An unconfigured coordinator listens on the local socket. ahi does not install or require Tailscale. |
 | Interactive `ask` | Only a rule that sets `ask: true` prompts. The default is deny with no prompt. The direction is a sandbox and declared policy, with less confirmation later. |
 | SQLite synchronous mode | Maximum durability. For WAL that is `FULL` and `fullfsync`. `EXTRA` is the same as `FULL` in WAL mode. |
-| Provider registration | State-directory `models.json`, not `~/.pi/`. Gateway discovery fills a model list from the gateway's catalog. Both are specified. Neither is implemented in this change. |
+| Provider registration | State-directory `models.json`, not `~/.pi/`. `ahi tui` reads that file and, when `models` is omitted, fetches the gateway catalog. ahi does not read `~/.pi` and does not edit `models.json`. |
 | OpenAI sign-in | Browser login through `ahi login`. The URL is printed. A missing browser does not abort the login. |
 | Where ahi runs | Linux, macOS, and Windows, through `cargo install ahi`. Existing attested archives stay Linux-only. |
 | Versioning | Continue ahi's existing version line. No separate runtime version. This document does not assign the next number. |
@@ -683,7 +686,7 @@ A model selection is two layers, split on the first slash, with no alias. Regist
 
 Fetched or cloned on 2026-11-03 unless noted.
 
-- This repository's contract: [docs/SPEC.md](SPEC.md), [docs/release.md](release.md), root `Cargo.toml` version `0.1.3`, `src/main.rs`, `src/policy.rs`, `src/audit.rs`.
+- This repository's contract: [docs/SPEC.md](SPEC.md), [docs/release.md](release.md), root `Cargo.toml` version `0.1.4`, `src/main.rs`, `src/policy.rs`, `src/audit.rs`, `src/harness.rs`.
 - jessfraz/agent commit `e671f61d54ffe3b1361db79e7cc79a68ac252b23`: <https://github.com/jessfraz/agent>. Files used: `README.md`, `docs/architecture.md`, `docs/setup.md`, `docs/roadmap.md`, `ios/README.md`, `LICENSE`, `runtime/package.json`, `runtime/src/bridge.ts`, `runtime/src/conversation-database.ts`, `runtime/src/startup-diagnostics.ts`, `src/runtime.rs`, `src/protocol.rs` (`TaskRecord`, `WorkerRef`, `SourceRef`), `src/sources/mod.rs`.
 - jessfraz/agent `LICENSE` at baseline `d4ef2fb5af0b44531e771a6c3ba4bb7959caf966`: <https://github.com/jessfraz/agent/blob/d4ef2fb5af0b44531e771a6c3ba4bb7959caf966/LICENSE>. MIT, `Copyright (c) 2026 Agent contributors`.
 - Owner's comparison of the private copy, comment `6594868422`: <https://github.com/iancleary/ahi/pull/6#issuecomment-6594868422>. Design facts about `iancleary/agent` are from this comment only.

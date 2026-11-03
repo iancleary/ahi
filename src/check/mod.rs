@@ -180,16 +180,10 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         drop(file);
         let meta = std::fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "refusing to replace a symlink",
-            ));
+            return Err(std::io::Error::other("refusing to replace a symlink"));
         }
         if !meta.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "refusing to replace a non-file",
-            ));
+            return Err(std::io::Error::other("refusing to replace a non-file"));
         }
         replace_file(&tmp, path)?;
         #[cfg(unix)]

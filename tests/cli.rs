@@ -292,24 +292,71 @@ fn list_checks_and_explain() {
 
 #[test]
 fn later_commands_fail_closed() {
-    for cmd in ["install", "uninstall", "update"] {
-        let output = ahi().arg(cmd).output().unwrap();
-        assert_eq!(output.status.code(), Some(1), "{cmd}");
-        let err = String::from_utf8(output.stderr).unwrap();
-        assert!(err.contains("not implemented until"), "{cmd}: {err}");
-    }
     let update = ahi().arg("update").output().unwrap();
+    assert_eq!(update.status.code(), Some(1));
     let update_err = String::from_utf8(update.stderr).unwrap();
+    assert!(update_err.contains("not implemented until"), "{update_err}");
     assert!(
         update_err.contains("attested archive replacement"),
         "{update_err}"
     );
+    for cmd in ["hooks", "install", "uninstall"] {
+        let output = ahi().arg(cmd).output().unwrap();
+        let code = output.status.code();
+        let err = String::from_utf8(output.stderr).unwrap();
+        if cmd == "hooks" {
+            assert_eq!(code, Some(2), "{err}");
+            assert!(err.contains("<COMMAND>"), "{err}");
+            assert!(err.contains("install"), "{err}");
+        } else {
+            assert_eq!(code, Some(2), "{cmd}: {err}");
+            assert!(err.contains("unrecognized subcommand"), "{cmd}: {err}");
+        }
+    }
+    for cmd in ["install", "uninstall"] {
+        let output = ahi().args(["hooks", cmd]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{cmd}");
+        let err = String::from_utf8(output.stderr).unwrap();
+        assert!(err.contains("not implemented until"), "{cmd}: {err}");
+    }
     for cmd in ["lock", "verify", "fetch", "autoupdate", "self-update"] {
         let output = ahi().arg(cmd).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{cmd}");
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("unrecognized subcommand"), "{cmd}: {err}");
     }
+}
+
+#[test]
+fn tui_on_a_pipe_lists_openai_and_a_configured_gateway() {
+    let dir = fixture();
+    write(
+        &dir.join("models.json"),
+        br#"{"providers":{"lab":{"baseUrl":"http://127.0.0.1:9/v1","api":"openai-completions","apiKey":"$LAB_API_KEY","models":[{"id":"qwen-3.5"}]}}}"#,
+    );
+    let output = ahi()
+        .args(["--state-dir", dir.to_str().unwrap(), "tui"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("provider openai"), "{text}");
+    assert!(text.contains("auth signed-out"), "{text}");
+    assert!(text.contains("provider lab"), "{text}");
+    assert!(text.contains("models qwen-3.5"), "{text}");
+    assert!(
+        text.contains("kept-config")
+            || text.contains("last-good")
+            || text.contains("unavailable")
+            || text.contains("fetched"),
+        "{text}"
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

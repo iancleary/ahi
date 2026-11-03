@@ -124,7 +124,7 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 | `repo: builtin` | runs |  | ahi extension, same sentinel idea as prek. No `rev` key. |
 | `rev` | required for URL repos, stored as a string | not resolved | ahi does not clone the URL, so it does not resolve a tag or a branch. The string is kept so the file still parses. |
 | Hook fields `id`, `alias`, `name`, `language`, `language_version`, `entry`, `files`, `exclude`, `types`, `types_or`, `exclude_types`, `args`, `stages`, `always_run`, `fail_fast`, `pass_filenames`, `require_serial`, `verbose`, `description`, `log_file`, `additional_dependencies`, `minimum_pre_commit_version` | parsed and validated | builtins and pinned local hooks use the fields they need | See filtering below. `additional_dependencies` are never installed. |
-| Stages and hook types | `--hook-stage` filters hooks. Default stage is `pre-commit` | `ahi install` writes shims | Legacy names `commit`, `push`, `merge-commit` are rewritten to `pre-commit`, `pre-push`, `pre-merge-commit` and then rejected with a migration hint. Upstream rewrites and warns ([`transform_stage`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/clientlib.py)). ahi does not silently accept them. |
+| Stages and hook types | `--hook-stage` filters hooks. Default stage is `pre-commit` | `ahi hooks install` writes shims | Legacy names `commit`, `push`, `merge-commit` are rewritten to `pre-commit`, `pre-push`, `pre-merge-commit` and then rejected with a migration hint. Upstream rewrites and warns ([`transform_stage`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/clientlib.py)). ahi does not silently accept them. |
 | `manual` stage | recognized; runs only with `--hook-stage manual` |  | Matches upstream. |
 | File discovery: staged, `--all-files`, `--files`, `--from-ref`/`--to-ref` | implemented |  | Commands match [`git.py`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/git.py) (see [File discovery](#file-discovery)). |
 | File filtering | implemented |  | Regex dialect is stricter (see [Filtering](#filtering)). |
@@ -133,7 +133,7 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 | `SKIP` | honored (comma-separated hook ids and aliases) |  | Matches [`_get_skips`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/commands/run.py). |
 | xargs-style batching | used for `repo: local` system and script hooks. Batches run one after another |  | Builtin checks run in-process on the full filtered list. `SC_ARG_MAX` is not read. |
 | Partial-commit stash | not invoked | required before any check may write the worktree | Specified below so the later implementation has a contract. |
-| Git hook shim, `install`, `uninstall`, `init-templatedir`, git 2.54 `hook.<name>.event` config | not installed | after the runner is safe to put on `git commit` | v0.1 `install` / `uninstall` exit with a clear "not implemented yet" error. |
+| Git hook shim, `ahi hooks install`, `ahi hooks uninstall`, `init-templatedir`, git 2.54 `hook.<name>.event` config | not installed | after the runner is safe to put on `git commit` | `ahi hooks install` and `ahi hooks uninstall` exit with a clear "not implemented yet" error. Top-level `install` and `uninstall` are not commands. |
 | `autoupdate`, `try-repo`, `migrate-config`, `clean`, `gc`, `sample-config`, `validate-config`, `validate-manifest`, `hazmat` | no ahi command moves hook pins or clones a repo. `ahi migrate` is a different command (best-effort suggestion, not upstream `migrate-config`) |  | ahi does not implement `hazmat` (`cd`, `ignore-exit-code`, `n1`). Those entry prefixes are a hard error if encountered, not a silent pass. Upstream documents them as usually a bad idea ([docs](https://pre-commit.com/#pre-commit-hazmat)). The config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names so existing files still parse. ahi does not act on them. |
 | Worktree rewriting / formatters | `ahi run --fix` for end-of-file, trailing whitespace, and mixed line endings. No stash. Unstaged files are refused. Writes are atomic and do not follow symlinks | stash protocol still later | Other builtins, including the UTF-8 BOM check, stay report-only. |
 
@@ -498,7 +498,7 @@ These rules are stricter than GitHub's defaults. A release workflow that needs `
 1. Every `FROM` image is pinned with `@sha256:` and 64 hex digits. `scratch` is the exception. Stage names (`AS builder`) are ignored for the pin check. The pin is required on every stage, not only the last.
 2. The final stage has a `USER` instruction whose value is not `root`, `0`, or `0:0`. A missing `USER` is an error.
 3. A `RUN` line that pipes `curl` or `wget` into `sh`, `bash`, or `sudo sh` / `sudo bash` is an error. This is the `curl | sh` pattern, including simple wraps.
-4. A `RUN` that invokes `curl` or `wget` to fetch a URL is an error unless that same `RUN` also contains a checksum check (`sha256sum`, `sha384sum`, `sha512sum`, `shasum`, or `cosign verify`). **This is a heuristic.** It misses a download in one layer verified in a later layer, and it will say so in the finding text. The later-layer case is a v0.2 refinement, not a silent pass.
+4. A `RUN` that invokes `curl` or `wget` to fetch a URL is an error unless that same `RUN` also contains a checksum check (`sha256sum`, `sha384sum`, `sha512sum`, `shasum`, or `cosign verify`). **This is a heuristic.** It misses a download in one layer verified in a later layer, and it will say so in the finding text. That later-layer case stays a finding, not a silent pass.
 5. `apt-get install` / `apt install` package arguments that lack `=version` are errors, except package names that are only flags (`-y`, `--no-install-recommends`).
 
 #### `ahi/shell-strict`
@@ -525,6 +525,7 @@ Binary name: `ahi`. Global flags, matching the upstream shape where it exists:
 - `--color auto|always|never` (default `auto`). v0.1 reads the flag. An `AHI_COLOR` / `TERM=dumb` override, in the same role as `PRE_COMMIT_COLOR`, is specified and not read yet.
 - `-c, --config <PATH>` selects a config file. Default discovery is `.pre-commit-config.yaml` then `.pre-commit-config.yml` in the git root.
 - `--cache-dir <PATH>` selects the cache. It wins over `AHI_HOME`. See [Rev and cache](#rev-and-cache).
+- `--state-dir <PATH>` selects the harness state directory. It wins over `AHI_STATE_DIR`. See [v0.3](#v03--single-machine-harness).
 - `-h, --help`.
 
 | Command | Phase | Behavior |
@@ -532,10 +533,13 @@ Binary name: `ahi`. Global flags, matching the upstream shape where it exists:
 | `ahi run [HOOK]` | v0.1 | Run selected hooks. Flags: `--all-files`, `--files <PATH>...`, `--from-ref`, `--to-ref`, `--hook-stage`, `--format text\|json\|sarif`, `--fail-fast`, `--verbose`, `--fix`. |
 | `ahi list-checks` | v0.1 | Builtin ids, aliases, one-line descriptions. `--format text\|json`. |
 | `ahi explain <ID>` | v0.1 | Description, defaults, arguments, and the upstream hook it corresponds to, if any. |
-| `ahi install` / `uninstall` | shim phase (after v0.3, before relying on it in git) | v0.1 exits 1 with "not implemented until the hook shim phase". |
+| `ahi hooks install` / `ahi hooks uninstall` | shim phase | Exit 1 with "not implemented until the hook shim phase". |
+| `ahi install` / `ahi uninstall` | absent | These names moved under `ahi hooks`. |
 | `ahi update` | later, name reserved | Replaces this ahi binary from an attested archive. This version exits 1 with "not implemented until the attested archive replacement of this ahi binary". It does not install or move hook repositories. `self-update` is not an alias. |
+| `ahi tui` | single-machine harness | Loads the built-in OpenAI provider and gateways from the state directory's `models.json`. A terminal opens a picker. A pipe prints one line per provider. |
+| `ahi login` | single-machine harness | Prints the OpenAI browser login URL, tries to open a browser, and does not abort when no browser opens. Stores the credential in the state directory. |
 | `ahi lock` / `verify` / `fetch` / `autoupdate` | absent | These names are not commands. ahi does not install or move hook repositories. |
-| `ahi doctor` | v0.1 prints version, git version, config path, cache path, whether that cache is writable or read-only, the scratch directory, and `sandbox: not probed in this version` | v0.4 reports whether an outer sandbox was detected and which host backend, if any, would be used. |
+| `ahi doctor` | v0.1 prints version, git version, config path, cache path, whether that cache is writable or read-only, the scratch directory, the state directory, and `sandbox: not probed in this version` | v0.4 reports whether an outer sandbox was detected and which host backend, if any, would be used. |
 | `ahi migrate` | v0.1 | Best-effort suggestion. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Writes only with `--write`, and refuses to replace an existing file unless `--force` is set. Not upstream `migrate-config`. |
 | `ahi hook-impl` | with install | Hidden. Not in v0.1. |
 
@@ -605,6 +609,8 @@ Library modules:
 | `ahi::store` | Content-addressed put/get/verify. No network client in this module. |
 | `ahi::output` | Text, JSON, SARIF. |
 | `ahi::audit` | Append a JSON line to the audit log. |
+| `ahi::harness` | Load OpenAI and `models.json` gateways, fetch a catalog, and run the browser login. |
+| `ahi::tui` | Provider and model picker. A pipe prints the same load as text. |
 
 Public trait, kept small:
 
@@ -623,9 +629,9 @@ The binary is the same package as the library. It contains argument parsing and 
 
 ### Dependencies
 
-Each direct dependency is justified in the v0.1 pull request. The allowed reasons are: CLI parsing, YAML/JSON/TOML parsing, safe regular expressions, typed errors, and (dev) property tests. HTTP clients, git library wrappers, Node, Python, and sandbox crates are not v0.1 dependencies. SARIF is emitted with `serde_json`, not a SARIF crate.
+Each direct dependency is an exact pin that builds on the 1.88 MSRV. The hook runner uses CLI parsing, YAML/JSON/TOML parsing, safe regular expressions, and typed errors. SARIF is emitted with `serde_json`, not a SARIF crate. The harness adds `ureq` for the catalog fetch and the token exchange, `ratatui` 0.30 and `crossterm` 0.29 for the picker, and `getrandom` for the login verifier. Git library wrappers, Node, Python, and sandbox crates are not dependencies. `ahi::store` still has no network client.
 
-Transitive dependencies must pass `cargo deny`. The allow list in `deny.toml` is MIT, Apache-2.0, BSD-3-Clause, Unicode-3.0, and Zlib. crates.io is the only source. Yanked crates are denied. Advisories fail CI, with the one written exception for the unmaintained `unsafe-libyaml` advisory recorded in `deny.toml` (the maintained YAML crates need a newer Rust than the MSRV).
+Transitive dependencies must pass `cargo deny`. The allow list in `deny.toml` is MIT, Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0, Zlib, and CDLA-Permissive-2.0. crates.io is the only source. Yanked crates are denied. Advisories fail CI, with the one written exception for the unmaintained `unsafe-libyaml` advisory recorded in `deny.toml`.
 
 ## Testing strategy
 
@@ -652,29 +658,39 @@ Versioning follows the `rfconversions` tag `v0.7.7` shape unless the open SemVer
 
 Other CI facts:
 
-- Actions are pinned to full commit SHAs, with a comment naming the upstream ref they came from. `actions/checkout` is `3d3c42e5aac5ba805825da76410c181273ba90b1` (the commit behind tag `v7` on 2026-10-25). `dtolnay/rust-toolchain` is `683b588c487a69d01f6c6ddf40f036ff682cc2c8` (master on 2026-10-16) and installs Rust 1.83.0 plus rustfmt and clippy.
+- Actions are pinned to full commit SHAs, with a comment naming the upstream ref they came from. `actions/checkout` is `3d3c42e5aac5ba805825da76410c181273ba90b1` (the commit behind tag `v7` on 2026-10-25). `dtolnay/rust-toolchain` is `683b588c487a69d01f6c6ddf40f036ff682cc2c8` (master on 2026-10-16) and installs Rust 1.88.0 plus rustfmt and clippy.
 - The matrix is `ubuntu-latest`, `macos-latest`, and `windows-latest`. Formatting, clippy (`-D warnings`), tests, `cargo doc` with warnings denied, `cargo package`, and `cargo build --release` run on every OS. cargo-deny and cargo-audit run on Linux only, because the advisory database does not need to be fetched three times. The version smoke runs on every OS.
-- MSRV is 1.83 because that is the compiler used to verify v0.1 (rustc 1.83.0, 2024-11-26). CI installs that toolchain on purpose.
+- MSRV is 1.88. v0.1 was verified with Rust 1.83.0. The single-machine harness uses `ratatui` 0.30.0, the release that no longer depends on the unmaintained `paste` crate; that release requires 1.86. Its default widgets also enable the `time` crate. The stack-exhaustion advisory RUSTSEC-2026-0009 is fixed in `time` 0.3.47, and every patched `time` release requires Rust 1.88. CI installs 1.88.0. The lockfile carries `time` 0.3.55. Resolving that release also moves the direct `serde` pin to 1.0.229, because `time` 0.3.47 and later select `serde_core` 1.0.220 or newer and that crate is versioned together with `serde_derive`.
 - `permissions: contents: read` is set at workflow level. No job widens it.
 - The `justfile` recipes match the `rfconversions` names: `help`, `fmt`, `format`, `fmt-check`, `lint`, `lint-fix`, `test`, `doc-check`, `package`, `build`, `check`, `ci`, `cut-release`, `dev`. The `ci` recipe also runs the supply-chain installer, `cargo deny`, `cargo audit`, and the version smoke, which the workflow runs and which the `rfconversions` `ci` recipe does not.
-- Deviations from the `rfconversions` workflow, beyond pinning SHAs, least privilege, the matrix, and the tag gate: the toolchain is 1.83.0 via the pinned dtolnay action rather than `rustup update stable`; deny and audit are Linux-only and use sha256-pinned upstream binaries rather than `cargo install`; publish lives in its own workflow file so the token is not in the pull-request workflow; the publish job's `if` requires a published release, a tag ref, and `github.repository == 'iancleary/ahi'` rather than `github.ref_type == 'tag'` alone; a version smoke step is added; MSRV is 1.83 rather than 1.70.
+- Deviations from the `rfconversions` workflow, beyond pinning SHAs, least privilege, the matrix, and the tag gate: the toolchain is 1.88.0 via the pinned dtolnay action rather than `rustup update stable`; deny and audit are Linux-only and use sha256-pinned upstream binaries rather than `cargo install`; publish lives in its own workflow file so the token is not in the pull-request workflow; the publish job's `if` requires a published release, a tag ref, and `github.repository == 'iancleary/ahi'` rather than `github.ref_type == 'tag'` alone; a version smoke step is added; MSRV is 1.88 rather than 1.70.
 - Non-root: the workflow does not use a root container, and tests do not require root.
 
 ## Roadmap
 
 ### v0.1 — this implementation slice
 
-Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), `ahi migrate` (best-effort, no parity guarantee), `install`, `uninstall`, and `update` stubs, tests, `justfile`, `cargo deny`, CI matrix, README.
+Config and manifest parsing, policy-file parsing, git file discovery, filtering, identify subset, builtin checks in the v0.1 table, content-addressed store primitives (no network), text/JSON/SARIF, audit line, `ahi run`, `ahi list-checks`, `ahi explain`, `ahi doctor` (informational), `ahi migrate` (best-effort, no parity guarantee), and an `update` stub, tests, `justfile`, `cargo deny`, CI matrix, README. The git hook shim stubs that shipped as top-level `install` and `uninstall` are now `ahi hooks install` and `ahi hooks uninstall`.
 
 A URL or `meta` hook fails the run with an explicit error. It is not skipped and not substituted. `repo: local` with `language: system` or `script` runs when the policy pins the id and the exact entry. Other local languages fail the hook. `ahi run --fix` rewrites the three whitespace checks without the stash protocol; a file with unstaged changes is refused. Network is not blocked for a trusted local hook, because v0.4 is the sandbox. The environment is scrubbed to the base keep list plus the toolchain pass-through (`CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN` by default; more names only from `toolchain_env` in the policy). Credential names are never passed.
 
 ### v0.2 — no hook-repository installer
 
-Withdrawn as a hook-repository installer. ahi does not grow `ahi.lock`, `ahi lock`, `ahi verify`, or `ahi fetch`. Checkers ship inside the ahi binary as `repo: builtin`, on the pattern of a linter that does not download its rules. A URL repo keeps failing with an explicit error. `ahi update` is reserved for replacing the ahi binary from an attested archive. That behavior is specified above and is not implemented.
+Withdrawn as a hook-repository installer. ahi does not grow `ahi.lock`, `ahi lock`, `ahi verify`, or `ahi fetch`. Checkers ship inside the ahi binary as `repo: builtin`. A URL repo keeps failing with an explicit error. `ahi update` stays reserved for replacing the ahi binary from an attested archive. That replacement is not implemented. This phase does not add checks.
 
-### v0.3 — more builtins, not a language installer
+### v0.3 — single-machine harness
 
-New checks are builtins compiled into ahi. This phase does not execute `python`, `rust`, `golang`, or `docker_image` from a cloned hook repository, and it does not install their packages. `language: system` / `script` and the three `--fix` checks already exist. The stash protocol, with a test that an unstaged hunk survives a failed and a successful fix, remains specified and unimplemented. v0.1 refuses the unstaged file instead.
+Not more builtins. The builtin catalog stays as shipped in v0.1. This phase is one process on one machine: OpenAI and a custom gateway compiled into ahi, not installed as a Pi package or a hook repository. It does not start a conversation, a coordinator, or a worker.
+
+The state directory is `--state-dir`, else `AHI_STATE_DIR`, else `$XDG_STATE_HOME/ahi`, else `%LOCALAPPDATA%\ahi` on Windows, else `$HOME/.local/share/ahi`. `models.json` and the OpenAI credential live there. They are not written into the git repository. ahi does not read `~/.pi` and does not edit `models.json`.
+
+`models.json` is the provider map: a `providers` object whose keys are gateway ids. Each entry has `baseUrl`, `api`, an optional `apiKey`, optional `headers`, and optional `models` (`{"id": "..."}`). The only `api` is `openai-completions`. A loopback `baseUrl` (`127.0.0.1`, `localhost`, or `::1`) may be `http`. Any other origin is `https`. `apiKey` and header values are the marker `gateway` or an environment reference `$NAME`. A literal secret is an error. An `openai` entry may override `baseUrl` and must not list models. OpenAI's model list is not vendored and is not fetched. A missing `models.json` loads OpenAI alone. An invalid file is an error.
+
+`ahi tui` loads that registry. A gateway whose `models` list is empty is filled from `GET <origin>/pi/agent/model.json`, where the origin is `baseUrl` with its path removed. The request sends no credential and follows no redirect. The timeout is 15 seconds and the body cap is 1 MiB. The catalog's `api` is `openai-completions`, its `apiKey` is a marker, its provider id equals the gateway id, costs that are present are integer zero, and input capabilities are `text` or `image`. A successful fetch replaces the model list and writes `catalogs/<id>.json`. A failed fetch keeps the configured ids when the entry listed any. Otherwise it uses that last-good file, or an empty list. The pipe form prints one line per provider: `provider`, `origin`, `auth`, `models`, and `catalog`. OpenAI's auth is `signed-in` when `credentials/openai.json` exists and `signed-out` otherwise. The token text is not printed. A terminal opens a picker. Choosing a model writes `selection` as `gateway/model` and a newline. Quitting writes nothing.
+
+`ahi login` is the OpenAI browser sign-in. It prints the authorization URL on standard error, tries to open a browser, and does not abort when that fails. The callback is `http://localhost:1455/auth/callback`. A pasted redirect URL or code on stdin is accepted while that callback listens, and a redirect is checked against the state parameter. The stored file is `credentials/openai.json`, mode `0600` on Unix, and it keeps `access_token`, `refresh_token`, and `expires_in`.
+
+`language: fail`, `language: pygrep`, `ahi/file-mode`, `ahi/version-pins`, `ahi/secrets`, and the partial-commit stash stay specified and are not this phase. `ahi hooks install` and `ahi hooks uninstall` remain stubs until the hook shim phase.
 
 ### v0.4 — detect an outer sandbox, and offer host sandboxing
 
@@ -720,7 +736,7 @@ Legacy stage names are rejected rather than rewritten in place. `ahi migrate` do
 
 ### 4. Which languages in v1
 
-**Recommendation:** checkers are builtins compiled into ahi, selected with `repo: builtin`. ahi does not execute `python`, `rust`, `golang`, `docker_image`, or `docker` from a hook repository, and it does not install their packages. `fail` and `pygrep` are candidates for later builtins because they need no runtime. `language: system` and `language: script` stay the only local programs, behind the exact-entry pin. Every other language name fails the hook with `not supported by ahi`.
+**Recommendation:** checkers are builtins compiled into ahi, selected with `repo: builtin`. The next phase does not add builtins. It loads OpenAI and a custom gateway in the single-machine harness. ahi does not execute `python`, `rust`, `golang`, `docker_image`, or `docker` from a hook repository, and it does not install their packages. `fail` and `pygrep` remain candidates for a later builtin because they need no runtime. They are not scheduled now. `language: system` and `language: script` stay the only local programs, behind the exact-entry pin. Every other language name fails the hook with `not supported by ahi`.
 
 ### 5. Whether Node is ever supported
 
