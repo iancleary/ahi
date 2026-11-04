@@ -4,42 +4,32 @@ Status: Part 1 (screen with a stand-in backend) is implemented. Part 2 (real com
 
 ## Purpose
 
-`ahi tui` opens a local echo-backed chat after the operator picks a curated model and `<state>/selection` is written. The screen has a conversation view, an input box, and a two-row status area. The layout follows the familiar Claude Code and pi.dev arrangement.
+`ahi tui` opens a local echo-backed chat after the operator picks a curated model and `<state>/selection` is written. The screen has a conversation view, an input box with context in its upper rule, and a single-row workspace/model footer. The layout follows the familiar Claude Code and pi.dev arrangement.
 
 ## Layout
 
-The transcript/input follow the pi.dev/Claude Code-style reference. The footer groups workspace context on the left and session context on the right, with the model above usage.
+The transcript/input follow the pi.dev/Claude Code-style reference. The single-row footer groups workspace context on the left and the model on the right. Context usage sits near the right end of the input's upper rule.
 
 ```
   conversation transcript (scrolls, no frame)
   tool output and diffs render as shaded blocks
 
 ⠋ Working
-────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────── 28.4% / 272k ──
 █ input (no frame, no prompt character)
 ────────────────────────────────────────────────────────────────
-  ~/Work/gh/ahi on   main !6                   (openai) gpt-6.1-sol • medium
-                                 ↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)
+  ~/Work/gh/ahi on   main !6     (openai) gpt-6.1-sol • medium
 ```
 
 From top to bottom:
 
 1. **Transcript.** Every row not used below, with no frame. Pinned to the bottom unless the operator has scrolled up.
 2. **Activity row.** A spinner and `Working` while a response is in progress. Blank otherwise.
-3. **Input.** A full-width horizontal rule above and below, in the accent color (cyan), with no side borders and no prompt character. Starts at one row and grows to at most 8 rows. Past 8 rows the input scrolls internally so the cursor stays in view.
+3. **Input.** A full-width horizontal rule above and below, in the accent color (cyan), with no side borders and no prompt character. Embed known context usage, such as `28.4% / 272k`, near the right end of the upper rule. Use muted lavender-blue (256-color index 103) with dim styling, one space around the label, and two trailing rule cells. Leave at least two leading rule cells. On narrow terminals, compact to percentage only, then omit the label if even that cannot fit; never wrap. Unknown usage, unknown capacity, or zero capacity leaves a plain rule, while known zero usage displays `0%`. No warning thresholds are invented. Input starts at one row and grows to at most 8 rows. Past 8 rows it scrolls internally so the cursor stays in view.
 4. **Workspace/model row.** The left side is a Powerlevel10k-style Nerd Font location: OS logo, folder icon, working directory (home shortened to `~`), then `on  ` and the git branch. Arch Linux uses ``; other platforms use their own logo or a generic fallback. A detached HEAD shows the short commit id instead of the branch. Outside a repository, omit the git segment. Use the operator's Powerlevel10k-style palette at normal brightness: terminal-default distro logo, blue path/folder (256-color index 31), brighter bold repository name (39), and green Git icons/branch (76). Follow the branch with nonzero Powerlevel10k worktree counts, in order: red `~N` conflicts (196), yellow `+N` staged and `!N` unstaged (178), blue `?N` untracked (39). A file can count as both staged and unstaged. Counts refer to files, not lines; a rename counts once. Clean worktrees omit markers. If status cannot be read, show `status unavailable` instead of implying clean. On the right, show `(gateway) model • thinking-level`, right-aligned. Reserve its width first, with a gap from the workspace; shorten the workspace from the left with `…` when narrow, preserving visible colors.
-5. **Usage row**, below the model and right-aligned to the same edge, in order, separated by single spaces:
-   - `↑<n>` session input tokens
-   - `↓<n>` session output tokens
-   - `R<n>` cached input tokens read
-   - `$<cost>` session cost, followed by `(sub)` when the credential is a subscription sign-in rather than metered API billing
-   - `<p>%/<window>` context used as a percent of the model's window, for example `28.4%/272k`. Context used is the input token count of the most recent response.
-   - `(auto)` when automatic context compaction is on (display only until compaction exists)
+There is no second footer row. Cumulative input/output tokens, cache counts, cost, subscription, and compaction indicators are not permanently displayed. Backend accounting remains available internally; an on-demand usage view is future work, not implemented here. Context used is the input token count of the latest response, not the cumulative session total; capacity uses `k`/`M` suffixes with at most one decimal.
 
-   Counts use `k` and `M` suffixes with at most one decimal. An unknown value is omitted together with its label, never shown as zero.
-   When the row is too narrow, drop whole fields from the right end (`(auto)` first, then context, cost, cache read) until it fits, never wrapping into the transcript or shifting the model. Usage has its own row and no longer competes with the model for horizontal space.
-
-The location row uses the colors above, not dim styling. Session usage counters remain dim. The provider/model/thinking segment uses muted lavender-blue (256-color index 103) with the dim style.
+The workspace uses the colors above at normal brightness. The provider/model/thinking segment remains muted lavender-blue (256-color index 103) with dim styling.
 
 ## Keys
 
@@ -103,7 +93,7 @@ The screen drains the receiver on each frame tick (about 50 ms), so the user int
 
 ### Stand-in backend (part 1)
 
-`EchoBackend` replies with the submitted text prefixed by `[stand-in]`, delivered as several `TextDelta` events about 20 ms apart, so streaming display is exercised. It reports `Usage` with input and output computed as the character count divided by four, `cached_input_tokens` and `cost_usd` as `None` (so those fields are omitted from the row), and a `ContextWindow` of 128000. Those figures are synthetic test data, and the transcript says so: the first reply in a session carries a note `stand-in backend: replies and token counts are not from a model`.
+`EchoBackend` replies with the submitted text prefixed by `[stand-in]`, delivered as several `TextDelta` events about 20 ms apart, so streaming display is exercised. It reports `Usage` with input and output computed as the character count divided by four, `cached_input_tokens` and `cost_usd` as `None`, and a `ContextWindow` of 128000. Those figures are synthetic test data, and the transcript says so: the first reply in a session carries a note `stand-in backend: replies and token counts are not from a model`.
 
 The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, until part 2 replaces it.
 
@@ -148,7 +138,7 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 - The input box grows to 8 rows and no further.
 - Commands: `/model`, `/thinking high`, `/thinking`, `/clear`, `/exit`, and an unknown command, each without a terminal.
 - The thinking level is persisted to `<state>/thinking` and read back. An invalid file falls back to `medium`.
-- Layout using `ratatui::backend::TestBackend`: workspace and muted model share the top footer row, while dim usage appears below with the same right edge. Usage fields follow the reference ordering and drop as whole fields when narrow. Unknown values are omitted, not shown as zero. Model placement is independent of changing usage counts.
+- Layout using `ratatui::backend::TestBackend`: colorful workspace and muted model share one footer row. Context is muted within the input's upper rule, with spacing and trailing rule cells. Narrow labels compact to percentage then disappear without wrapping. Unknown context is omitted, while known zero remains visible. Cumulative accounting is not rendered and the freed row goes to the transcript.
 - The location row renders the Powerlevel10k-style directory and branch for a fixture repository, the short commit id for a detached HEAD, and no git segment outside a repository.
 - `EchoBackend` produces deltas, usage, and completion in order, and the first reply carries the stand-in note.
 - Piped `ahi tui` output is byte-identical to v0.2.0.

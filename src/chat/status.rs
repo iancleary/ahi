@@ -17,50 +17,36 @@ pub(crate) fn session_model_segment(selection: &Selection, thinking: ThinkingLev
     )
 }
 
-/// Usage below the model; the widget right-aligns it independently.
-pub(crate) fn render_usage_row(width: usize, meters: &SessionMeters) -> String {
-    fit_prefix(&session_fields(meters), width)
-}
-
-fn session_fields(meters: &SessionMeters) -> Vec<String> {
-    let mut fields = Vec::new();
-    if let Some(count) = meters.input_tokens {
-        fields.push(format!("↑{}", format_count(count)));
-    }
-    if let Some(count) = meters.output_tokens {
-        fields.push(format!("↓{}", format_count(count)));
-    }
-    if let Some(count) = meters.cached_input_tokens {
-        fields.push(format!("R{}", format_count(count)));
-    }
-    if let Some(cost) = meters.cost_usd {
-        let mut field = format!("${cost:.3}");
-        if meters.subscription_sign_in {
-            field.push_str(" (sub)");
+/// Embed known context usage near the right end of the input's upper rule.
+/// Keep two rule cells on either side of the padded label; compact or hide
+/// the label instead of wrapping it. Unknown/zero-capacity context stays blank.
+pub(crate) fn render_context_rule(width: usize, meters: &SessionMeters) -> Line<'static> {
+    let context = meters
+        .context_tokens
+        .zip(meters.context_window)
+        .and_then(|(used, window)| format_percent(used, window).map(|percent| (percent, window)));
+    if let Some((percent, window)) = context {
+        for label in [
+            format!("{percent}% / {}", format_count(window)),
+            format!("{percent}%"),
+        ] {
+            // Label text is ASCII. Four spaces/rule cells form the right tail
+            // and separators; two more preserve a visible leading rule.
+            if width >= label.len() + 6 {
+                return Line::from(vec![
+                    Span::raw(format!("{} ", "─".repeat(width - label.len() - 4))),
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(Color::Indexed(103))
+                            .add_modifier(Modifier::DIM),
+                    ),
+                    Span::raw(" ──"),
+                ]);
+            }
         }
-        fields.push(field);
     }
-    if let (Some(used), Some(window)) = (meters.context_tokens, meters.context_window) {
-        if let Some(percent) = format_percent(used, window) {
-            fields.push(format!("{percent}%/{}", format_count(window)));
-        }
-    }
-    if meters.automatic_compaction {
-        fields.push("(auto)".to_string());
-    }
-    fields
-}
-
-fn fit_prefix(fields: &[String], budget: usize) -> String {
-    let mut end = fields.len();
-    while end > 0 {
-        let text = fields[..end].join(" ");
-        if text.chars().count() <= budget {
-            return text;
-        }
-        end -= 1;
-    }
-    String::new()
+    Line::raw("─".repeat(width))
 }
 
 fn format_count(count: u64) -> String {
@@ -251,31 +237,46 @@ mod tests {
     }
 
     #[test]
-    fn usage_row_matches_reference_order_and_drops_whole_fields() {
+    fn input_rule_embeds_context_and_compacts_without_wrapping() {
+        let meters = reference_meters();
         assert_eq!(
-            render_usage_row(120, &reference_meters()),
-            "↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)"
+            render_context_rule(24, &meters).to_string(),
+            "──────── 28.4% / 272k ──"
         );
         assert_eq!(
-            render_usage_row(30, &reference_meters()),
-            "↑139k ↓11k R1.2M $0.502 (sub)"
+            render_context_rule(17, &meters).to_string(),
+            "──────── 28.4% ──"
         );
-        assert_eq!(render_usage_row(0, &reference_meters()), "");
+        assert_eq!(render_context_rule(10, &meters).to_string(), "──────────");
+        assert_eq!(render_context_rule(0, &meters).to_string(), "");
     }
 
     #[test]
-    fn unknown_usage_fields_are_omitted_and_zero_is_shown() {
-        let meters = SessionMeters {
-            input_tokens: Some(8),
-            output_tokens: Some(2),
-            context_tokens: Some(8),
-            context_window: Some(128_000),
-            ..SessionMeters::default()
-        };
-        assert_eq!(render_usage_row(80, &meters), "↑8 ↓2 0%/128k");
-
-        let mut known_zero = meters;
-        known_zero.cached_input_tokens = Some(0);
-        assert_eq!(render_usage_row(80, &known_zero), "↑8 ↓2 R0 0%/128k");
+    fn input_rule_omits_unknown_context_but_shows_known_zero() {
+        let mut meters = SessionMeters::default();
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
+        meters.context_window = Some(128_000);
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
+        meters.context_tokens = Some(0);
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "── 0% / 128k ──"
+        );
+        meters.context_window = None;
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
+        meters.context_window = Some(0);
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
     }
 }

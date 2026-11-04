@@ -238,7 +238,6 @@ impl ChatScreen {
                 Constraint::Length(input_rows),
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(1),
             ])
             .split(frame.area());
         self.transcript_width = chunks[0].width as usize;
@@ -260,9 +259,9 @@ impl ChatScreen {
             chunks[1],
         );
 
-        let rule = rule_line(chunks[2].width as usize);
+        let context_rule = status::render_context_rule(chunks[2].width as usize, &self.meters);
         let accent = Style::default().fg(ACCENT);
-        frame.render_widget(Paragraph::new(rule.clone()).style(accent), chunks[2]);
+        frame.render_widget(Paragraph::new(context_rule).style(accent), chunks[2]);
         let (scroll, input_lines) = self.input.visible_lines();
         frame.render_widget(Paragraph::new(input_lines.join("\n")), chunks[3]);
         let cursor_line = self.input.cursor_line().saturating_sub(scroll);
@@ -274,7 +273,10 @@ impl ChatScreen {
             chunks[3].x + cursor_column as u16,
             chunks[3].y + cursor_line as u16,
         ));
-        frame.render_widget(Paragraph::new(rule).style(accent), chunks[4]);
+        frame.render_widget(
+            Paragraph::new(rule_line(chunks[4].width as usize)).style(accent),
+            chunks[4],
+        );
 
         let model = Line::styled(
             status::session_model_segment(&self.selection, self.thinking),
@@ -282,8 +284,8 @@ impl ChatScreen {
                 .fg(Color::Indexed(103))
                 .add_modifier(Modifier::DIM),
         );
-        // Reserve the model first, including a gap from the workspace. Usage
-        // gets its own row so changing counts never move the model sideways.
+        // Reserve the model first, including a gap from the workspace.
+        // Context lives in the input rule and cannot move the model sideways.
         let model_width = model
             .width()
             .saturating_add(1)
@@ -298,14 +300,6 @@ impl ChatScreen {
         );
         frame.render_widget(Paragraph::new(location), top[0]);
         frame.render_widget(Paragraph::new(model).alignment(Alignment::Right), top[1]);
-
-        let usage = status::render_usage_row(chunks[6].width as usize, &self.meters);
-        frame.render_widget(
-            Paragraph::new(usage)
-                .alignment(Alignment::Right)
-                .style(Style::default().add_modifier(Modifier::DIM)),
-            chunks[6],
-        );
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
@@ -712,37 +706,40 @@ mod tests {
             text: "explain the hook runner".to_string(),
         });
         let idle = draw_lines(&mut screen, 120, 16);
-        let activity = &idle[idle.len() - 6];
+        let activity = &idle[idle.len() - 5];
         assert!(activity.trim().is_empty(), "{activity}");
-        assert!(idle[idle.len() - 5]
+        assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
+        assert!(idle[idle.len() - 2]
             .chars()
             .all(|character| character == '─'));
-        assert!(idle[idle.len() - 3]
-            .chars()
-            .all(|character| character == '─'));
-        assert!(!idle[idle.len() - 4].starts_with('>'));
+        assert!(!idle[idle.len() - 3].starts_with('>'));
         assert!(idle
             .iter()
             .all(|line| !line.contains('│') && !line.contains('┌')));
-        assert!(idle[idle.len() - 2].starts_with("  ~/Work/gh/ahi on   main"));
-        assert!(idle[idle.len() - 2].ends_with("(openai) gpt-6.1-sol • medium"));
-        assert_eq!(
-            idle.last().unwrap().trim(),
-            "↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)"
-        );
+        assert!(idle
+            .last()
+            .unwrap()
+            .starts_with("  ~/Work/gh/ahi on   main"));
+        assert!(idle
+            .last()
+            .unwrap()
+            .ends_with("(openai) gpt-6.1-sol • medium"));
+        assert!(!idle
+            .iter()
+            .any(|row| row.contains("↑139k") || row.contains("R1.2M") || row.contains("$0.502")));
 
         screen.response_in_progress = true;
         let working = draw_lines(&mut screen, 120, 16);
         assert!(
-            working[working.len() - 6].contains("Working"),
+            working[working.len() - 5].contains("Working"),
             "{}",
-            working[working.len() - 6]
+            working[working.len() - 5]
         );
         let _ = fs::remove_dir_all(state);
     }
 
     #[test]
-    fn unicode_status_rows_keep_location_colors_and_muted_model_boundary() {
+    fn status_colors_separate_workspace_model_and_input_context() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-status-style");
         let mut screen = screen_in(&state);
         screen.set_selection("openai/gpt-6.1-sol");
@@ -766,7 +763,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
             terminal.draw(|frame| screen.draw(frame)).unwrap();
             let buffer = terminal.backend().buffer();
-            let location_text: String = (0..width).map(|x| buffer[(x, 14)].symbol()).collect();
+            let location_text: String = (0..width).map(|x| buffer[(x, 15)].symbol()).collect();
             assert!(location_text.starts_with("  ~/Work/gh/ahi on   main !6"));
             for (prefix, expected_color) in [
                 ("", Color::Reset),
@@ -776,19 +773,22 @@ mod tests {
                 ("  ~/Work/gh/ahi on   ", Color::Indexed(76)),
                 ("  ~/Work/gh/ahi on   main ", Color::Indexed(178)),
             ] {
-                let cell = &buffer[(prefix.chars().count() as u16, 14)];
+                let cell = &buffer[(prefix.chars().count() as u16, 15)];
                 assert_eq!(cell.fg, expected_color);
                 assert!(!cell.modifier.contains(Modifier::DIM));
             }
-            let usage_text: String = (0..width).map(|x| buffer[(x, 15)].symbol()).collect();
-            assert_eq!(usage_text.trim_start(), "↑5 ↓5 0%/128k");
-            let usage_start = width - "↑5 ↓5 0%/128k".chars().count() as u16;
-            assert_eq!(buffer[(usage_start, 15)].symbol(), "↑");
-            assert!(buffer[(usage_start, 15)].modifier.contains(Modifier::DIM));
+            let rule_text: String = (0..width).map(|x| buffer[(x, 12)].symbol()).collect();
+            assert!(rule_text.ends_with(" 0% / 128k ──"));
+            let context_start = width - "0% / 128k ──".chars().count() as u16;
+            assert_eq!(buffer[(context_start, 12)].symbol(), "0");
+            assert_eq!(buffer[(context_start, 12)].fg, Color::Indexed(103));
+            assert!(buffer[(context_start, 12)].modifier.contains(Modifier::DIM));
+            assert_eq!(buffer[(width - 1, 12)].fg, ACCENT);
+            assert!(!buffer[(width - 1, 12)].modifier.contains(Modifier::DIM));
             let expected = "(openai) gpt-6.1-sol • medium";
             let start = width - expected.chars().count() as u16;
             for (offset, character) in expected.chars().enumerate() {
-                let cell = &buffer[(start + offset as u16, 14)];
+                let cell = &buffer[(start + offset as u16, 15)];
                 assert_eq!(cell.symbol(), character.to_string());
                 assert_eq!(
                     cell.fg,
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_footer_reserves_the_model_above_usage() {
+    fn narrow_footer_reserves_model_with_context_in_the_input_rule() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-narrow-footer");
         let mut screen = screen_in(&state);
         screen.set_selection("openai/gpt-6.1-sol");
@@ -831,8 +831,8 @@ mod tests {
             ..SessionMeters::default()
         });
         let rows = draw_lines(&mut screen, 40, 16);
-        assert_eq!(rows[14], "…   main (openai) gpt-6.1-sol • medium");
-        assert_eq!(rows[15].trim_start(), "↑5 ↓5 0%/128k");
+        assert_eq!(rows[15], "…   main (openai) gpt-6.1-sol • medium");
+        assert!(rows[12].ends_with(" 0% / 128k ──"));
         fs::remove_dir_all(state).unwrap();
     }
 

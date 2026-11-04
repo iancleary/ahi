@@ -202,10 +202,16 @@ def main() -> None:
             session.expect("vendor/model/variant")
             session.send("j\r")
             session.expect("(openai) vendor/model/variant • medium")
+            assert "128k" not in session.screen()  # Context is initially unknown.
             assert (state / "selection").read_text() == "openai/vendor/model/variant\n"
             session.send("merge smoke\r")
             session.expect("[stand-in] merge smoke")
             session.expect("replies and token counts are not from a model")
+            session.expect("0% / 128k ──")
+            rows = session.screen().splitlines()
+            assert rows[-1].endswith("(openai) vendor/model/variant • medium")
+            assert all(character == "─" for character in rows[-2])
+            assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
             # /model reloads local curation instead of capturing the startup
             # registry. Reference-only IDs must not become picker defaults.
@@ -399,7 +405,8 @@ def main() -> None:
         "editor resume/reload and byte preservation, "
         "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
         "echo reply, /model local reload/switch/cancel, transcript retention, clean chat exit, "
-        "real Git counts and branch/status refresh on message submission"
+        "real Git counts and branch/status refresh on message submission, "
+        "single-row footer and context embedded in the input rule"
     )
 
 
