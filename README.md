@@ -8,6 +8,55 @@ The design, the compatibility matrix, and the open decisions are in [docs/SPEC.m
 
 A proposal to grow ahi from the hook runner into a public agent runtime and coordinator is in [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md). That document is for review. It is not the design of record, and it does not change the v0.1 through v0.4 contract.
 
+## Installation
+
+### Linux
+
+Prebuilt, statically linked archives are available for **x86_64** and **aarch64** on the [latest release](https://github.com/iancleary/ahi/releases/latest). Cargo is not required.
+
+1. Download the matching `ahi-<version>-linux-<architecture>.tar.gz` and `ahi-<version>-sha256sums.txt`.
+2. [Verify the archive's checksum and GitHub build-provenance attestation](#release-assets) before extracting it.
+3. Extract the archive and install `ahi` in a directory on your `PATH`, for example:
+
+   ```sh
+   tar -xzf ahi-0.3.3-linux-x86_64.tar.gz
+   mkdir -p "$HOME/.local/bin"
+   install -m 755 ahi "$HOME/.local/bin/ahi"
+   ahi --version
+   ```
+
+Ensure `$HOME/.local/bin` is on your `PATH`. Substitute `aarch64` for `x86_64` on ARM64 Linux, and the downloaded version for `0.3.3`.
+
+For subsequent releases, run `ahi update`. It requires the [GitHub CLI (`gh`)](https://cli.github.com/) to verify attestations, but does not require Cargo. If upgrading from v0.3.1, install the new archive manually once: that version's updater refuses the newer checksum manifest.
+
+### Windows
+
+A prebuilt **x86_64** archive is available on the [latest release](https://github.com/iancleary/ahi/releases/latest). Cargo is not required.
+
+1. Download `ahi-<version>-windows-x86_64.tar.gz` and `ahi-<version>-sha256sums.txt`.
+2. [Verify the archive's checksum and GitHub build-provenance attestation](#release-assets) before extracting it. In PowerShell, `Get-FileHash <archive> -Algorithm SHA256` computes the checksum to compare with the archive's entry in the sums file; use `gh attestation verify` for provenance verification.
+3. Extract the archive in PowerShell:
+
+   ```powershell
+   tar -xzf ahi-0.3.3-windows-x86_64.tar.gz
+   .\ahi.exe --version
+   ```
+
+   Substitute the downloaded version for `0.3.3`. Move `ahi.exe` into a directory on your user `PATH` to run `ahi` from any terminal. The binary is unsigned; Windows SmartScreen may prompt on first run.
+
+For subsequent releases, run `ahi update`. It requires the [GitHub CLI (`gh`)](https://cli.github.com/) to verify attestations, but does not require Cargo.
+
+### macOS
+
+Install Rust and Cargo using [rustup](https://rustup.rs/), then install the latest published version:
+
+```sh
+cargo install ahi --locked
+ahi --version
+```
+
+Run `cargo install ahi --locked` again to update. Rust 1.88 or newer is required. Prebuilt macOS archives and `ahi update` support are deferred while GitHub-hosted ARM64 runners lack capacity; `ahi update` currently refuses macOS with a Cargo installation pointer. See the [restoration checklist](docs/macos-update-follow-up.md).
+
 ## Build
 
 MSRV is Rust 1.88. A `justfile` wraps the same commands CI runs.
