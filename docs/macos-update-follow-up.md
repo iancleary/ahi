@@ -14,7 +14,7 @@ Until then, install/update on macOS with `cargo install ahi`. `ahi update` refus
 
 ## Restore as one verified change
 
-1. Restore a working hosted macOS ARM64 label to `.github/workflows/ci.yml` and the native release matrix (`aarch64-apple-darwin`, architecture `darwin-aarch64`, binary `ahi`). Do not label an Intel build as ARM64.
+1. Restore a working hosted macOS ARM64 label to both `.github/workflows/ci.yml` and `.github/workflows/publish.yml`, and to the native release matrix (`aarch64-apple-darwin`, architecture `darwin-aarch64`, binary `ahi`). Do not label an Intel build as ARM64.
 2. Restore the Darwin archive in `scripts/write_sha256sums.sh`, `scripts/attach_release_assets.sh`, and the release workflow's attestation subjects.
 3. Restore the matching `TARGET_SUFFIXES` entry and macOS ARM64 mapping in `src/update.rs`. Keep the producer and strict checksum parser's complete archive sets identical.
 4. Update the supported-host CLI test, artifact mapping test, README, release docs, SPEC, and changelog together.
