@@ -451,6 +451,17 @@ impl ChatScreen {
                 }
                 false
             }
+            ResponseEvent::ToolCallsRequested(calls) => {
+                for call in calls {
+                    self.push_notice(format!(
+                        "tool requested: {} ({}); not executed",
+                        call.name, call.id
+                    ));
+                }
+                // A notice is not part of the assistant's streamed text.
+                self.assistant_open = false;
+                false
+            }
             ResponseEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -1225,6 +1236,28 @@ mod tests {
                 .map(|message| message.text.as_str())
                 .collect::<Vec<_>>(),
             ["before after"]
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn tool_requests_are_visible_as_notices_without_argument_disclosure() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-tool-request");
+        let mut screen = screen_in(&state);
+        assert!(
+            !screen.apply_event(ResponseEvent::ToolCallsRequested(vec![backend::ToolCall {
+                id: "call_a".into(),
+                name: "read_file".into(),
+                arguments: serde_json::from_value(serde_json::json!({"path": "private-path"}))
+                    .unwrap(),
+            }]))
+        );
+        assert_eq!(
+            screen.messages,
+            vec![ChatMessage {
+                role: TranscriptRole::Notice,
+                text: "tool requested: read_file (call_a); not executed".into(),
+            }]
         );
         fs::remove_dir_all(state).unwrap();
     }

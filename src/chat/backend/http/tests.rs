@@ -208,8 +208,8 @@ fn failures_do_not_echo_upstream_secrets_or_claim_completion() {
         (
             "200 OK",
             "text/event-stream",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[]}}]}\n\n",
-            "model requested a tool; tool execution is not implemented",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+            "model finished tool calls without any calls",
         ),
     ] {
         let (url, server) = server(status, content_type, body);
@@ -218,6 +218,115 @@ fn failures_do_not_echo_upstream_secrets_or_claim_completion() {
         assert_eq!(events.last(), Some(&ResponseEvent::Failed(expected.into())));
         server.join().unwrap();
         fs::remove_dir_all(state).unwrap();
+    }
+}
+
+fn tool_stream(chunks: &[serde_json::Value], reason: &str) -> String {
+    let mut body = String::new();
+    for calls in chunks {
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"choices": [{"index": 0, "delta": {"tool_calls": calls}}]})
+        ));
+    }
+    body.push_str(&format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
+    ));
+    body
+}
+
+#[test]
+fn fragmented_parallel_tool_calls_are_validated_but_never_executed() {
+    let body = tool_stream(
+        &[
+            json!([
+                {"index": 1, "id": "call_b", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":"}},
+                {"index": 0, "id": "call_a", "type": "function", "function": {"name": "read_", "arguments": "{\"path\":\"src/"}}
+            ]),
+            json!([
+                {"index": 0, "function": {"name": "file", "arguments": "main.rs\"}"}},
+                {"index": 1, "function": {"arguments": "\"echo secret\"}"}}
+            ]),
+        ],
+        "tool_calls",
+    );
+    let (url, server) = server("200 OK", "text/event-stream", &body);
+    let state = state_for(&url);
+    let events = collect(&mut HttpBackend::new(state.clone()), request());
+    assert_eq!(events, vec![
+        ResponseEvent::ToolCallsRequested(vec![
+            ToolCall { id: "call_a".into(), name: "read_file".into(), arguments: serde_json::from_value(json!({"path": "src/main.rs"})).unwrap() },
+            ToolCall { id: "call_b".into(), name: "bash".into(), arguments: serde_json::from_value(json!({"command": "echo secret"})).unwrap() }
+        ]),
+        ResponseEvent::Failed("tool execution is disabled until an authorization policy and sandbox are implemented".into())
+    ]);
+    let received = server.join().unwrap();
+    let (_, body) = received.split_once("\r\n\r\n").unwrap();
+    // No tools are advertised before a policy-controlled executor exists.
+    assert!(serde_json::from_str::<serde_json::Value>(body)
+        .unwrap()
+        .get("tools")
+        .is_none());
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn malformed_or_ambiguous_tool_calls_never_reach_the_policy_boundary() {
+    let valid = json!({"index": 0, "id": "call_a", "type": "function", "function": {"name": "read_file", "arguments": "{}"}});
+    for (chunks, reason, expected) in [
+        (
+            vec![
+                json!([{ "index": 0, "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]),
+            ],
+            "tool_calls",
+            "model tool call has no id",
+        ),
+        (
+            vec![
+                json!([valid.clone(), {"index": 1, "id": "call_a", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]),
+            ],
+            "tool_calls",
+            "model tool call ids are not unique",
+        ),
+        (
+            vec![
+                json!([valid.clone()]),
+                json!([{"index": 0, "id": "changed"}]),
+            ],
+            "tool_calls",
+            "invalid or changing model tool call id",
+        ),
+        (
+            vec![
+                json!([{"index": 0, "id": "call_a", "type": "function", "function": {"name": "read_file", "arguments": "[\"private\"]"}}]),
+            ],
+            "tool_calls",
+            "model tool arguments must be a JSON object",
+        ),
+        (
+            vec![json!([{"index": 32}])],
+            "tool_calls",
+            "model tool call index exceeds limit",
+        ),
+        (
+            vec![
+                json!([{"index": 0, "id": "call_a", "type": "function", "function": {"name": "read_file", "arguments": "x".repeat(65537)}}]),
+            ],
+            "tool_calls",
+            "model tool arguments exceed limit",
+        ),
+        (
+            vec![json!([valid])],
+            "stop",
+            "model tool calls require the tool_calls finish reason",
+        ),
+    ] {
+        let body = tool_stream(&chunks, reason);
+        let (sender, receiver) = mpsc::channel();
+        let result = read_stream(body.as_bytes(), &sender);
+        assert_eq!(result.err().unwrap().to_string(), expected);
+        assert_eq!(receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     }
 }
 

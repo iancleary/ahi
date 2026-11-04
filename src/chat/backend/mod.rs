@@ -4,6 +4,9 @@
 //! runtime is involved.
 
 mod http;
+mod tool_call;
+
+pub(crate) use tool_call::ToolCall;
 
 use std::sync::mpsc::Receiver;
 
@@ -45,6 +48,8 @@ pub(crate) struct ChatRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ResponseEvent {
     TextDelta(String),
+    /// Validated requests only. This event never grants execution authority.
+    ToolCallsRequested(Vec<ToolCall>),
     Usage {
         input_tokens: u64,
         output_tokens: u64,

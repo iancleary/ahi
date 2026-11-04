@@ -1,5 +1,5 @@
 //! Streaming OpenAI-compatible Chat Completions for registered gateways.
-//! No redirect following, automatic retries, tools, or synthetic usage.
+//! No redirect following, automatic retries, tool execution, or synthetic usage.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ChatRequest, CompletionBackend, ResponseEvent};
+use super::tool_call::{ToolCallAssembler, ToolCallDelta};
+use super::{ChatRequest, CompletionBackend, ResponseEvent, ToolCall};
 use crate::chat::transcript::TranscriptRole;
 use crate::error::{Error, Result};
 
@@ -102,7 +103,13 @@ fn complete(
     {
         return Err(Error::new("model response must be text/event-stream"));
     }
-    read_stream(response.into_reader(), sender)
+    match read_stream(response.into_reader(), sender)? {
+        StreamOutcome::Stopped => Ok(()),
+        StreamOutcome::ToolCalls(calls) => {
+            emit(sender, ResponseEvent::ToolCallsRequested(calls))?;
+            Err(Error::new("tool execution is disabled until an authorization policy and sandbox are implemented"))
+        }
+    }
 }
 
 fn http_error(status: u16) -> Error {
@@ -129,7 +136,7 @@ struct Choice {
 #[derive(Deserialize)]
 struct Delta {
     content: Option<String>,
-    tool_calls: Option<serde_json::Value>,
+    tool_calls: Option<Vec<ToolCallDelta>>,
     function_call: Option<serde_json::Value>,
 }
 
@@ -151,11 +158,23 @@ fn emit(sender: &Sender<ResponseEvent>, event: ResponseEvent) -> Result<()> {
         .map_err(|_| Error::new("model response receiver closed"))
 }
 
-fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<()> {
+enum StreamOutcome {
+    Stopped,
+    ToolCalls(Vec<ToolCall>),
+}
+
+#[derive(Clone, Copy)]
+enum FinishReason {
+    Stop,
+    ToolCalls,
+}
+
+fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<StreamOutcome> {
     let mut reader = BufReader::new(reader);
     let mut data = Vec::new();
     let mut total = 0u64;
-    let mut finished = false;
+    let mut finished = None;
+    let mut tool_calls = ToolCallAssembler::default();
     loop {
         let mut line = Vec::new();
         let size = reader
@@ -182,10 +201,16 @@ fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<()> 
                 data.pop();
             }
             if data == b"[DONE]" {
-                if !finished {
-                    return Err(Error::new("model stream completed without a finish reason"));
-                }
-                return Ok(());
+                return match finished {
+                    Some(FinishReason::Stop) if tool_calls.is_empty() => Ok(StreamOutcome::Stopped),
+                    Some(FinishReason::Stop) => Err(Error::new(
+                        "model tool calls require the tool_calls finish reason",
+                    )),
+                    Some(FinishReason::ToolCalls) => {
+                        tool_calls.finish().map(StreamOutcome::ToolCalls)
+                    }
+                    None => Err(Error::new("model stream completed without a finish reason")),
+                };
             }
             let chunk: Chunk = serde_json::from_slice(&data)
                 .map_err(|_| Error::new("invalid model response event"))?;
@@ -199,20 +224,24 @@ fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<()> 
                         "multiple model response choices are not supported",
                     ));
                 }
-                if choice.delta.tool_calls.is_some() || choice.delta.function_call.is_some() {
+                if finished.is_some() {
+                    return Err(Error::new("model sent a choice after finishing"));
+                }
+                if choice.delta.function_call.is_some() {
                     return Err(Error::new(
-                        "model requested a tool; tool execution is not implemented",
+                        "legacy model function_call is not supported; use tool_calls",
                     ));
                 }
+                if let Some(deltas) = choice.delta.tool_calls {
+                    tool_calls.extend(deltas)?;
+                }
                 if let Some(text) = choice.delta.content {
-                    if finished {
-                        return Err(Error::new("model sent text after finishing"));
-                    }
                     emit(sender, ResponseEvent::TextDelta(text))?;
                 }
                 if let Some(reason) = choice.finish_reason {
                     match reason.as_str() {
-                        "stop" => finished = true,
+                        "stop" => finished = Some(FinishReason::Stop),
+                        "tool_calls" => finished = Some(FinishReason::ToolCalls),
                         "length" => {
                             return Err(Error::new("model response truncated by its output limit"))
                         }
