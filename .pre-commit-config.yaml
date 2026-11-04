@@ -1,0 +1,19 @@
+# ahi reads this file (see docs/SPEC.md). `repo: local` `language: system`
+# hooks run only when ahi.policy.yaml pins the hook id and the exact entry
+# string. Entries mirror the `just lint` and `just test` recipes so local
+# checks match CI.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --all-features
+        language: system
+        pass_filenames: false
+        always_run: true

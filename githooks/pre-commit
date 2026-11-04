@@ -1,0 +1,20 @@
+#!/bin/sh
+# ahi pre-commit shim: run the hooks in .pre-commit-config.yaml.
+# `ahi hooks install` is an unimplemented stub in this version, so git is
+# wired directly via `git config core.hooksPath githooks`.
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+
+if command -v ahi >/dev/null 2>&1; then
+    exec ahi run
+fi
+
+for candidate in "$ROOT/target/release/ahi" "$ROOT/target/debug/ahi"; do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" run
+    fi
+done
+
+echo "ahi pre-commit: ahi not found on PATH or under target/." >&2
+echo "Run 'cargo build' in the repository, or install ahi." >&2
+exit 1
