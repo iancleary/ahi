@@ -52,6 +52,12 @@ pub(crate) enum ResponseEvent {
         cost_usd: Option<f64>,
     },
     ContextWindow(u64),
+    /// TODO(tool-runner): emit after EVERY tool call returns, including errors,
+    /// before continuing the assistant response. The UI rechecks Git HEAD
+    /// against its stored location snapshot; this is not a turn-completion event.
+    /// The echo backend has no tools and must not emit it.
+    #[allow(dead_code)] // Integration seam for the future tool runner.
+    ToolCallReturned,
     Completed,
     /// A completion that could not be produced. The stand-in backend does not emit this.
     #[allow(dead_code)]

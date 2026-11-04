@@ -11,7 +11,9 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import struct
+import subprocess
 import tempfile
 import time
 
@@ -29,12 +31,15 @@ def main() -> None:
     binary = args.binary.resolve(strict=True)
 
     class Session:
-        def __init__(self, state: Path, editor: Path | None = None) -> None:
+        def __init__(self, state: Path, editor: Path | None = None,
+                     cwd: Path | None = None, git_bin_dir: Path | None = None) -> None:
             self.pid, self.fd = pty.fork()
             if self.pid == 0:
                 env = os.environ.copy()
                 # Hide installed clipboard programs, and do not inherit an editor.
-                env.update(TERM="xterm-256color", PATH="/nonexistent")
+                env.update(TERM="xterm-256color", PATH=str(git_bin_dir) if git_bin_dir else "/nonexistent")
+                if cwd:
+                    os.chdir(cwd)
                 env.pop("VISUAL", None)
                 env.pop("EDITOR", None)
                 if editor:
@@ -354,13 +359,47 @@ def main() -> None:
             assert saved["providers"]["openai"]["api"] == "openai-completions"
         finally:
             session.close()
+        # Real read-only Git status in the displayed workspace. Only git is
+        # exposed on PATH, so clipboard/editor isolation stays intact.
+        git_executable = shutil.which("git")
+        assert git_executable, "git is required for the worktree-status smoke check"
+        git_bin_dir = state / "git-bin"
+        git_bin_dir.mkdir()
+        (git_bin_dir / "git").symlink_to(git_executable)
+        repo = state / "git-workspace"
+        repo.mkdir()
+
+        def git(*arguments: str) -> None:
+            subprocess.run([git_executable, *arguments], cwd=repo, check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        git("init", "-b", "main")
+        (repo / "tracked").write_text("staged\n")
+        git("add", "tracked")
+        (repo / "tracked").write_text("unstaged\n")
+        session = Session(state, cwd=repo, git_bin_dir=git_bin_dir)
+        try:
+            session.expect("curated models (Enter opens chat)")
+            session.send("j\r")
+            session.expect(" main +1 !1")
+            git("symbolic-ref", "HEAD", "refs/heads/tool-branch")
+            git("add", "tracked")
+            session.send("status recheck\r")
+            session.expect(" tool-branch +1")
+            session.expect("[stand-in] status recheck")
+            assert "!1" not in session.screen()
+            session.send("\x04")
+            session.finish()
+        finally:
+            session.close()
     print(
         "PASS: explicit refresh error, catalog browse/copy fallback, Space check/uncheck, "
         "Shift+arrows and Shift+j/k reorder, quit/restart persistence, embedded-slash IDs, "
         "missing-catalog ID retention/reorder/removal, save conflict/failure retention, "
         "editor resume/reload and byte preservation, "
         "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
-        "echo reply, /model local reload/switch/cancel, transcript retention, clean chat exit"
+        "echo reply, /model local reload/switch/cancel, transcript retention, clean chat exit, "
+        "real Git counts and branch/status refresh on message submission"
     )
 
 

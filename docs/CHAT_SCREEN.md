@@ -8,7 +8,7 @@ Status: Part 1 (screen with a stand-in backend) is implemented. Part 2 (real com
 
 ## Layout
 
-Reference: Ian's screenshot of pi.dev's Claude Code-style screen. Match that arrangement.
+The transcript/input follow the pi.dev/Claude Code-style reference. The footer groups workspace context on the left and session context on the right, with the model above usage.
 
 ```
   conversation transcript (scrolls, no frame)
@@ -18,8 +18,8 @@ Reference: Ian's screenshot of pi.dev's Claude Code-style screen. Match that arr
 ────────────────────────────────────────────────────────────────
 █ input (no frame, no prompt character)
 ────────────────────────────────────────────────────────────────
-~/Work/gh/ahi (main)
-↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)     (openai) gpt-6.1-sol • medium
+  ~/Work/gh/ahi on   main !6                   (openai) gpt-6.1-sol • medium
+                                 ↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)
 ```
 
 From top to bottom:
@@ -27,8 +27,8 @@ From top to bottom:
 1. **Transcript.** Every row not used below, with no frame. Pinned to the bottom unless the operator has scrolled up.
 2. **Activity row.** A spinner and `Working` while a response is in progress. Blank otherwise.
 3. **Input.** A full-width horizontal rule above and below, in the accent color (cyan), with no side borders and no prompt character. Starts at one row and grows to at most 8 rows. Past 8 rows the input scrolls internally so the cursor stays in view.
-4. **Location row.** The working directory (home shortened to `~`), then the git branch in parentheses. A detached HEAD shows the short commit id. Outside a repository, only the directory is shown. Shorten from the left with `…` when narrow.
-5. **Session row**, left segment, in order, separated by single spaces:
+4. **Workspace/model row.** The left side is a Powerlevel10k-style Nerd Font location: OS logo, folder icon, working directory (home shortened to `~`), then `on  ` and the git branch. Arch Linux uses ``; other platforms use their own logo or a generic fallback. A detached HEAD shows the short commit id instead of the branch. Outside a repository, omit the git segment. Use the operator's Powerlevel10k-style palette at normal brightness: terminal-default distro logo, blue path/folder (256-color index 31), brighter bold repository name (39), and green Git icons/branch (76). Follow the branch with nonzero Powerlevel10k worktree counts, in order: red `~N` conflicts (196), yellow `+N` staged and `!N` unstaged (178), blue `?N` untracked (39). A file can count as both staged and unstaged. Counts refer to files, not lines; a rename counts once. Clean worktrees omit markers. If status cannot be read, show `status unavailable` instead of implying clean. On the right, show `(gateway) model • thinking-level`, right-aligned. Reserve its width first, with a gap from the workspace; shorten the workspace from the left with `…` when narrow, preserving visible colors.
+5. **Usage row**, below the model and right-aligned to the same edge, in order, separated by single spaces:
    - `↑<n>` session input tokens
    - `↓<n>` session output tokens
    - `R<n>` cached input tokens read
@@ -37,11 +37,9 @@ From top to bottom:
    - `(auto)` when automatic context compaction is on (display only until compaction exists)
 
    Counts use `k` and `M` suffixes with at most one decimal. An unknown value is omitted together with its label, never shown as zero.
-   Right segment: `(gateway) model • thinking-level`, right-aligned.
+   When the row is too narrow, drop whole fields from the right end (`(auto)` first, then context, cost, cache read) until it fits, never wrapping into the transcript or shifting the model. Usage has its own row and no longer competes with the model for horizontal space.
 
-   When the row is too narrow, drop left-segment fields from the right end (`(auto)` first, then context, cost, cache read) until it fits. If the input and output counts still leave no room for the whole model segment, those counts are omitted as well. The model segment is never truncated.
-
-Both status rows use the dim style except the model segment.
+The location row uses the colors above, not dim styling. Session usage counters remain dim. The provider/model/thinking segment uses muted lavender-blue (256-color index 103) with the dim style.
 
 ## Keys
 
@@ -89,6 +87,7 @@ pub enum ResponseEvent {
     TextDelta(String),
     Usage { input_tokens: u64, output_tokens: u64, cached_input_tokens: Option<u64>, cost_usd: Option<f64> },
     ContextWindow(u64),
+    ToolCallReturned, // future runner: every return, including failures
     Completed,
     Failed(String),
 }
@@ -99,6 +98,8 @@ pub trait CompletionBackend {
 ```
 
 The screen drains the receiver on each frame tick (about 50 ms), so the user interface never blocks on the backend. No async runtime is added.
+
+**Future tool-runner hook:** `ResponseEvent::ToolCallReturned` is an explicit integration stub. The future runner must emit it after every tool call returns (success or failure), before resuming the assistant response. Its handler reads the current directory/Git HEAD and worktree counts, compares them with the screen's stored snapshot, and updates changed values for the next redraw. It does not end the response or clear the transcript. Location/status are also refreshed at chat load and on normal message submission, not polled on frame ticks. HEAD is read directly; file counts use local `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z --untracked-files=all`. This reads the worktree without optional index writes or network requests. Parsing uses NUL-delimited bytes so spaces, newlines, non-UTF-8 names, renames, and conflicts are counted correctly. Ahead/behind, stash counts, and in-progress Git actions are not displayed yet. The echo backend emits no tool events; actual tool execution and a tool-driven branch-change integration test remain future work.
 
 ### Stand-in backend (part 1)
 
@@ -116,7 +117,7 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 ## Implementation constraints
 
 - No new dependencies. The input box is a small editor in `src/chat/input.rs` (a `Vec<String>` of lines and a cursor) on top of `ratatui` 0.30.0 and `crossterm` 0.29.0, which are already pinned. Do not add `tui-textarea` or an async runtime. The editor accepts an `EditorKey`. `src/chat/key_binding.rs` translates a terminal key into a `KeyAction`, which carries that `EditorKey` when the key edits the input.
-- The git branch is read from the repository's `HEAD` file, following a `gitdir:` file for worktrees, using the existing `src/git.rs` helpers where they fit. Do not spawn `git` on each frame; read once at start and again after each submitted message.
+- Read the Git branch from `HEAD`, following `gitdir:` indirection for worktrees. Read worktree counts with read-only porcelain status. Refresh at chat load, normal message submission, and the future `ToolCallReturned` event, never on frame ticks.
 - Keep the screen state in a plain struct (`ChatScreen`) separate from drawing, so key handling and layout are testable without a terminal.
 - Names follow the project naming rule: precise, descriptive, no slang (`CompletionBackend`, `EchoBackend`, `ThinkingLevel`, `render_session_row`).
 - `unsafe_code` stays forbidden. Clippy must pass with the existing lint set.
@@ -133,13 +134,13 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 | `transcript.rs` | Messages, wrapping, and the scroll window. It returns plain text |
 | `status.rs` | Location-row and session-row text |
 | `usage.rs` | Session token, cost, and context figures |
-| `location.rs` | Working directory and the git label read from `HEAD` |
+| `location.rs` | Working directory, Git label from `HEAD`, and read-only worktree change counts |
 | `command.rs` | Parsing of `/model`, `/thinking`, `/clear`, and `/exit` |
 | `thinking.rs` | `ThinkingLevel` and `<state>/thinking` |
 | `backend/mod.rs` | `CompletionBackend`, `ChatRequest`, and `ResponseEvent` |
 | `backend/echo.rs` | `EchoBackend`, the stand-in |
 
-`mod.rs` may import `ratatui` and `crossterm`. `key_binding.rs` may import `crossterm` and must not import `ratatui`. `status.rs` may import either; it currently imports neither and returns row text, and `mod.rs` applies the dim and normal styles when it draws. `transcript.rs` does not either: wrapping produces strings, and `mod.rs` places that string in a paragraph. `input.rs`, `usage.rs`, `command.rs`, `thinking.rs`, `location.rs`, and `backend/` are plain logic.
+`mod.rs` may import `ratatui` and `crossterm`. `key_binding.rs` may import `crossterm` and must not import `ratatui`. `status.rs` may import either; it returns styled location spans and session row text. `mod.rs` applies dim usage styling and the muted model color when it draws. `transcript.rs` does not either: wrapping produces strings, and `mod.rs` places that string in a paragraph. `input.rs`, `usage.rs`, `command.rs`, `thinking.rs`, `location.rs`, and `backend/` have no terminal-rendering dependencies. `location.rs` owns the filesystem/subprocess boundary for the workspace snapshot.
 
 ## Tests (part 1)
 
@@ -147,8 +148,8 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 - The input box grows to 8 rows and no further.
 - Commands: `/model`, `/thinking high`, `/thinking`, `/clear`, `/exit`, and an unknown command, each without a terminal.
 - The thinking level is persisted to `<state>/thinking` and read back. An invalid file falls back to `medium`.
-- Layout using `ratatui::backend::TestBackend`: at 120 columns with every usage field known, the session row matches the reference ordering exactly. At 60 columns, fields are dropped from the right end of the left segment and the model segment is kept whole. Fields with unknown values are omitted, not shown as zero.
-- The location row shows the branch for a fixture repository, the short commit id for a detached HEAD, and no parentheses outside a repository.
+- Layout using `ratatui::backend::TestBackend`: workspace and muted model share the top footer row, while dim usage appears below with the same right edge. Usage fields follow the reference ordering and drop as whole fields when narrow. Unknown values are omitted, not shown as zero. Model placement is independent of changing usage counts.
+- The location row renders the Powerlevel10k-style directory and branch for a fixture repository, the short commit id for a detached HEAD, and no git segment outside a repository.
 - `EchoBackend` produces deltas, usage, and completion in order, and the first reply carries the stand-in note.
 - Piped `ahi tui` output is byte-identical to v0.2.0.
 

@@ -197,6 +197,9 @@ mod tests {
                     collected.kinds.push(EventKind::Window);
                     collected.window = Some(window);
                 }
+                ResponseEvent::ToolCallReturned => {
+                    panic!("echo backend must not emit tool lifecycle events");
+                }
                 ResponseEvent::Completed => {
                     collected.kinds.push(EventKind::Completed);
                     break;

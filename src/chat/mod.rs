@@ -24,9 +24,9 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 
 use crossterm::event::{Event, KeyEvent};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use backend::{
@@ -65,8 +65,9 @@ struct ChatScreen {
     thinking: ThinkingLevel,
     messages: Vec<ChatMessage>,
     input: InputEditor,
+    location_os_icon: &'static str,
     location_directory: String,
-    location_git: Option<String>,
+    location_git: Option<location::GitStatus>,
     meters: SessionMeters,
     response_in_progress: bool,
     receiver: Option<Receiver<ResponseEvent>>,
@@ -86,6 +87,7 @@ impl ChatScreen {
             thinking,
             messages: Vec::new(),
             input: InputEditor::new(),
+            location_os_icon: location::os_icon(),
             location_directory: String::new(),
             location_git: None,
             meters: SessionMeters::default(),
@@ -274,33 +276,34 @@ impl ChatScreen {
         ));
         frame.render_widget(Paragraph::new(rule).style(accent), chunks[4]);
 
-        let dim = Style::default().add_modifier(Modifier::DIM);
+        let model = Line::styled(
+            status::session_model_segment(&self.selection, self.thinking),
+            Style::default()
+                .fg(Color::Indexed(103))
+                .add_modifier(Modifier::DIM),
+        );
+        // Reserve the model first, including a gap from the workspace. Usage
+        // gets its own row so changing counts never move the model sideways.
+        let model_width = model
+            .width()
+            .saturating_add(1)
+            .min(chunks[5].width as usize) as u16;
+        let top = Layout::horizontal([Constraint::Min(0), Constraint::Length(model_width)])
+            .split(chunks[5]);
         let location = status::render_location_row(
-            chunks[5].width as usize,
+            top[0].width as usize,
+            self.location_os_icon,
             &self.location_directory,
-            self.location_git.as_deref(),
+            self.location_git.as_ref(),
         );
-        frame.render_widget(Paragraph::new(location).style(dim), chunks[5]);
+        frame.render_widget(Paragraph::new(location), top[0]);
+        frame.render_widget(Paragraph::new(model).alignment(Alignment::Right), top[1]);
 
-        let session = status::render_session_row(
-            chunks[6].width as usize,
-            &self.meters,
-            &self.selection,
-            self.thinking,
-        );
-        let model_at = session
-            .rfind(&status::session_model_segment(
-                &self.selection,
-                self.thinking,
-            ))
-            .unwrap_or(session.len());
-        let left = session.chars().take(model_at).collect::<String>();
-        let right = session.chars().skip(model_at).collect::<String>();
+        let usage = status::render_usage_row(chunks[6].width as usize, &self.meters);
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(left, dim),
-                Span::styled(right, Style::default()),
-            ])),
+            Paragraph::new(usage)
+                .alignment(Alignment::Right)
+                .style(Style::default().add_modifier(Modifier::DIM)),
             chunks[6],
         );
     }
@@ -403,6 +406,12 @@ impl ChatScreen {
                 self.meters.set_context_window(window);
                 false
             }
+            ResponseEvent::ToolCallReturned => {
+                // A tool may change HEAD even when it reports an error.
+                // Refresh once per return, never on the rendering timer.
+                self.refresh_location();
+                false
+            }
             ResponseEvent::Completed => {
                 transcript::attach_stand_in_note(&mut self.messages);
                 true
@@ -422,9 +431,11 @@ impl ChatScreen {
     }
 
     fn refresh_location(&mut self) {
-        let (directory, git_label) = location::current();
-        self.location_directory = directory;
-        self.location_git = git_label;
+        let (directory, git_status) = location::current();
+        if self.location_directory != directory || self.location_git != git_status {
+            self.location_directory = directory;
+            self.location_git = git_status;
+        }
     }
 
     fn clamp_scroll(&mut self) {
@@ -671,13 +682,21 @@ mod tests {
         let _ = fs::remove_dir_all(state);
     }
 
+    fn clean_main() -> location::GitStatus {
+        location::GitStatus {
+            label: "main".to_string(),
+            changes: Some(location::GitChanges::default()),
+        }
+    }
+
     #[test]
     fn drawn_screen_has_rules_activity_and_an_unframed_input() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-draw");
         let mut screen = screen_in(&state);
         screen.set_selection("openai/gpt-6.1-sol");
+        screen.location_os_icon = "";
         screen.location_directory = "~/Work/gh/ahi".to_string();
-        screen.location_git = Some("main".to_string());
+        screen.location_git = Some(clean_main());
         screen.set_meters(SessionMeters {
             input_tokens: Some(139_000),
             output_tokens: Some(11_000),
@@ -705,11 +724,12 @@ mod tests {
         assert!(idle
             .iter()
             .all(|line| !line.contains('│') && !line.contains('┌')));
-        assert!(idle[idle.len() - 2].contains("(main)"));
-        assert!(idle
-            .last()
-            .unwrap()
-            .ends_with("(openai) gpt-6.1-sol • medium"));
+        assert!(idle[idle.len() - 2].starts_with("  ~/Work/gh/ahi on   main"));
+        assert!(idle[idle.len() - 2].ends_with("(openai) gpt-6.1-sol • medium"));
+        assert_eq!(
+            idle.last().unwrap().trim(),
+            "↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)"
+        );
 
         screen.response_in_progress = true;
         let working = draw_lines(&mut screen, 120, 16);
@@ -719,6 +739,66 @@ mod tests {
             working[working.len() - 6]
         );
         let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn unicode_status_rows_keep_location_colors_and_muted_model_boundary() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-status-style");
+        let mut screen = screen_in(&state);
+        screen.set_selection("openai/gpt-6.1-sol");
+        screen.location_os_icon = "";
+        screen.location_directory = "~/Work/gh/ahi".to_string();
+        screen.location_git = Some(location::GitStatus {
+            label: "main".to_string(),
+            changes: Some(location::GitChanges {
+                unstaged: 6,
+                ..location::GitChanges::default()
+            }),
+        });
+        screen.set_meters(SessionMeters {
+            input_tokens: Some(5),
+            output_tokens: Some(5),
+            context_tokens: Some(10),
+            context_window: Some(128_000),
+            ..SessionMeters::default()
+        });
+        for width in [80, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+            terminal.draw(|frame| screen.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let location_text: String = (0..width).map(|x| buffer[(x, 14)].symbol()).collect();
+            assert!(location_text.starts_with("  ~/Work/gh/ahi on   main !6"));
+            for (prefix, expected_color) in [
+                ("", Color::Reset),
+                (" ", Color::Indexed(31)),
+                ("  ~/Work/gh/", Color::Indexed(39)),
+                ("  ~/Work/gh/ahi on ", Color::Indexed(76)),
+                ("  ~/Work/gh/ahi on   ", Color::Indexed(76)),
+                ("  ~/Work/gh/ahi on   main ", Color::Indexed(178)),
+            ] {
+                let cell = &buffer[(prefix.chars().count() as u16, 14)];
+                assert_eq!(cell.fg, expected_color);
+                assert!(!cell.modifier.contains(Modifier::DIM));
+            }
+            let usage_text: String = (0..width).map(|x| buffer[(x, 15)].symbol()).collect();
+            assert_eq!(usage_text.trim_start(), "↑5 ↓5 0%/128k");
+            let usage_start = width - "↑5 ↓5 0%/128k".chars().count() as u16;
+            assert_eq!(buffer[(usage_start, 15)].symbol(), "↑");
+            assert!(buffer[(usage_start, 15)].modifier.contains(Modifier::DIM));
+            let expected = "(openai) gpt-6.1-sol • medium";
+            let start = width - expected.chars().count() as u16;
+            for (offset, character) in expected.chars().enumerate() {
+                let cell = &buffer[(start + offset as u16, 14)];
+                assert_eq!(cell.symbol(), character.to_string());
+                assert_eq!(
+                    cell.fg,
+                    Color::Indexed(103),
+                    "model character {character:?} has wrong color at width {width}"
+                );
+                assert!(cell.modifier.contains(Modifier::DIM));
+            }
+        }
+        fs::remove_dir_all(state).unwrap();
     }
 
     fn draw_lines(screen: &mut ChatScreen, width: u16, height: u16) -> Vec<String> {
@@ -733,6 +813,45 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn narrow_footer_reserves_the_model_above_usage() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-narrow-footer");
+        let mut screen = screen_in(&state);
+        screen.set_selection("openai/gpt-6.1-sol");
+        screen.location_os_icon = "";
+        screen.location_directory = "~/Work/gh/ahi".to_string();
+        screen.location_git = Some(clean_main());
+        screen.set_meters(SessionMeters {
+            input_tokens: Some(5),
+            output_tokens: Some(5),
+            context_tokens: Some(10),
+            context_window: Some(128_000),
+            ..SessionMeters::default()
+        });
+        let rows = draw_lines(&mut screen, 40, 16);
+        assert_eq!(rows[14], "…   main (openai) gpt-6.1-sol • medium");
+        assert_eq!(rows[15].trim_start(), "↑5 ↓5 0%/128k");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn tool_return_does_not_end_or_split_the_assistant_response() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-tool-return");
+        let mut screen = screen_in(&state);
+        assert!(!screen.apply_event(ResponseEvent::TextDelta("before".to_string())));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallReturned));
+        assert!(!screen.apply_event(ResponseEvent::TextDelta(" after".to_string())));
+        assert_eq!(
+            screen
+                .messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["before after"]
+        );
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
