@@ -216,9 +216,8 @@ def main() -> None:
             assert "[stand-in]" not in session.screen()
             assert "128k" not in session.screen()
             session.send("\x03merge smoke\r")  # Clear draft, then submit a message.
-            session.expect("[stand-in] merge smoke")
-            session.expect("replies and token counts are not from a model")
-            session.expect("0% / 128k ──")
+            session.expect("OpenAI browser-login inference is not implemented yet")
+            assert "128k" not in session.screen()  # Never invent model context/usage.
             rows = session.screen().splitlines()
             assert rows[-1].endswith("(openai) vendor/model/variant • medium")
             assert all(character == "─" for character in rows[-2])
@@ -238,7 +237,7 @@ def main() -> None:
             assert "catalog-only" not in session.screen()
             session.send("jj\r")
             session.expect("(openai) fresh/from-disk • medium")
-            session.expect("[stand-in] merge smoke")  # Transcript survived switching.
+            session.expect("merge smoke")  # Transcript survived switching.
             assert (state / "selection").read_text() == "openai/fresh/from-disk\n"
             session.send("/model\r")
             session.expect("curated models (Enter opens chat)")
@@ -403,7 +402,7 @@ def main() -> None:
             git("add", "tracked")
             session.send("status recheck\r")
             session.expect(" tool-branch +1")
-            session.expect("[stand-in] status recheck")
+            session.expect("OpenAI browser-login inference is not implemented yet")
             assert "!1" not in session.screen()
             session.send("\x04")
             session.finish()
@@ -415,7 +414,7 @@ def main() -> None:
         "missing-catalog ID retention/reorder/removal, save conflict/failure retention, "
         "editor resume/reload and byte preservation, "
         "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
-        "echo reply, /model local reload/switch/cancel, transcript retention, clean chat exit, "
+        "explicit unsupported-provider error, /model local reload/switch/cancel, transcript retention, clean chat exit, "
         "real Git counts and branch/status refresh on message submission, "
         "single-row footer, context in the input rule, and pre-submit draft wrapping/growth"
     )

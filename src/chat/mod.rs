@@ -1,8 +1,7 @@
 //! Conversation screen shown after the model picker.
 //!
-//! Part 1 draws the screen and answers through `EchoBackend`. That backend
-//! echoes the operator's text and reports synthetic token counts. It does not
-//! call a model and it does not use the network.
+//! Registered gateways stream real model responses through `HttpBackend`.
+//! OpenAI browser-login inference and tool execution are not implemented yet.
 //!
 //! Terminal drawing stays in this module. Key codes are translated by
 //! `key_binding` before the screen applies them.
@@ -34,7 +33,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use backend::{
-    parse_selection, ChatRequest, CompletionBackend, EchoBackend, ResponseEvent, Selection,
+    parse_selection, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent, Selection,
 };
 use command::ParsedCommand;
 use input::InputEditor;
@@ -362,6 +361,11 @@ impl ChatScreen {
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
+        // Keep the draft intact until the active turn ends; never launch a second
+        // billed request while discarding the first turn's receiver.
+        if self.response_in_progress {
+            return Ok(ScreenAction::Continue);
+        }
         let text = self.input.contents();
         if text.trim().is_empty() {
             return Ok(ScreenAction::Continue);
@@ -480,10 +484,7 @@ impl ChatScreen {
                 self.refresh_location();
                 false
             }
-            ResponseEvent::Completed => {
-                transcript::attach_stand_in_note(&mut self.messages);
-                true
-            }
+            ResponseEvent::Completed => true,
             ResponseEvent::Failed(message) => {
                 self.push_notice(message);
                 true
@@ -536,7 +537,7 @@ pub(crate) fn interact(
     mut reopen_picker: impl FnMut() -> Result<Option<String>>,
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
-    let mut backend = EchoBackend::new();
+    let mut backend = HttpBackend::new(state_dir.to_path_buf());
     loop {
         let mut terminal =
             ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
@@ -565,7 +566,7 @@ pub(crate) fn interact(
 fn session_loop(
     terminal: &mut ratatui::DefaultTerminal,
     screen: &mut ChatScreen,
-    backend: &mut EchoBackend,
+    backend: &mut dyn CompletionBackend,
 ) -> Result<SessionEnd> {
     loop {
         terminal
@@ -588,13 +589,10 @@ fn session_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::transcript::STAND_IN_NOTE;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::fs;
     use std::sync::mpsc::{self, Receiver};
-    use std::thread;
-    use std::time::Duration;
 
     struct RecordingBackend {
         requests: Vec<ChatRequest>,
@@ -1232,45 +1230,24 @@ mod tests {
     }
 
     #[test]
-    fn echo_backend_streams_usage_then_completion_and_notes_the_first_reply() {
-        let state = crate::fixture_directory::create_unique_fixture_directory("chat-echo");
+    fn submitting_during_a_turn_preserves_the_draft_and_active_request() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-busy");
         let mut screen = screen_in(&state);
-        screen.set_input_text("hello!!!!");
-        let mut live = EchoBackend::new();
-        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while screen.response_in_progress() && std::time::Instant::now() < deadline {
-            screen.poll_backend();
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert!(!screen.response_in_progress());
-        let assistant = screen
-            .messages()
-            .iter()
-            .find(|message| message.role == TranscriptRole::Assistant)
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
             .unwrap();
-        assert!(assistant.text.starts_with("[stand-in] hello!!!!"));
-        assert!(assistant.text.contains(STAND_IN_NOTE));
-        assert_eq!(screen.meters().input_tokens, Some(2));
-        assert_eq!(screen.meters().cached_input_tokens, None);
-        assert_eq!(screen.meters().cost_usd, None);
-        assert_eq!(screen.meters().context_window, Some(128_000));
-
-        screen.set_input_text("/clear");
-        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
-        screen.set_input_text("again!!!");
-        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while screen.response_in_progress() && std::time::Instant::now() < deadline {
-            screen.poll_backend();
-            thread::sleep(Duration::from_millis(5));
-        }
-        let assistant = screen
-            .messages()
-            .iter()
-            .find(|message| message.role == TranscriptRole::Assistant)
+        screen.set_input_text("next");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
             .unwrap();
-        assert!(assistant.text.contains(STAND_IN_NOTE));
-        let _ = fs::remove_dir_all(state);
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(backend.requests[0].messages[0].text, "first");
+        assert_eq!(screen.input.contents(), "next");
+        assert!(screen.response_in_progress());
+        fs::remove_dir_all(state).unwrap();
     }
 }

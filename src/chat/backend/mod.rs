@@ -3,11 +3,11 @@
 //! The screen drains a `std::sync::mpsc::Receiver` on each frame. No async
 //! runtime is involved.
 
-mod echo;
+mod http;
 
 use std::sync::mpsc::Receiver;
 
-pub(crate) use echo::EchoBackend;
+pub(crate) use http::HttpBackend;
 
 use super::thinking::ThinkingLevel;
 use super::transcript::ChatMessage;
@@ -51,11 +51,11 @@ pub(crate) enum ResponseEvent {
         cached_input_tokens: Option<u64>,
         cost_usd: Option<f64>,
     },
+    #[allow(dead_code)] // Awaiting authoritative model capability metadata.
     ContextWindow(u64),
     /// TODO(tool-runner): emit after EVERY tool call returns, including errors,
     /// before continuing the assistant response. The UI rechecks Git HEAD
     /// against its stored location snapshot; this is not a turn-completion event.
-    /// The echo backend has no tools and must not emit it.
     #[allow(dead_code)] // Integration seam for the future tool runner.
     ToolCallReturned,
     /// Output from a completed tool invocation; nonzero exit codes indicate failure.
@@ -65,8 +65,7 @@ pub(crate) enum ResponseEvent {
         exit_code: i32,
     },
     Completed,
-    /// A completion that could not be produced. The stand-in backend does not emit this.
-    #[allow(dead_code)]
+    /// A completion that could not be produced.
     Failed(String),
 }
 

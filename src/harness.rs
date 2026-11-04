@@ -20,6 +20,85 @@ use crate::error::{Error, Result};
 mod curation;
 mod openai;
 
+/// Resolved only when submitting a turn. Never log or debug-print credentials.
+pub(crate) struct CompletionConnection {
+    pub(crate) url: String,
+    pub(crate) headers: BTreeMap<String, String>,
+}
+
+pub(crate) fn completion_connection(
+    state: &Path,
+    provider: &str,
+    model: &str,
+) -> Result<CompletionConnection> {
+    if provider == OPENAI_ID {
+        return Err(Error::new("OpenAI browser-login inference is not implemented yet; select a configured OpenAI-compatible gateway"));
+    }
+    let bytes = read_models_bytes(state)?;
+    let file = parse_models(state, bytes.as_deref())?;
+    let entry = file
+        .providers
+        .get(provider)
+        .ok_or_else(|| Error::new("selected gateway is not registered in models.json"))?;
+    if !entry.models.iter().any(|choice| choice.id == model) {
+        return Err(Error::new(
+            "selected model is no longer curated in models.json; reopen /model",
+        ));
+    }
+    if entry.base_url.contains(['?', '#', '\\']) || entry.base_url.chars().any(char::is_control) {
+        return Err(Error::new("inference baseUrl must not contain a query, fragment, backslash, or control characters"));
+    }
+    let mut headers = BTreeMap::new();
+    if let Some(key) = &entry.api_key {
+        headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {}", resolve_marker(key)?),
+        );
+    }
+    for (name, value) in &entry.headers {
+        let name = name.to_ascii_lowercase();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+            || matches!(
+                name.as_str(),
+                "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+                    | "content-type"
+                    | "accept"
+            )
+        {
+            return Err(Error::new("invalid or reserved inference header name"));
+        }
+        if headers.insert(name, resolve_marker(value)?).is_some() {
+            return Err(Error::new("duplicate inference header"));
+        }
+    }
+    Ok(CompletionConnection {
+        url: format!("{}/chat/completions", entry.base_url.trim_end_matches('/')),
+        headers,
+    })
+}
+
+fn resolve_marker(value: &str) -> Result<String> {
+    let resolved = if let Some(name) = value.strip_prefix('$') {
+        std::env::var(name).map_err(|_| {
+            Error::new("inference credential environment variable is missing or not Unicode")
+        })?
+    } else {
+        value.to_string()
+    };
+    if resolved.trim().is_empty() || resolved.chars().any(char::is_control) {
+        return Err(Error::new(
+            "inference credential is empty or contains control characters",
+        ));
+    }
+    Ok(resolved)
+}
+
 pub use curation::save_curated_models;
 
 pub const OPENAI_ID: &str = "openai";
