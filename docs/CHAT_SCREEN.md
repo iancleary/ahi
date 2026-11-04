@@ -14,8 +14,7 @@ The transcript/input follow the pi.dev/Claude Code-style reference. The single-r
   conversation transcript (scrolls, no frame)
   tool output and diffs render as shaded blocks
 
-⠋ Working
-──────────────────────────────────────────────── 28.4% / 272k ──
+⠋ Working ────────────────────────────────────── 28.4% / 272k ──
 █ input (no frame, no prompt character)
 ────────────────────────────────────────────────────────────────
   ~/Work/gh/ahi on   main !6     (openai) gpt-6.1-sol • medium
@@ -24,9 +23,10 @@ The transcript/input follow the pi.dev/Claude Code-style reference. The single-r
 From top to bottom:
 
 1. **Transcript.** Every row not used below, with no frame. Pinned to the bottom unless the operator has scrolled up.
-2. **Activity row.** A spinner and `Working` while a response is in progress. Blank otherwise.
-3. **Input.** A full-width horizontal rule above and below, in the accent color (cyan), with no side borders and no prompt character. Embed known context usage, such as `28.4% / 272k`, near the right end of the upper rule. Use muted lavender-blue (256-color index 103) with dim styling, one space around the label, and two trailing rule cells. Leave at least two leading rule cells. On narrow terminals, compact to percentage only, then omit the label if even that cannot fit; never wrap. Unknown usage, unknown capacity, or zero capacity leaves a plain rule, while known zero usage displays `0%`. No warning thresholds are invented. Input starts at one row and grows to at most 8 rows. Past 8 rows it scrolls internally so the cursor stays in view.
-4. **Workspace/model row.** The left side is a Powerlevel10k-style Nerd Font location: OS logo, folder icon, working directory (home shortened to `~`), then `on  ` and the git branch. Arch Linux uses ``; other platforms use their own logo or a generic fallback. A detached HEAD shows the short commit id instead of the branch. Outside a repository, omit the git segment. Use the operator's Powerlevel10k-style palette at normal brightness: terminal-default distro logo, blue path/folder (256-color index 31), brighter bold repository name (39), and green Git icons/branch (76). Follow the branch with nonzero Powerlevel10k worktree counts, in order: red `~N` conflicts (196), yellow `+N` staged and `!N` unstaged (178), blue `?N` untracked (39). A file can count as both staged and unstaged. Counts refer to files, not lines; a rename counts once. Clean worktrees omit markers. If status cannot be read, show `status unavailable` instead of implying clean. On the right, show `(gateway) model • thinking-level`, right-aligned. Reserve its width first, with a gap from the workspace; shorten the workspace from the left with `…` when narrow, preserving visible colors.
+2. **Input.** A full-width horizontal rule above and below, in the accent color (cyan), with no side borders and no prompt character. Embed known context usage, such as `28.4% / 272k`, near the right end of the upper rule. Use muted lavender-blue (256-color index 103) with dim styling, one space around the label, and two trailing rule cells. Leave at least two leading rule cells. On narrow terminals, compact to percentage only, then omit the label if even that cannot fit; never wrap. Unknown usage, unknown capacity, or zero capacity leaves a plain rule, while known zero usage displays `0%`. No warning thresholds are invented. While a response is active, animate a cyan spinner and `Working` at the upper rule's left edge, opposite context; remove it on completion. In very narrow terminals show only the spinner, and shorten/hide context rather than overlap it. There is no separate activity row.
+
+   Drafts soft-wrap before submission, measuring terminal cells and preserving Unicode grapheme clusters. The box grows upward from one to at most eight visual rows, moving its upper rule upward while leaving the footer and lower rule anchored. Taller drafts scroll internally to keep the insertion cursor visible; short terminals further reduce the viewport. Resizing reflows the draft without changing its contents. Visual wrapping never inserts submitted newlines; Shift+Enter still inserts a real newline. An insertion cursor after a completely full row gets a new visual row.
+3. **Workspace/model row.** The left side is a Powerlevel10k-style Nerd Font location: OS logo, folder icon, working directory (home shortened to `~`), then `on  ` and the git branch. Arch Linux uses ``; other platforms use their own logo or a generic fallback. A detached HEAD shows the short commit id instead of the branch. Outside a repository, omit the git segment. Use the operator's Powerlevel10k-style palette at normal brightness: terminal-default distro logo, blue path/folder (256-color index 31), brighter bold repository name (39), and green Git icons/branch (76). Follow the branch with nonzero Powerlevel10k worktree counts, in order: red `~N` conflicts (196), yellow `+N` staged and `!N` unstaged (178), blue `?N` untracked (39). A file can count as both staged and unstaged. Counts refer to files, not lines; a rename counts once. Clean worktrees omit markers. If status cannot be read, show `status unavailable` instead of implying clean. On the right, show `(gateway) model • thinking-level`, right-aligned. Reserve its width first, with a gap from the workspace; shorten the workspace from the left with `…` when narrow, preserving visible colors.
 There is no second footer row. Cumulative input/output tokens, cache counts, cost, subscription, and compaction indicators are not permanently displayed. Backend accounting remains available internally; an on-demand usage view is future work, not implemented here. Context used is the input token count of the latest response, not the cumulative session total; capacity uses `k`/`M` suffixes with at most one decimal.
 
 The workspace uses the colors above at normal brightness. The provider/model/thinking segment remains muted lavender-blue (256-color index 103) with dim styling.
@@ -38,7 +38,7 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 | `Enter` | Submit the input. An empty or whitespace-only input does nothing. |
 | `Shift+Enter`, `Alt+Enter` | Insert a newline. Both are accepted because many terminals do not report `Shift+Enter`. |
 | `Ctrl+J` | Insert a newline (fallback for terminals that report neither). |
-| `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete` | Edit within the input. `Up` and `Down` move between input lines. |
+| `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete` | Edit within the input. `Up` and `Down` move between visual input rows, including soft-wrapped rows. |
 | `PageUp`, `PageDown` | Scroll the transcript. |
 | `Ctrl+T` | Cycle the thinking level. |
 | `Ctrl+C` | Clear the input if it is not empty. Otherwise exit. |
@@ -106,7 +106,7 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 
 ## Implementation constraints
 
-- No new dependencies. The input box is a small editor in `src/chat/input.rs` (a `Vec<String>` of lines and a cursor) on top of `ratatui` 0.30.0 and `crossterm` 0.29.0, which are already pinned. Do not add `tui-textarea` or an async runtime. The editor accepts an `EditorKey`. `src/chat/key_binding.rs` translates a terminal key into a `KeyAction`, which carries that `EditorKey` when the key edits the input.
+- Reuse the existing dependency graph. The input box is a small editor in `src/chat/input.rs` (logical lines, cursor, and a separate visual layout) on top of pinned `ratatui` 0.30.0 and `crossterm` 0.29.0. Cell-aware wrapping directly uses `unicode-segmentation` 1.12.0 and `unicode-width` 0.2.0, both already resolved in Cargo.lock; no new package versions are introduced. Do not add `tui-textarea` or an async runtime. The editor accepts an `EditorKey`. `src/chat/key_binding.rs` translates a terminal key into a `KeyAction`, which carries that `EditorKey` when the key edits the input.
 - Read the Git branch from `HEAD`, following `gitdir:` indirection for worktrees. Read worktree counts with read-only porcelain status. Refresh at chat load, normal message submission, and the future `ToolCallReturned` event, never on frame ticks.
 - Keep the screen state in a plain struct (`ChatScreen`) separate from drawing, so key handling and layout are testable without a terminal.
 - Names follow the project naming rule: precise, descriptive, no slang (`CompletionBackend`, `EchoBackend`, `ThinkingLevel`, `render_session_row`).
@@ -120,7 +120,7 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 |---|---|
 | `mod.rs` | `ChatScreen` state, the frame loop, applying a `KeyAction`, and drawing |
 | `key_binding.rs` | Translates a crossterm key into a `KeyAction` |
-| `input.rs` | The line editor. It accepts an `EditorKey`, not a terminal event |
+| `input.rs` | Logical-line editor, cell-aware soft wrapping, visual cursor navigation, and bounded viewport. It accepts an `EditorKey`, not a terminal event |
 | `transcript.rs` | Messages, wrapping, and the scroll window. It returns plain text |
 | `status.rs` | Location-row and session-row text |
 | `usage.rs` | Session token, cost, and context figures |
@@ -135,7 +135,8 @@ The stand-in is the only backend in part 1. `ahi tui` uses it after the picker, 
 ## Tests (part 1)
 
 - Key handling: `Enter` submits, `Shift+Enter`, `Alt+Enter` and `Ctrl+J` insert a newline, and an empty input does not submit.
-- The input box grows to 8 rows and no further.
+- Typing a draft wider than the terminal wraps it before submission and moves the upper rule upward. Cursor coordinates follow terminal-cell widths, including wide/combining Unicode text. Visual Up/Down, resize reflow, the eight-row limit, short-terminal scrolling, and unchanged submitted text are verified.
+- The upper rule shows an advancing spinner at its left only while a response is active, with context still aligned at the right; completion restores the plain rule prefix.
 - Commands: `/model`, `/thinking high`, `/thinking`, `/clear`, `/exit`, and an unknown command, each without a terminal.
 - The thinking level is persisted to `<state>/thinking` and read back. An invalid file falls back to `medium`.
 - Layout using `ratatui::backend::TestBackend`: colorful workspace and muted model share one footer row. Context is muted within the input's upper rule, with spacing and trailing rule cells. Narrow labels compact to percentage then disappear without wrapping. Unknown context is omitted, while known zero remains visible. Cumulative accounting is not rendered and the freed row goes to the transcript.

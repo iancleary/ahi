@@ -193,7 +193,7 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             KeyAction::Edit(key) => {
-                self.input.apply(key);
+                self.input.apply(key, self.transcript_width);
                 Ok(ScreenAction::Continue)
             }
         }
@@ -228,12 +228,15 @@ impl ChatScreen {
 
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
-        let input_rows = self.input.visible_row_count() as u16;
+        let input = self.input.viewport(
+            frame.area().width as usize,
+            frame.area().height.saturating_sub(3) as usize,
+        );
+        let input_rows = input.lines.len() as u16;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(input_rows),
                 Constraint::Length(1),
@@ -249,33 +252,32 @@ impl ChatScreen {
         frame.render_widget(Paragraph::new(visible), chunks[0]);
 
         let activity = if self.response_in_progress {
-            let frame_index = self.spinner_frame % SPINNER.len();
-            format!("{} Working", SPINNER[frame_index])
+            let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
+            if chunks[1].width < 12 {
+                format!("{spinner} ")
+            } else {
+                format!("{spinner} Working ")
+            }
         } else {
             String::new()
         };
-        frame.render_widget(
-            Paragraph::new(activity).style(Style::default().add_modifier(Modifier::DIM)),
-            chunks[1],
-        );
-
-        let context_rule = status::render_context_rule(chunks[2].width as usize, &self.meters);
+        let activity_width = (activity.chars().count() as u16).min(chunks[1].width);
+        let header = Layout::horizontal([Constraint::Length(activity_width), Constraint::Min(0)])
+            .split(chunks[1]);
         let accent = Style::default().fg(ACCENT);
-        frame.render_widget(Paragraph::new(context_rule).style(accent), chunks[2]);
-        let (scroll, input_lines) = self.input.visible_lines();
-        frame.render_widget(Paragraph::new(input_lines.join("\n")), chunks[3]);
-        let cursor_line = self.input.cursor_line().saturating_sub(scroll);
-        let cursor_column = self
-            .input
-            .cursor_column()
-            .min(chunks[3].width.saturating_sub(1) as usize);
-        frame.set_cursor_position((
-            chunks[3].x + cursor_column as u16,
-            chunks[3].y + cursor_line as u16,
-        ));
+        frame.render_widget(Paragraph::new(activity).style(accent), header[0]);
+        let context_rule = status::render_context_rule(header[1].width as usize, &self.meters);
+        frame.render_widget(Paragraph::new(context_rule).style(accent), header[1]);
+        frame.render_widget(Paragraph::new(input.lines.join("\n")), chunks[2]);
+        if chunks[2].width > 0 && chunks[2].height > 0 {
+            frame.set_cursor_position((
+                chunks[2].x + input.cursor_column.min(chunks[2].width as usize - 1) as u16,
+                chunks[2].y + input.cursor_row.min(chunks[2].height as usize - 1) as u16,
+            ));
+        }
         frame.render_widget(
-            Paragraph::new(rule_line(chunks[4].width as usize)).style(accent),
-            chunks[4],
+            Paragraph::new(rule_line(chunks[3].width as usize)).style(accent),
+            chunks[3],
         );
 
         let model = Line::styled(
@@ -289,9 +291,9 @@ impl ChatScreen {
         let model_width = model
             .width()
             .saturating_add(1)
-            .min(chunks[5].width as usize) as u16;
+            .min(chunks[4].width as usize) as u16;
         let top = Layout::horizontal([Constraint::Min(0), Constraint::Length(model_width)])
-            .split(chunks[5]);
+            .split(chunks[4]);
         let location = status::render_location_row(
             top[0].width as usize,
             self.location_os_icon,
@@ -706,8 +708,6 @@ mod tests {
             text: "explain the hook runner".to_string(),
         });
         let idle = draw_lines(&mut screen, 120, 16);
-        let activity = &idle[idle.len() - 5];
-        assert!(activity.trim().is_empty(), "{activity}");
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
         assert!(idle[idle.len() - 2]
             .chars()
@@ -730,11 +730,14 @@ mod tests {
 
         screen.response_in_progress = true;
         let working = draw_lines(&mut screen, 120, 16);
-        assert!(
-            working[working.len() - 5].contains("Working"),
-            "{}",
-            working[working.len() - 5]
-        );
+        assert!(working[working.len() - 4].starts_with("⠹ Working "));
+        assert!(working[working.len() - 4].ends_with(" 28.4% / 272k ──"));
+        let next = draw_lines(&mut screen, 120, 16);
+        assert!(next[next.len() - 4].starts_with("⠸ Working "));
+        screen.response_in_progress = false;
+        let finished = draw_lines(&mut screen, 120, 16);
+        assert!(finished[finished.len() - 4].starts_with("──"));
+        assert!(!finished[finished.len() - 4].contains("Working"));
         let _ = fs::remove_dir_all(state);
     }
 
@@ -813,6 +816,44 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn typing_a_long_draft_moves_the_rule_up_without_submitting_or_inserting_newlines() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-wrap-draft");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        let draft = format!("{}abc", "0123456789".repeat(9));
+        for character in draft.chars() {
+            screen
+                .apply_action(
+                    KeyAction::Edit(input::EditorKey::Character(character)),
+                    &mut backend,
+                )
+                .unwrap();
+        }
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert_eq!(row(10), "────────────────────────────────────────");
+        assert_eq!(row(11), "0123456789012345678901234567890123456789");
+        assert_eq!(row(12), "0123456789012345678901234567890123456789");
+        assert_eq!(row(13).trim_end(), "0123456789abc");
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(13, 13)
+        );
+        assert!(backend.requests.is_empty());
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests[0].messages.last().unwrap().text, draft);
+        assert_eq!(screen.input_text(), "");
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]

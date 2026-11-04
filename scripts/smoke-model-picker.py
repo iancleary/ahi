@@ -204,7 +204,18 @@ def main() -> None:
             session.expect("(openai) vendor/model/variant • medium")
             assert "128k" not in session.screen()  # Context is initially unknown.
             assert (state / "selection").read_text() == "openai/vendor/model/variant\n"
-            session.send("merge smoke\r")
+            # Typing alone wraps the draft into three visual rows and moves
+            # the upper rule upward; it must not submit or invent context.
+            session.send("0123456789" * 32 + " tail")
+            session.expect(" tail")
+            draft_rows = session.screen().splitlines()
+            assert draft_rows[25] == "0123456789" * 16
+            assert draft_rows[26] == "0123456789" * 16
+            assert draft_rows[27].startswith(" tail")
+            assert all(character == "─" for character in draft_rows[24])
+            assert "[stand-in]" not in session.screen()
+            assert "128k" not in session.screen()
+            session.send("\x03merge smoke\r")  # Clear draft, then submit a message.
             session.expect("[stand-in] merge smoke")
             session.expect("replies and token counts are not from a model")
             session.expect("0% / 128k ──")
@@ -406,7 +417,7 @@ def main() -> None:
         "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
         "echo reply, /model local reload/switch/cancel, transcript retention, clean chat exit, "
         "real Git counts and branch/status refresh on message submission, "
-        "single-row footer and context embedded in the input rule"
+        "single-row footer, context in the input rule, and pre-submit draft wrapping/growth"
     )
 
 

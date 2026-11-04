@@ -21,6 +21,8 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "toml",
+ "unicode-segmentation",
+ "unicode-width",
  "ureq",
  "yaml-rust2",
 ]

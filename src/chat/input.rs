@@ -3,7 +3,29 @@
 //! `key_binding` translates a terminal key into `KeyAction::Edit`. This module
 //! does not read the terminal.
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
 const ROW_LIMIT: usize = 8;
+
+/// Soft-wrapped display only; the editor retains its original logical lines.
+pub(crate) struct InputViewport {
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_column: usize,
+}
+
+struct WrappedRow {
+    text: String,
+    line: usize,
+    column: usize,
+}
+
+struct InputLayout {
+    rows: Vec<WrappedRow>,
+    cursor_row: usize,
+    cursor_column: usize,
+}
 
 /// A key the line editor understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +73,12 @@ impl InputEditor {
         }
     }
 
-    pub(crate) fn apply(&mut self, key: EditorKey) {
+    pub(crate) fn apply(&mut self, key: EditorKey, width: usize) {
         match key {
             EditorKey::Left => self.move_left(),
             EditorKey::Right => self.move_right(),
-            EditorKey::Up => self.move_up(),
-            EditorKey::Down => self.move_down(),
+            EditorKey::Up => self.move_vertical(width, -1),
+            EditorKey::Down => self.move_vertical(width, 1),
             EditorKey::Home => self.move_home(),
             EditorKey::End => self.move_end(),
             EditorKey::Backspace => self.backspace(),
@@ -78,29 +100,83 @@ impl InputEditor {
         *self = Self::new();
     }
 
-    pub(crate) fn visible_row_count(&self) -> usize {
-        self.lines.len().clamp(1, ROW_LIMIT)
+    pub(crate) fn viewport(&self, width: usize, height: usize) -> InputViewport {
+        if width == 0 || height == 0 {
+            return InputViewport {
+                lines: Vec::new(),
+                cursor_row: 0,
+                cursor_column: 0,
+            };
+        }
+        let layout = self.layout(width);
+        let count = layout.rows.len().min(height).min(ROW_LIMIT);
+        let start = layout
+            .cursor_row
+            .saturating_sub(count - 1)
+            .min(layout.rows.len() - count);
+        InputViewport {
+            lines: layout.rows[start..start + count]
+                .iter()
+                .map(|row| row.text.clone())
+                .collect(),
+            cursor_row: layout.cursor_row - start,
+            cursor_column: layout.cursor_column,
+        }
     }
 
-    pub(crate) fn cursor_line(&self) -> usize {
-        self.line
-    }
-
-    pub(crate) fn cursor_column(&self) -> usize {
-        self.column
-    }
-
-    /// Scroll offset and the lines that fit in the visible window.
-    pub(crate) fn visible_lines(&self) -> (usize, Vec<String>) {
-        let start = if self.lines.len() <= ROW_LIMIT {
-            0
-        } else {
-            self.line
-                .saturating_sub(ROW_LIMIT - 1)
-                .min(self.lines.len() - ROW_LIMIT)
+    fn layout(&self, width: usize) -> InputLayout {
+        let width = width.max(1);
+        let mut layout = InputLayout {
+            rows: Vec::new(),
+            cursor_row: 0,
+            cursor_column: 0,
         };
-        let end = start + self.visible_row_count();
-        (start, self.lines[start..end].to_vec())
+        for (line, text) in self.lines.iter().enumerate() {
+            let mut row = WrappedRow {
+                text: String::new(),
+                line,
+                column: 0,
+            };
+            let mut cells = 0;
+            let mut column = 0;
+            let cursor_byte = byte_index(text, self.column);
+            for (byte, grapheme) in text.grapheme_indices(true) {
+                let grapheme_width = grapheme.width();
+                if cells > 0 && cells + grapheme_width > width {
+                    layout.rows.push(row);
+                    row = WrappedRow {
+                        text: String::new(),
+                        line,
+                        column,
+                    };
+                    cells = 0;
+                }
+                if line == self.line && (byte..byte + grapheme.len()).contains(&cursor_byte) {
+                    layout.cursor_row = layout.rows.len();
+                    layout.cursor_column = cells;
+                }
+                row.text.push_str(grapheme);
+                cells += grapheme_width;
+                column += grapheme.chars().count();
+            }
+            if line == self.line && cursor_byte == text.len() {
+                // An insertion cursor after a completely full row needs its
+                // own visual row; it must never be clamped over the last glyph.
+                if cells >= width {
+                    layout.rows.push(row);
+                    row = WrappedRow {
+                        text: String::new(),
+                        line,
+                        column,
+                    };
+                    cells = 0;
+                }
+                layout.cursor_row = layout.rows.len();
+                layout.cursor_column = cells;
+            }
+            layout.rows.push(row);
+        }
+        layout
     }
 
     fn insert_char(&mut self, character: char) {
@@ -169,24 +245,24 @@ impl InputEditor {
         }
     }
 
-    fn move_up(&mut self) {
-        if self.line > 0 {
-            self.line -= 1;
-            let length = self.lines[self.line].chars().count();
-            if self.column > length {
-                self.column = length;
+    fn move_vertical(&mut self, width: usize, delta: isize) {
+        let layout = self.layout(width);
+        let target = layout
+            .cursor_row
+            .saturating_add_signed(delta)
+            .min(layout.rows.len() - 1);
+        let row = &layout.rows[target];
+        let mut cells = 0;
+        let mut column = row.column;
+        for grapheme in row.text.graphemes(true) {
+            if cells + grapheme.width() > layout.cursor_column {
+                break;
             }
+            cells += grapheme.width();
+            column += grapheme.chars().count();
         }
-    }
-
-    fn move_down(&mut self) {
-        if self.line + 1 < self.lines.len() {
-            self.line += 1;
-            let length = self.lines[self.line].chars().count();
-            if self.column > length {
-                self.column = length;
-            }
-        }
+        self.line = row.line;
+        self.column = column;
     }
 
     fn move_home(&mut self) {
@@ -209,13 +285,70 @@ mod tests {
     #[test]
     fn input_grows_to_eight_rows_and_no_further() {
         let mut editor = InputEditor::from_text("a");
-        assert_eq!(editor.visible_row_count(), 1);
+        assert_eq!(editor.viewport(20, 20).lines, ["a"]);
         for _ in 0..7 {
-            editor.apply(EditorKey::Newline);
+            editor.apply(EditorKey::Newline, 20);
         }
-        assert_eq!(editor.visible_row_count(), 8);
-        editor.apply(EditorKey::Newline);
-        assert_eq!(editor.lines.len(), 9);
-        assert_eq!(editor.visible_row_count(), 8);
+        assert_eq!(editor.viewport(20, 20).lines.len(), 8);
+        editor.apply(EditorKey::Newline, 20);
+        assert_eq!(editor.contents(), "a\n\n\n\n\n\n\n\n");
+        assert_eq!(editor.viewport(20, 20).lines.len(), 8);
+        assert_eq!(editor.viewport(20, 20).cursor_row, 7);
+    }
+
+    #[test]
+    fn soft_wrap_and_resize_preserve_draft_and_cursor() {
+        let mut editor = InputEditor::from_text("abc");
+        let view = editor.viewport(3, 8);
+        assert_eq!(view.lines, ["abc", ""]);
+        assert_eq!((view.cursor_row, view.cursor_column), (1, 0));
+        editor.apply(EditorKey::Character('d'), 3);
+        assert_eq!(editor.viewport(3, 8).lines, ["abc", "d"]);
+        let view = editor.viewport(6, 8);
+        assert_eq!(view.lines, ["abcd"]);
+        assert_eq!((view.cursor_row, view.cursor_column), (0, 4));
+        assert_eq!(editor.contents(), "abcd");
+        assert!(editor.viewport(0, 8).lines.is_empty());
+        assert!(editor.viewport(6, 0).lines.is_empty());
+    }
+
+    #[test]
+    fn unicode_cell_widths_and_visual_up_down_preserve_logical_text() {
+        let mut editor = InputEditor::from_text("a界e\u{301}🙂b");
+        let view = editor.viewport(4, 8);
+        assert_eq!(view.lines, ["a界e\u{301}", "🙂b"]);
+        assert_eq!((view.cursor_row, view.cursor_column), (1, 3));
+        editor.apply(EditorKey::Up, 4);
+        let view = editor.viewport(4, 8);
+        assert_eq!((view.cursor_row, view.cursor_column), (0, 3));
+        editor.apply(EditorKey::Down, 4);
+        editor.apply(EditorKey::Character('!'), 4);
+        assert_eq!(editor.contents(), "a界e\u{301}🙂b!");
+        editor.apply(EditorKey::Backspace, 4);
+        editor.apply(EditorKey::Up, 4);
+        editor.apply(EditorKey::Character('X'), 4);
+        assert_eq!(editor.contents(), "a界Xe\u{301}🙂b");
+    }
+
+    #[test]
+    fn long_draft_scrolls_to_cursor_within_row_and_terminal_limits() {
+        let mut editor = InputEditor::from_text("abcdefghijklmnopqrstuvwxyz0123456789");
+        let view = editor.viewport(4, 20);
+        assert_eq!(
+            view.lines,
+            ["ijkl", "mnop", "qrst", "uvwx", "yz01", "2345", "6789", ""]
+        );
+        assert_eq!((view.cursor_row, view.cursor_column), (7, 0));
+        let view = editor.viewport(4, 2);
+        assert_eq!(view.lines, ["6789", ""]);
+        assert_eq!((view.cursor_row, view.cursor_column), (1, 0));
+        editor.apply(EditorKey::Home, 4);
+        let view = editor.viewport(4, 20);
+        assert_eq!(
+            view.lines,
+            ["abcd", "efgh", "ijkl", "mnop", "qrst", "uvwx", "yz01", "2345"]
+        );
+        assert_eq!((view.cursor_row, view.cursor_column), (0, 0));
+        assert_eq!(editor.contents(), "abcdefghijklmnopqrstuvwxyz0123456789");
     }
 }
