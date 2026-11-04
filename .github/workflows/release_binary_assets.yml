@@ -289,13 +289,15 @@ jobs:
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
           set -euo pipefail
+          # Workspace-relative paths: drive-letter paths from RUNNER_TEMP
+          # get mangled when passed to tar through Git Bash on Windows.
           # Native archives are attested but are not promised to be
           # bit-reproducible the way the musl archives are; gzip -n keeps
           # the gzip header free of a timestamp either way.
           archive_name="ahi-${VERSION}-${ARCHITECTURE}.tar.gz"
-          mkdir -p "${RUNNER_TEMP}/stage" release_assets
-          cp "source_tree/target/${TARGET}/release/${BINARY_NAME}" "${RUNNER_TEMP}/stage/${BINARY_NAME}"
-          tar -cf - -C "${RUNNER_TEMP}/stage" "${BINARY_NAME}" | gzip -n > "release_assets/${archive_name}"
+          mkdir -p stage release_assets
+          cp "source_tree/target/${TARGET}/release/${BINARY_NAME}" "stage/${BINARY_NAME}"
+          tar -cf - -C stage "${BINARY_NAME}" | gzip -n > "release_assets/${archive_name}"
 
       - name: verify packaged binary
         shell: bash
@@ -305,11 +307,12 @@ jobs:
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/verify"
-          tar -xzf "release_assets/ahi-${VERSION}-${ARCHITECTURE}.tar.gz" -C "${RUNNER_TEMP}/verify"
-          printed=$("${RUNNER_TEMP}/verify/${BINARY_NAME}" --version)
-          echo "version smoke: ${printed}"
-          [ "$printed" = "ahi ${VERSION}" ]
+          mkdir -p verify_dir
+          tar -xzf "release_assets/ahi-${VERSION}-${ARCHITECTURE}.tar.gz" -C verify_dir
+          printed="./verify_dir/${BINARY_NAME}"
+          version_output=$("$printed" --version)
+          echo "version smoke: ${version_output}"
+          [ "$version_output" = "ahi ${VERSION}" ]
 
       - name: record archive digest
         env:
