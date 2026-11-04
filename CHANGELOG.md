@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## Unreleased
+
+### Changed
+
+- Release `release_binary_assets.yml` now publishes four attested archives instead of two: `linux-x86_64` and `linux-aarch64` (musl-static, bit-reproducible as before) plus `darwin-aarch64` (built natively on `macos-15`) and `windows-x86_64` (built natively on `windows-2025`). The macOS and Windows archives ship unsigned and are attested but not promised to be bit-reproducible. `write_sha256sums.sh` and `attach_release_assets.sh` cover the four archives and the sums file.
+- `ahi update` replaces the running binary on every published target: macOS (Apple silicon) and Windows x86_64 no longer refuse. Windows uses a move-the-running-executable-aside dance because Windows refuses to replace a file a running process has open. Hosts without a published archive still refuse with a `cargo install ahi` pointer before any network use.
+
+## 0.3.1 (2026-11-04)
 
 ### Added
 
