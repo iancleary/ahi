@@ -103,7 +103,8 @@ pub use curation::save_curated_models;
 
 pub const OPENAI_ID: &str = "openai";
 pub const OPENAI_ORIGIN: &str = "https://api.openai.com/v1";
-const CATALOG_PATH: &str = "/pi/agent/model.json";
+// Gateway-specific discovery convention, not an OpenAI API standard.
+const CATALOG_PATH: &str = "/agent/models.json";
 const BODY_CAP: u64 = 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 

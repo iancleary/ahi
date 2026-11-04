@@ -403,7 +403,7 @@ fn tui_refresh_on_a_pipe_preserves_curated_ids_and_reports_partial_failure() {
         .output()
         .unwrap();
     let request = server.join().unwrap();
-    assert!(request.starts_with("GET /pi/agent/model.json HTTP/1.1"));
+    assert!(request.starts_with("GET /agent/models.json HTTP/1.1"));
     assert!(!request.to_ascii_lowercase().contains("authorization:"));
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(1), "{text}");
