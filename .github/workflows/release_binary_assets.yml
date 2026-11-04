@@ -233,9 +233,106 @@ jobs:
           path: release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-${{ matrix.architecture }}.tar.gz
           if-no-files-found: error
 
+  build_native_binary:
+    name: build_native_binary (${{ matrix.architecture }})
+    needs: resolve_release_identity
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            architecture: windows-x86_64
+            binary_name: ahi.exe
+    steps:
+      - name: checkout workflow tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: workflow_tree
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: checkout source tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve_release_identity.outputs.source_ref }}
+          path: source_tree
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: install rust toolchain
+        # Runners ship rustup preinstalled; no third-party action installs Rust.
+        shell: bash
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt --target "${{ matrix.target }}"
+
+      - name: build release binary
+        working-directory: source_tree
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: package release archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          set -euo pipefail
+          # Workspace-relative paths: drive-letter paths from RUNNER_TEMP
+          # get mangled when passed to tar through Git Bash on Windows.
+          # Native archives are attested but are not promised to be
+          # bit-reproducible the way the musl archives are; gzip -n keeps
+          # the gzip header free of a timestamp either way.
+          archive_name="ahi-${VERSION}-${ARCHITECTURE}.tar.gz"
+          mkdir -p stage release_assets
+          cp "source_tree/target/${TARGET}/release/${BINARY_NAME}" "stage/${BINARY_NAME}"
+          tar -cf - -C stage "${BINARY_NAME}" | gzip -n > "release_assets/${archive_name}"
+
+      - name: verify packaged binary
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve_release_identity.outputs.version }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify_dir
+          tar -xzf "release_assets/ahi-${VERSION}-${ARCHITECTURE}.tar.gz" -C verify_dir
+          printed="./verify_dir/${BINARY_NAME}"
+          version_output=$("$printed" --version)
+          echo "version smoke: ${version_output}"
+          [ "$version_output" = "ahi ${VERSION}" ]
+
+      - name: record archive digest
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${{ matrix.target }}"
+            echo
+            echo '```'
+            sha256sum "release_assets/ahi-"*"-${ARCHITECTURE}.tar.gz"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: upload release archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-archive-native-${{ matrix.architecture }}
+          path: release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-${{ matrix.architecture }}.tar.gz
+          if-no-files-found: error
+
   write_sha256sums:
     name: write_sha256sums
-    needs: [resolve_release_identity, build_linux_binary]
+    needs: [resolve_release_identity, build_linux_binary, build_native_binary]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -251,7 +348,7 @@ jobs:
       - name: download release archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: release-archive-linux-*
+          pattern: release-archive-*
           path: release_assets
           merge-multiple: true
 
@@ -269,7 +366,7 @@ jobs:
 
   attach_release_assets:
     name: attach_release_assets
-    needs: [resolve_release_identity, build_linux_binary, write_sha256sums]
+    needs: [resolve_release_identity, build_linux_binary, build_native_binary, write_sha256sums]
     if: >-
       needs.resolve_release_identity.outputs.mode == 'publish'
       && (github.event_name == 'workflow_dispatch' || github.event.action == 'published')
@@ -322,6 +419,7 @@ jobs:
           subject-path: |
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-x86_64.tar.gz
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-linux-aarch64.tar.gz
+            release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-windows-x86_64.tar.gz
             release_assets/ahi-${{ needs.resolve_release_identity.outputs.version }}-sha256sums.txt
 
       - name: upload missing release assets

@@ -10,7 +10,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/attach_release_assets.sh --mode check|upload --tag <vX.Y.Z> --directory <path> --repository <owner/name>
 
-The directory must contain the three release assets for the tag's SemVer.
+The directory must contain the four release assets for the tag's SemVer.
 GH_TOKEN or GITHUB_TOKEN must be set. The script does not pass --clobber.
 USAGE
 }
@@ -77,6 +77,7 @@ version=${tag#v}
 names=(
   "ahi-${version}-linux-x86_64.tar.gz"
   "ahi-${version}-linux-aarch64.tar.gz"
+  "ahi-${version}-windows-x86_64.tar.gz"
   "ahi-${version}-sha256sums.txt"
 )
 

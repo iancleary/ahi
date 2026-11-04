@@ -292,17 +292,17 @@ fn list_checks_and_explain() {
 
 #[test]
 fn later_commands_fail_closed() {
-    // ahi update refuses platforms without published archives before any
-    // network use. On Linux it would proceed to the release lookup, which
-    // this offline suite does not exercise.
-    if !cfg!(target_os = "linux") {
+    // ahi update proceeds on hosts with a published archive and refuses
+    // before any network use on hosts without one. This suite is offline,
+    // so the network path is never exercised on any host.
+    let host_supported = (cfg!(target_os = "linux")
+        && (cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64")))
+        || (cfg!(target_os = "windows") && cfg!(target_arch = "x86_64"));
+    if !host_supported {
         let update = ahi().arg("update").output().unwrap();
         assert_eq!(update.status.code(), Some(1));
         let update_err = String::from_utf8(update.stderr).unwrap();
-        assert!(
-            update_err.contains("attested Linux archives"),
-            "{update_err}"
-        );
+        assert!(update_err.contains("no published archive"), "{update_err}");
         assert!(update_err.contains("cargo install ahi"), "{update_err}");
     }
     for cmd in ["hooks", "install", "uninstall"] {

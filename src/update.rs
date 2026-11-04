@@ -30,14 +30,13 @@ const DOWNLOAD_CAP: u64 = 128 * 1024 * 1024;
 const SHA256SUMS_CAP: u64 = 64 * 1024;
 const BINARY_CAP: u64 = 64 * 1024 * 1024;
 
+/// The archive suffixes the release workflow publishes, in the order the
+/// sha256sums file lists them.
+const TARGET_SUFFIXES: [&str; 3] = ["linux-x86_64", "linux-aarch64", "windows-x86_64"];
+
 /// Run `ahi update`.
 pub fn run() -> Result<()> {
-    if !platform_supported(std::env::consts::OS) {
-        return Err(Error::new(format!(
-            "ahi update replaces the binary from the attested Linux archives; on {} install with `cargo install ahi`",
-            std::env::consts::OS
-        )));
-    }
+    let artifact = artifact_for(std::env::consts::OS, std::env::consts::ARCH)?;
     println!("Resolving the latest ahi release...");
     let release = latest_release()?;
     let tag = release.tag_name.clone();
@@ -52,7 +51,6 @@ pub fn run() -> Result<()> {
         println!("ahi {VERSION} is up to date (latest release {tag})");
         return Ok(());
     }
-    let artifact = artifact_for(std::env::consts::ARCH, latest)?;
     for name in [&artifact, &format!("ahi-{latest}-sha256sums.txt")] {
         if !release.assets.iter().any(|asset| asset.name == *name) {
             return Err(Error::new(format!(
@@ -204,17 +202,28 @@ fn asset_url(tag: &str, name: &str) -> String {
     format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/{name}")
 }
 
-fn platform_supported(os: &str) -> bool {
-    os == "linux"
+fn artifact_for(os: &str, arch: &str) -> Result<String> {
+    let suffix = match (os, arch) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("windows", "x86_64") => "windows-x86_64",
+        _ => {
+            return Err(Error::new(format!(
+                "no published archive for {}-{}; published targets: {}. On this platform install with `cargo install ahi`",
+                os,
+                arch,
+                TARGET_SUFFIXES.join(", ")
+            )));
+        }
+    };
+    Ok(format!("ahi-{suffix}.tar.gz"))
 }
 
-fn artifact_for(arch: &str, version: &str) -> Result<String> {
-    match arch {
-        "x86_64" => Ok(format!("ahi-{version}-linux-x86_64.tar.gz")),
-        "aarch64" => Ok(format!("ahi-{version}-linux-aarch64.tar.gz")),
-        other => Err(Error::new(format!(
-            "no published archive for target `{other}`; the release publishes linux-x86_64 and linux-aarch64 only"
-        ))),
+fn binary_member_name() -> &'static str {
+    if cfg!(windows) {
+        "ahi.exe"
+    } else {
+        "ahi"
     }
 }
 
@@ -241,8 +250,10 @@ fn parse_version(value: &str) -> Result<(u64, u64, u64)> {
 }
 
 fn expected_sha256(body: &str, version: &str, artifact: &str) -> Result<String> {
-    let x86 = format!("ahi-{version}-linux-x86_64.tar.gz");
-    let aarch64 = format!("ahi-{version}-linux-aarch64.tar.gz");
+    let expected = TARGET_SUFFIXES
+        .iter()
+        .map(|suffix| format!("ahi-{version}-{suffix}.tar.gz"))
+        .collect::<std::collections::BTreeSet<_>>();
     let mut seen = std::collections::BTreeSet::new();
     let mut found = None;
     for line in body.lines() {
@@ -261,7 +272,7 @@ fn expected_sha256(body: &str, version: &str, artifact: &str) -> Result<String> 
                 "sha256sums line has a malformed digest: {line:?}"
             )));
         }
-        if name != x86 && name != aarch64 {
+        if !expected.contains(name) {
             return Err(Error::new(format!(
                 "sha256sums names an unexpected artifact {name:?}"
             )));
@@ -275,9 +286,9 @@ fn expected_sha256(body: &str, version: &str, artifact: &str) -> Result<String> 
             found = Some(hash.to_string());
         }
     }
-    if seen != std::collections::BTreeSet::from([x86, aarch64]) {
+    if seen != expected {
         return Err(Error::new(format!(
-            "sha256sums does not list exactly the two published archives for {version}"
+            "sha256sums does not list exactly the published archives for {version}: {expected:?}"
         )));
     }
     found.ok_or_else(|| Error::new(format!("sha256sums does not list {artifact}")))
@@ -317,9 +328,10 @@ fn extract_ahi(archive: &Path) -> Result<Vec<u8>> {
             .to_string_lossy()
             .to_string();
         let name = raw.strip_prefix("./").unwrap_or(&raw);
-        if name != "ahi" {
+        let member = binary_member_name();
+        if name != member {
             return Err(Error::new(format!(
-                "archive member `{raw}` is not `ahi`; refusing the unexpected layout"
+                "archive member `{raw}` is not `{member}`; refusing the unexpected layout"
             )));
         }
         if entry.header().entry_type() != tar::EntryType::Regular {
@@ -328,7 +340,9 @@ fn extract_ahi(archive: &Path) -> Result<Vec<u8>> {
             )));
         }
         if bytes.is_some() {
-            return Err(Error::new("archive contains more than one `ahi` member"));
+            return Err(Error::new(format!(
+                "archive contains more than one `{member}` member"
+            )));
         }
         let mut buf = Vec::new();
         entry
@@ -341,11 +355,16 @@ fn extract_ahi(archive: &Path) -> Result<Vec<u8>> {
             )));
         }
         if buf.is_empty() {
-            return Err(Error::new("archive member `ahi` is empty"));
+            return Err(Error::new(format!("archive member `{member}` is empty")));
         }
         bytes = Some(buf);
     }
-    bytes.ok_or_else(|| Error::new("archive contains no `ahi` file"))
+    bytes.ok_or_else(|| {
+        Error::new(format!(
+            "archive contains no `{}` file",
+            binary_member_name()
+        ))
+    })
 }
 
 fn gh_output(args: &[&str]) -> Result<String> {
@@ -442,6 +461,11 @@ fn replace_binary(bytes: &[u8]) -> Result<PathBuf> {
             .map_err(|err| Error::new(format!("failed to open {}: {err}", temp.display())))?;
         file.sync_all()
             .map_err(|err| Error::new(format!("failed to sync {}: {err}", temp.display())))?;
+        // Windows refuses to replace a file that a running process has open,
+        // but allows renaming it out of the way first. The rename dance is a
+        // no-op elsewhere, where a single atomic rename over the running
+        // binary is enough.
+        clear_destination(&exe, &dir)?;
         fs::rename(&temp, &exe)
             .map_err(|err| Error::new(format!("failed to replace {}: {err}", exe.display())))?;
         Ok(())
@@ -451,6 +475,30 @@ fn replace_binary(bytes: &[u8]) -> Result<PathBuf> {
     }
     written?;
     Ok(exe)
+}
+
+#[cfg(unix)]
+fn clear_destination(_exe: &Path, _dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clear_destination(exe: &Path, dir: &Path) -> Result<()> {
+    let token = random_token()?;
+    let old = dir.join(format!(".ahi.old.{token}"));
+    fs::rename(exe, &old)
+        .map_err(|err| Error::new(format!("failed to move the running binary aside: {err}")))?;
+    // The running process keeps the old file locked; deleting it now usually
+    // fails and is harmless to leave behind.
+    let _ = fs::remove_file(&old);
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn clear_destination(_exe: &Path, _dir: &Path) -> Result<()> {
+    Err(Error::new(
+        "binary replacement is only implemented for unix and windows targets",
+    ))
 }
 
 #[cfg(unix)]
@@ -464,10 +512,16 @@ fn set_executable(path: &Path) -> Result<()> {
         .map_err(|err| Error::new(format!("failed to chmod {}: {err}", path.display())))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_executable(_path: &Path) -> Result<()> {
+    // Executability on Windows comes from the .exe name, not a mode bit.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_executable(_path: &Path) -> Result<()> {
     Err(Error::new(
-        "binary replacement is only implemented for unix targets",
+        "binary replacement is only implemented for unix and windows targets",
     ))
 }
 
@@ -493,22 +547,30 @@ mod tests {
     #[test]
     fn artifact_names_follow_the_release_contract() {
         assert_eq!(
-            artifact_for("x86_64", VERSION_STAMP).unwrap(),
-            "ahi-0.4.0-linux-x86_64.tar.gz"
+            artifact_for("linux", "x86_64").unwrap(),
+            "ahi-linux-x86_64.tar.gz"
         );
         assert_eq!(
-            artifact_for("aarch64", VERSION_STAMP).unwrap(),
-            "ahi-0.4.0-linux-aarch64.tar.gz"
+            artifact_for("linux", "aarch64").unwrap(),
+            "ahi-linux-aarch64.tar.gz"
         );
-        let err = artifact_for("armv7", VERSION_STAMP).unwrap_err();
+        let err = artifact_for("macos", "aarch64").unwrap_err();
+        assert!(err.to_string().contains("cargo install ahi"));
+        assert_eq!(
+            artifact_for("windows", "x86_64").unwrap(),
+            "ahi-windows-x86_64.tar.gz"
+        );
+        let err = artifact_for("macos", "x86_64").unwrap_err();
         assert!(err.to_string().contains("no published archive"));
+        let err = artifact_for("freebsd", "x86_64").unwrap_err();
+        assert!(err.to_string().contains("cargo install ahi"));
     }
 
     #[test]
-    fn platform_gate_is_linux_only() {
-        assert!(platform_supported("linux"));
-        assert!(!platform_supported("macos"));
-        assert!(!platform_supported("windows"));
+    fn binary_member_name_follows_the_host_platform() {
+        let member = binary_member_name();
+        assert!(member == "ahi" || member == "ahi.exe");
+        assert_eq!(member == "ahi.exe", cfg!(windows));
     }
 
     #[test]
@@ -521,50 +583,93 @@ mod tests {
         assert!(parse_version("").is_err());
     }
 
+    fn archive_name(suffix: &str) -> String {
+        format!("ahi-{VERSION_STAMP}-{suffix}.tar.gz")
+    }
+
+    const DIGEST_LETTERS: [&str; 3] = ["a", "b", "c"];
+
+    fn full_digests() -> Vec<(String, String)> {
+        TARGET_SUFFIXES
+            .iter()
+            .enumerate()
+            .map(|(index, suffix)| (DIGEST_LETTERS[index].repeat(64), archive_name(suffix)))
+            .collect()
+    }
+
+    fn checksums_body(digests: &[(String, String)]) -> String {
+        digests.iter().map(|(d, n)| format!("{d}  {n}\n")).collect()
+    }
+
     #[test]
-    fn expected_sha256_accepts_exactly_the_two_archives() {
-        let x86 = format!("ahi-{VERSION_STAMP}-linux-x86_64.tar.gz");
-        let aarch64 = format!("ahi-{VERSION_STAMP}-linux-aarch64.tar.gz");
-        let digest = "a".repeat(64);
-        let other_digest = "b".repeat(64);
-        let body = format!("{digest}  {x86}\n{other_digest}  {aarch64}\n");
-        assert_eq!(expected_sha256(&body, VERSION_STAMP, &x86).unwrap(), digest);
-        assert_eq!(
-            expected_sha256(&body, VERSION_STAMP, &aarch64).unwrap(),
-            other_digest
-        );
+    fn expected_sha256_accepts_exactly_the_published_archives() {
+        let digests = full_digests();
+        let body = checksums_body(&digests);
+        for (digest, name) in &digests {
+            assert_eq!(
+                expected_sha256(&body, VERSION_STAMP, name).unwrap(),
+                *digest
+            );
+        }
     }
 
     #[test]
     fn expected_sha256_refuses_malformed_input() {
-        let x86 = format!("ahi-{VERSION_STAMP}-linux-x86_64.tar.gz");
-        let aarch64 = format!("ahi-{VERSION_STAMP}-linux-aarch64.tar.gz");
-        let digest = "a".repeat(64);
-        let one_line = format!("{digest}  {x86}\n");
-        assert!(expected_sha256(&one_line, VERSION_STAMP, &x86)
-            .unwrap_err()
-            .to_string()
-            .contains("does not list exactly"));
-        let three_lines = format!("{digest}  {x86}\n{digest}  {aarch64}\n{digest}  extra.tar.gz\n");
-        assert!(expected_sha256(&three_lines, VERSION_STAMP, &x86)
+        let digests = full_digests();
+        let valid_body = checksums_body(&digests);
+        let first_name = digests[0].1.clone();
+        let first_digest = digests[0].0.clone();
+
+        // Missing one archive: the sums file must list all published targets.
+        let mut missing_one = digests.clone();
+        missing_one.pop();
+        assert!(
+            expected_sha256(&checksums_body(&missing_one), VERSION_STAMP, &first_name)
+                .unwrap_err()
+                .to_string()
+                .contains("does not list exactly")
+        );
+
+        // An unexpected extra artifact is refused.
+        let extra = format!("{valid_body}{}  extra.tar.gz\n", "e".repeat(64));
+        assert!(expected_sha256(&extra, VERSION_STAMP, &first_name)
             .unwrap_err()
             .to_string()
             .contains("unexpected artifact"));
-        let duplicate = format!("{digest}  {x86}\n{digest}  {x86}\n");
-        assert!(expected_sha256(&duplicate, VERSION_STAMP, &x86)
-            .unwrap_err()
-            .to_string()
-            .contains("more than once"));
-        let short_hash = format!("abc123  {x86}\n{digest}  {aarch64}\n");
-        assert!(expected_sha256(&short_hash, VERSION_STAMP, &x86)
-            .unwrap_err()
-            .to_string()
-            .contains("malformed digest"));
-        let junk = "not a checksum line\n";
-        assert!(expected_sha256(junk, VERSION_STAMP, &x86)
-            .unwrap_err()
-            .to_string()
-            .contains("malformed sha256sums line"));
+
+        // A duplicated archive name is refused.
+        let mut duplicate = digests.clone();
+        duplicate[1].1 = first_name.clone();
+        assert!(
+            expected_sha256(&checksums_body(&duplicate), VERSION_STAMP, &first_name)
+                .unwrap_err()
+                .to_string()
+                .contains("more than once")
+        );
+
+        // A short digest is refused.
+        let mut short_hash = digests.clone();
+        short_hash[0].0 = "abc123".to_string();
+        assert!(
+            expected_sha256(&checksums_body(&short_hash), VERSION_STAMP, &first_name)
+                .unwrap_err()
+                .to_string()
+                .contains("malformed digest")
+        );
+
+        // A line that is not sha256sum text is refused.
+        assert!(
+            expected_sha256("not a checksum line\n", VERSION_STAMP, &first_name)
+                .unwrap_err()
+                .to_string()
+                .contains("malformed sha256sums line")
+        );
+
+        // Sanity: the unmodified body parses.
+        assert_eq!(
+            expected_sha256(&valid_body, VERSION_STAMP, &first_name).unwrap(),
+            first_digest
+        );
     }
 
     fn build_archive(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
@@ -593,14 +698,15 @@ mod tests {
 
     #[test]
     fn extract_ahi_accepts_the_single_root_member() {
+        let member = binary_member_name();
         let path = write_temp_archive(&build_archive(&[(
-            "ahi",
+            member,
             tar::EntryType::Regular,
             b"binary",
         )]));
         assert_eq!(extract_ahi(&path).unwrap(), b"binary");
         let dotted = write_temp_archive(&build_archive(&[(
-            "./ahi",
+            &format!("./{member}"),
             tar::EntryType::Regular,
             b"binary",
         )]));
@@ -611,8 +717,9 @@ mod tests {
 
     #[test]
     fn extract_ahi_refuses_unexpected_layouts() {
+        let member = binary_member_name();
         let subdir = write_temp_archive(&build_archive(&[(
-            "bin/ahi",
+            &format!("bin/{member}"),
             tar::EntryType::Regular,
             b"binary",
         )]));
@@ -622,20 +729,20 @@ mod tests {
             .contains("unexpected layout"));
 
         let directory =
-            write_temp_archive(&build_archive(&[("ahi", tar::EntryType::Directory, b"")]));
+            write_temp_archive(&build_archive(&[(member, tar::EntryType::Directory, b"")]));
         assert!(extract_ahi(&directory)
             .unwrap_err()
             .to_string()
             .contains("not a regular file"));
 
-        let symlink = write_temp_archive(&build_archive(&[("ahi", tar::EntryType::Symlink, b"")]));
+        let symlink = write_temp_archive(&build_archive(&[(member, tar::EntryType::Symlink, b"")]));
         assert!(extract_ahi(&symlink)
             .unwrap_err()
             .to_string()
             .contains("not a regular file"));
 
         let extra = write_temp_archive(&build_archive(&[
-            ("ahi", tar::EntryType::Regular, b"binary"),
+            (member, tar::EntryType::Regular, b"binary"),
             ("other", tar::EntryType::Regular, b"binary"),
         ]));
         assert!(extract_ahi(&extra)
@@ -654,7 +761,7 @@ mod tests {
         assert!(extract_ahi(&empty)
             .unwrap_err()
             .to_string()
-            .contains("no `ahi` file"));
+            .contains(&format!("no `{}` file", binary_member_name())));
         for path in [&subdir, &directory, &symlink, &extra, &empty] {
             let _ = fs::remove_dir_all(path.parent().unwrap());
         }
@@ -662,7 +769,11 @@ mod tests {
 
     #[test]
     fn extract_ahi_refuses_an_empty_member() {
-        let path = write_temp_archive(&build_archive(&[("ahi", tar::EntryType::Regular, b"")]));
+        let path = write_temp_archive(&build_archive(&[(
+            binary_member_name(),
+            tar::EntryType::Regular,
+            b"",
+        )]));
         assert!(extract_ahi(&path)
             .unwrap_err()
             .to_string()

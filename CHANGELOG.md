@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.2 (2026-11-04)
+
+### Changed
+
+- Releases now publish three attested archives: `linux-x86_64` and `linux-aarch64` (musl-static, bit-reproducible as before), plus `windows-x86_64` (built natively on `windows-2025`, unsigned and not promised to be bit-reproducible).
+- `ahi update` now supports Windows x86_64 without Cargo. Windows moves the running executable aside before replacing it. Linux support is unchanged. macOS archives and CI are deferred while hosted ARM64 runners lack capacity; use `cargo install ahi` on macOS. See `docs/macos-update-follow-up.md` for the restoration checklist.
+
+## 0.3.1 (2026-11-04)
 
 ### Added
 
