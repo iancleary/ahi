@@ -393,7 +393,9 @@ Trust boundaries:
 
 The pre-commit config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, and `ci.autoupdate_schedule` keep those names so existing files still parse. ahi does not act on them. There is no `ahi autoupdate`, `ahi lock`, `ahi verify`, or `ahi fetch`. Those names would install or move hook repositories. Checkers are compiled into ahi and selected with `repo: builtin`.
 
-`ahi update` replaces this ahi binary from an attested archive this repository publishes. It checks `ahi-<version>-sha256sums.txt` and verifies the attestation against `iancleary/ahi`. It refuses a target it cannot verify. It does not accept a package name, does not run a remote shell script, and does not clone or move a hook repository. macOS and Windows stay on `cargo install` because those archives are not published. This version exits 1 with "not implemented until the attested archive replacement of this ahi binary". The command is not named `self-update`.
+`ahi update` replaces this ahi binary from an attested archive this repository publishes. It checks `ahi-<version>-sha256sums.txt` and verifies the attestation against `iancleary/ahi`. It refuses a target it cannot verify. It does not accept a package name, does not run a remote shell script, and does not clone or move a hook repository. macOS and Windows stay on `cargo install` because those archives are not published. The command is not named `self-update`.
+
+`ahi update` resolves the latest GitHub release, downloads `ahi-<version>-sha256sums.txt` and the archive for the target architecture, verifies the sha256, and verifies the build-provenance attestation of both files with the `gh` CLI against the release tag's commit and the `release_binary_assets.yml` workflow. It extracts the single `ahi` member and atomically renames it over the running binary; any failure leaves the binary untouched.
 
 ### Allowlist
 

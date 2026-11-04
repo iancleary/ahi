@@ -56,11 +56,14 @@ enum Command {
         #[command(subcommand)]
         command: HooksCommand,
     },
-    /// Replace this ahi binary from an attested archive this repository publishes.
+    /// Replace this ahi binary from the attested Linux archive of the latest release.
     ///
-    /// Checks the published checksum and attestation, and refuses a target it
-    /// cannot verify. Does not accept a package name. Does not clone a hook
-    /// repository. Not implemented in this version.
+    /// Downloads and verifies `ahi-<version>-sha256sums.txt` and the archive for
+    /// the target against their GitHub build-provenance attestations with the
+    /// `gh` CLI, then atomically renames the new binary over the running one.
+    /// Linux only; macOS and Windows stay on `cargo install`. Refuses a target
+    /// it cannot verify. Does not accept a package name. The command is not
+    /// named `self-update`.
     Update,
     /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
     ///
@@ -161,9 +164,13 @@ fn main() -> ExitCode {
                 unimplemented_until("the hook shim phase (after hook execution exists)")
             }
         },
-        Command::Update => {
-            unimplemented_until("the attested archive replacement of this ahi binary")
-        }
+        Command::Update => match ahi::update::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::from(1)
+            }
+        },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
         Command::Tui { refresh } => tui(cli.state_dir.as_deref(), *refresh),
         Command::Login => login(cli.state_dir.as_deref()),
