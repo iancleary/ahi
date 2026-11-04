@@ -40,10 +40,12 @@ The harness state directory is `--state-dir`, else `AHI_STATE_DIR`, else `$XDG_S
 
 ## Commands in this version
 
+Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR`, and `--color auto|always|never` is validated but this version prints plain text either way.
+
 | Command | Behavior |
 | --- | --- |
-| `ahi run` | Staged files. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets. `--format` is `text`, `json`, or `sarif`. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings. |
-| `ahi list-checks` | Builtin check ids. |
+| `ahi run [HOOK]` | Staged files. `[HOOK]` runs only that hook id or alias. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets, `--hook-stage` selects a stage other than pre-commit, and `--commit-msg-filename` feeds the commit-message path to commit-msg and prepare-commit-msg stages. `--format` is `text`, `json`, or `sarif`. `--fail-fast` stops after the first failing hook, and `--verbose`/`-v` shows passing local-hook output. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings. |
+| `ahi list-checks` | Builtin check ids with aliases. `--format` is `text` (default) or `json`. |
 | `ahi explain <id>` | What one check reports. |
 | `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, state directory, policy summary. Sandbox detection is not in v0.1. |
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
@@ -84,7 +86,7 @@ Explicit OpenAI refresh attempts `GET https://api.openai.com/v1/models` only wit
 
 `ahi tui` never fetches on startup. `ahi tui --refresh` explicitly requests refreshes, preserves old catalogs on failure, and in a pipe exits 1 if any refresh failed while still printing the local load. Catalogs are atomically replaced objects containing provider, source URL, retrieval timestamp, and reported ids; old array-format catalogs remain readable. `retrieval time unknown (old catalog format)` means that the cached array lacks a timestamp, not that authentication is old. Refresh never edits the curated file.
 
-Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `autoupdate`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `update`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
 
 ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 

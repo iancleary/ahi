@@ -78,8 +78,8 @@ enum Command {
     },
     /// Pick only models curated in models.json. Startup performs no network requests.
     ///
-    /// A terminal opens a picker; Enter saves a selection and exits, not a chat.
-    /// A pipe prints providers and model catalog membership.
+    /// A terminal opens a picker; Enter saves a selection and opens the local
+    /// echo-backed chat screen. A pipe prints providers and model catalog membership.
     Tui {
         /// Explicitly refresh reference catalogs before opening the picker or printing.
         #[arg(long)]
