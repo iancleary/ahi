@@ -12,6 +12,7 @@ mod command;
 mod input;
 mod key_binding;
 mod location;
+mod scroll_navigation;
 mod status;
 mod thinking;
 mod transcript;
@@ -75,6 +76,7 @@ struct ChatScreen {
     response_in_progress: bool,
     receiver: Option<Receiver<ResponseEvent>>,
     assistant_open: bool,
+    scroll_navigation: scroll_navigation::ScrollNavigation,
     scroll_from_bottom: usize,
     transcript_area: Rect,
     transcript_width: usize,
@@ -98,6 +100,7 @@ impl ChatScreen {
             response_in_progress: false,
             receiver: None,
             assistant_open: false,
+            scroll_navigation: scroll_navigation::ScrollNavigation::default(),
             scroll_from_bottom: 0,
             transcript_area: Rect::default(),
             transcript_width: 80,
@@ -155,6 +158,11 @@ impl ChatScreen {
         event: Event,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
+        if let Event::Mouse(mouse) = event {
+            if let Some(action) = self.scroll_navigation.mouse(mouse) {
+                return self.apply_action(action, backend);
+            }
+        }
         match event {
             Event::Key(key) => self.apply_action(key_binding::translate(key), backend),
             Event::Mouse(mouse)
@@ -208,6 +216,15 @@ impl ChatScreen {
             KeyAction::CycleThinkingLevel => {
                 self.thinking = self.thinking.next();
                 thinking::write(&self.state_dir, self.thinking)?;
+                Ok(ScreenAction::Continue)
+            }
+            KeyAction::JumpToTop => {
+                self.scroll_from_bottom = usize::MAX;
+                self.clamp_scroll();
+                Ok(ScreenAction::Continue)
+            }
+            KeyAction::JumpToBottom => {
+                self.scroll_from_bottom = 0;
                 Ok(ScreenAction::Continue)
             }
             KeyAction::ScrollTowardOlder => {
@@ -283,6 +300,13 @@ impl ChatScreen {
             self.scroll_from_bottom,
         );
         frame.render_widget(Paragraph::new(visible), chunks[0]);
+        let max_scroll = lines.len().saturating_sub(self.transcript_height);
+        self.scroll_navigation.draw(
+            frame,
+            chunks[0],
+            self.scroll_from_bottom < max_scroll,
+            self.scroll_from_bottom > 0,
+        );
 
         let activity = if self.response_in_progress {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
@@ -403,7 +427,13 @@ impl ChatScreen {
     }
 
     fn apply_event(&mut self, event: ResponseEvent) -> bool {
-        match event {
+        // A nonzero offset means the reader has left live-follow mode. Grow
+        // that offset with the transcript so the same rows remain visible.
+        // Count wrapped rows, not newlines: streamed text can soft-wrap too.
+        let previous_rows = (self.scroll_from_bottom > 0).then(|| {
+            transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1)).len()
+        });
+        let finished = match event {
             ResponseEvent::TextDelta(text) => {
                 if !self.assistant_open {
                     self.messages.push(ChatMessage {
@@ -458,7 +488,16 @@ impl ChatScreen {
                 self.push_notice(message);
                 true
             }
+        };
+        if let Some(previous_rows) = previous_rows {
+            let current_rows =
+                transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1))
+                    .len();
+            self.scroll_from_bottom = self
+                .scroll_from_bottom
+                .saturating_add(current_rows.saturating_sub(previous_rows));
         }
+        finished
     }
 
     fn push_notice(&mut self, text: String) {
@@ -948,6 +987,124 @@ mod tests {
             assert_eq!(buffer[(0, row)].symbol(), " ");
             assert_eq!(buffer[(0, row)].bg, Color::Reset);
         }
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn streaming_keeps_scrollback_fixed_and_follows_again_at_the_bottom() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-stream-scroll");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("draft stays here");
+        screen.apply_event(ResponseEvent::TextDelta(
+            (0..30).map(|n| format!("line {n:02}\n")).collect(),
+        ));
+        let bottom = draw_lines(&mut screen, 40, 12);
+        screen.apply_event(ResponseEvent::TextDelta("live output\n".into()));
+        let following = draw_lines(&mut screen, 40, 12);
+        assert_ne!(following[0], bottom[0]);
+        assert_eq!(screen.scroll_from_bottom, 0);
+
+        screen
+            .apply_action(KeyAction::ScrollTowardOlder, &mut backend)
+            .unwrap();
+        let anchored = draw_lines(&mut screen, 40, 12);
+        let height = screen.transcript_height;
+        for event in [
+            ResponseEvent::TextDelta("new line\n".into()),
+            ResponseEvent::TextDelta("x".repeat(125)),
+            ResponseEvent::ToolResult {
+                output: "tool output\nmore output".into(),
+                exit_code: 0,
+            },
+            ResponseEvent::TextDelta("continuing after tool\n".into()),
+            ResponseEvent::Completed,
+        ] {
+            screen.apply_event(event);
+            let rendered = draw_lines(&mut screen, 40, 12);
+            assert_eq!(&rendered[..height], &anchored[..height]);
+        }
+        assert_eq!(screen.input_text(), "draft stays here");
+
+        while screen.scroll_from_bottom > 0 {
+            screen
+                .apply_action(KeyAction::ScrollTowardNewer, &mut backend)
+                .unwrap();
+        }
+        let bottom = draw_lines(&mut screen, 40, 12);
+        screen.apply_event(ResponseEvent::TextDelta("latest line\n".into()));
+        let following = draw_lines(&mut screen, 40, 12);
+        assert_ne!(&following[..height], &bottom[..height]);
+        assert_eq!(screen.scroll_from_bottom, 0);
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn jump_controls_hover_click_and_keep_the_draft() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-jumps");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("keep draft");
+        screen.apply_event(ResponseEvent::TextDelta(
+            (0..40).map(|n| format!("line {n:02}\n")).collect(),
+        ));
+        let bottom = draw_lines(&mut screen, 60, 12);
+        assert!(bottom[0].contains("Top (Ctrl+K)"));
+        let mouse = |kind, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 59,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        screen
+            .apply_terminal_event(mouse(MouseEventKind::Moved, 0), &mut backend)
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(59, 0)].bg, Color::Cyan);
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), 0),
+                &mut backend,
+            )
+            .unwrap();
+        let top = draw_lines(&mut screen, 60, 12);
+        assert!(top[0].starts_with("line 00"));
+        assert!(!top[0].contains("Ctrl+K"));
+        let last_row = screen.transcript_height as u16 - 1;
+        assert!(top[last_row as usize].contains("Bottom (Ctrl+L)"));
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), last_row),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 0);
+        screen
+            .apply_terminal_event(
+                Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)),
+                &mut backend,
+            )
+            .unwrap();
+        assert!(screen.scroll_from_bottom > 0);
+        screen
+            .apply_terminal_event(
+                Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 0);
+        assert_eq!(screen.input_text(), "keep draft");
+        assert!(backend.requests.is_empty());
+        // Tiny terminals must not create out-of-bounds floating controls.
+        draw_lines(&mut screen, 4, 3);
         let _ = fs::remove_dir_all(state);
     }
 

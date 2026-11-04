@@ -48,6 +48,8 @@ In the picker, `r` refreshes catalogs and `c` opens a provider's curation view. 
 
 **Enter** on a curated model saves the selection and opens chat. Replies come from a local **echo stand-in**, not OpenAI or a gateway. `/model` reopens the curated picker with locally reloaded settings; selecting a model keeps the transcript, and cancelling keeps the active model. At the initial picker, `q` exits even if an old selection exists. **Ctrl+D** on empty chat input exits.
 
+Scroll chat output with the mouse wheel or **Page Up / Page Down**. **Ctrl+K** (or **Ctrl+Home**) jumps to the top; **Ctrl+L** (or **Ctrl+End**) jumps to the bottom and resumes following streamed output. Floating **Top** and **Bottom** controls appear at the transcript edges when there is more output in that direction; hover to highlight and click to jump. Scrolling up keeps your reading position fixed as new output arrives. Plain Home/End still move within the input, and Ctrl+J still inserts a newline.
+
 Explicit checkbox/reorder saves atomically replace `<state>/models.json`, pretty-printing JSON while preserving object-key order, other providers and settings. Stale external edits or save failures leave the file and loaded list unchanged; press `e` to review/reload before retrying. Merely browsing does not create a file; an explicit checkbox action can.
 
 `e` opens `models.json` in `$VISUAL` or `$EDITOR` (notepad fallback on Windows). Other systems ask for an editor when neither is set. Editor-only reload never rewrites the editor's bytes and never fetches. Invalid edits retain the previous registry and display the file path and line.
