@@ -97,7 +97,7 @@ impl LoadedProvider {
                         .max(0)
                 })
                 .unwrap_or(0);
-                format!("{}s old (retrieved {stamp})", age)
+                format!("{age}s old (retrieved {stamp})")
             }
         }
     }

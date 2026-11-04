@@ -776,7 +776,7 @@ mod tests {
         let body = "{\n  \"providers\": {\"openai\": {\"baseUrl\": \"https://api.openai.com/v1\", \"api\": \"openai-completions\", \"models\": [{\"id\":\"second\"},{\"id\":\"first\"}]}}\n}\n";
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nprintf '%s' '{}' > \"$1\"\n", body),
+            format!("#!/bin/sh\nprintf '%s' '{body}' > \"$1\"\n"),
         )
         .unwrap();
         run_editor(&dir, Some(&format!("sh '{}'", script.display()))).unwrap();
