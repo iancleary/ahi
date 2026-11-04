@@ -11,11 +11,16 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+
+mod curation;
+mod openai;
+
+pub use curation::save_curated_models;
 
 pub const OPENAI_ID: &str = "openai";
 pub const OPENAI_ORIGIN: &str = "https://api.openai.com/v1";
@@ -23,25 +28,86 @@ const CATALOG_PATH: &str = "/pi/agent/model.json";
 const BODY_CAP: u64 = 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Public OAuth client registered for the localhost callback used by browser
-/// sign-in. The same client id is published in Pi's OpenAI Codex login.
-const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_AUTHORIZE: &str = "https://auth.openai.com/oauth/authorize";
-pub const OPENAI_TOKEN: &str = "https://auth.openai.com/oauth/token";
-pub const OPENAI_REDIRECT: &str = "http://localhost:1455/auth/callback";
+// Current Sign in with ChatGPT flow (not the legacy Codex public client).
+const OPENAI_CLIENT_ID: &str = "dynamic_agent_client";
+const OPENAI_AUTHORIZE: &str = "https://auth.openai.com/api/accounts/authorize";
+pub const OPENAI_TOKEN: &str = "https://auth.openai.com/api/accounts/oauth/token";
+pub const OPENAI_REDIRECT: &str = "http://127.0.0.1:1455/auth/callback";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedProvider {
     pub id: String,
     pub base_url: String,
-    pub models: Vec<String>,
+    pub models: Vec<ModelChoice>,
     pub auth: String,
-    pub catalog: String,
+    pub catalog: Option<CatalogSnapshot>,
+    pub catalog_error: Option<String>,
+    pub empty_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub status: CatalogMembership,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogMembership {
+    Listed,
+    Absent,
+    Unavailable,
+}
+
+impl std::fmt::Display for CatalogMembership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Listed => "listed",
+            Self::Absent => "absent from catalog",
+            Self::Unavailable => "catalog unavailable",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSnapshot {
+    pub provider: String,
+    pub source: Option<String>,
+    pub retrieved_at: Option<String>,
+    pub models: Vec<String>,
+}
+
+impl LoadedProvider {
+    pub fn catalog_age(&self) -> String {
+        match self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.retrieved_at.as_deref())
+        {
+            None if self.catalog.is_none() => "unavailable".to_string(),
+            None => "retrieval time unknown (old catalog format)".to_string(),
+            Some(stamp) => {
+                let age = time::OffsetDateTime::parse(
+                    stamp,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map(|then| {
+                    (time::OffsetDateTime::now_utc() - then)
+                        .whole_seconds()
+                        .max(0)
+                })
+                .unwrap_or(0);
+                format!("{}s old (retrieved {stamp})", age)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registry {
     pub providers: Vec<LoadedProvider>,
+    // Exact local config observed at load time, used to reject stale curation saves.
+    models_bytes: Option<Vec<u8>>,
 }
 
 pub fn state_dir(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -75,38 +141,57 @@ pub fn state_dir(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn load_registry(state: &Path) -> Result<Registry> {
-    let file = read_models(state)?;
+    let models_bytes = read_models_bytes(state)?;
+    let file = parse_models(state, models_bytes.as_deref())?;
+    Ok(registry_from_models(state, file, models_bytes))
+}
+
+fn registry_from_models(state: &Path, file: ModelsFile, models_bytes: Option<Vec<u8>>) -> Registry {
     let mut providers = Vec::new();
-    let mut openai_url = OPENAI_ORIGIN.to_string();
-    if let Some(entry) = file.providers.get(OPENAI_ID) {
-        check_entry(OPENAI_ID, entry)?;
-        if !entry.models.is_empty() {
-            return Err(Error::new(
-                "the openai entry only overrides baseUrl and does not list models",
-            ));
-        }
-        openai_url = entry.base_url.clone();
-    }
-    providers.push(LoadedProvider {
-        id: OPENAI_ID.to_string(),
-        base_url: openai_url,
-        models: Vec::new(),
-        auth: if credential_present(state) {
-            "signed-in".to_string()
+    let openai = file.providers.get(OPENAI_ID);
+    providers.push(load_provider(
+        state,
+        OPENAI_ID,
+        openai
+            .map(|entry| entry.base_url.as_str())
+            .unwrap_or(OPENAI_ORIGIN),
+        openai
+            .map(|entry| entry.models.as_slice())
+            .unwrap_or_default(),
+        if state.join("credentials/openai.json").is_file() {
+            "signed-in"
         } else {
-            "signed-out".to_string()
+            "signed-out"
         },
-        catalog: "builtin".to_string(),
-    });
+    ));
     for (id, entry) in &file.providers {
         if id == OPENAI_ID {
             continue;
         }
-        check_id(id)?;
-        check_entry(id, entry)?;
-        providers.push(load_gateway(state, id, entry)?);
+        let auth = if entry
+            .api_key
+            .iter()
+            .chain(entry.headers.values())
+            .any(|value| value.starts_with('$'))
+        {
+            "env"
+        } else if entry.api_key.is_some() || !entry.headers.is_empty() {
+            "marker"
+        } else {
+            "none"
+        };
+        providers.push(load_provider(
+            state,
+            id,
+            &entry.base_url,
+            &entry.models,
+            auth,
+        ));
     }
-    Ok(Registry { providers })
+    Registry {
+        providers,
+        models_bytes,
+    }
 }
 
 pub fn render_text(registry: &Registry) -> String {
@@ -115,85 +200,155 @@ pub fn render_text(registry: &Registry) -> String {
         let models = if provider.models.is_empty() {
             "-".to_string()
         } else {
-            provider.models.join(",")
+            provider
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         };
         lines.push(format!(
             "provider {} origin {} auth {} models {} catalog {}",
-            provider.id, provider.base_url, provider.auth, models, provider.catalog
+            provider.id,
+            provider.base_url,
+            provider.auth,
+            models,
+            provider.catalog_age()
         ));
+        for model in &provider.models {
+            lines.push(format!("  model {} status {}", model.id, model.status));
+        }
+        if let Some(reason) = &provider.empty_reason {
+            lines.push(format!("  {reason}"));
+        }
+        if let Some(error) = &provider.catalog_error {
+            lines.push(format!("  catalog error: {error}"));
+        }
     }
     lines.join("\n")
 }
 
-fn credential_present(state: &Path) -> bool {
-    state.join("credentials").join("openai.json").is_file()
+fn read_models(state: &Path) -> Result<ModelsFile> {
+    parse_models(state, read_models_bytes(state)?.as_deref())
 }
 
-fn read_models(state: &Path) -> Result<ModelsFile> {
+fn read_models_bytes(state: &Path) -> Result<Option<Vec<u8>>> {
     let path = state.join("models.json");
-    if !path.exists() {
-        return Ok(ModelsFile {
-            providers: BTreeMap::new(),
-        });
-    }
-    let text = fs::read_to_string(&path)
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(Error::new(format!(
+                "failed to read {}: {err}",
+                path.display()
+            )))
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(BODY_CAP + 1)
+        .read_to_end(&mut bytes)
         .map_err(|err| Error::new(format!("failed to read {}: {err}", path.display())))?;
-    if text.len() > BODY_CAP as usize {
+    if bytes.len() > BODY_CAP as usize {
         return Err(Error::new("models.json is larger than 1 MiB"));
     }
-    serde_json::from_str(&text).map_err(|err| Error::new(format!("models.json: {err}")))
+    Ok(Some(bytes))
 }
 
-fn load_gateway(state: &Path, id: &str, entry: &ProviderEntry) -> Result<LoadedProvider> {
-    let configured = entry
-        .models
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<Vec<_>>();
-    let auth = match &entry.api_key {
-        Some(key) if key == "gateway" => "marker",
-        Some(_) => "env",
-        None => "none",
+fn parse_models(state: &Path, bytes: Option<&[u8]>) -> Result<ModelsFile> {
+    match bytes {
+        None => Ok(ModelsFile {
+            providers: BTreeMap::new(),
+        }),
+        Some(bytes) => serde_json::from_slice(bytes)
+            .map_err(|err| Error::new(format!("{}: {err}", state.join("models.json").display()))),
+    }
+}
+
+fn load_provider(
+    state: &Path,
+    id: &str,
+    base_url: &str,
+    configured: &[ModelId],
+    auth: &str,
+) -> LoadedProvider {
+    let (catalog, catalog_error) = match read_last_good(state, id) {
+        Ok(catalog) => (catalog, None),
+        Err(err) => (None, Some(err.to_string())),
     };
-    match fetch_catalog(&entry.base_url, id) {
-        Ok(models) => {
-            write_last_good(state, id, &models)?;
-            Ok(LoadedProvider {
-                id: id.to_string(),
-                base_url: entry.base_url.clone(),
-                models,
-                auth: auth.to_string(),
-                catalog: "fetched".to_string(),
-            })
-        }
-        Err(err) => {
-            if !configured.is_empty() {
-                Ok(LoadedProvider {
-                    id: id.to_string(),
-                    base_url: entry.base_url.clone(),
-                    models: configured,
-                    auth: auth.to_string(),
-                    catalog: format!("kept-config ({err})"),
-                })
-            } else if let Some(models) = read_last_good(state, id)? {
-                Ok(LoadedProvider {
-                    id: id.to_string(),
-                    base_url: entry.base_url.clone(),
-                    models,
-                    auth: auth.to_string(),
-                    catalog: format!("last-good ({err})"),
-                })
-            } else {
-                Ok(LoadedProvider {
-                    id: id.to_string(),
-                    base_url: entry.base_url.clone(),
-                    models: Vec::new(),
-                    auth: auth.to_string(),
-                    catalog: format!("unavailable ({err})"),
-                })
-            }
+    let models = configured
+        .iter()
+        .map(|model| ModelChoice {
+            id: model.id.clone(),
+            status: match &catalog {
+                None => CatalogMembership::Unavailable,
+                Some(catalog) if catalog.models.contains(&model.id) => CatalogMembership::Listed,
+                Some(_) => CatalogMembership::Absent,
+            },
+        })
+        .collect();
+    LoadedProvider {
+        id: id.to_string(),
+        base_url: base_url.to_string(),
+        models,
+        auth: auth.to_string(),
+        catalog,
+        catalog_error,
+        empty_reason: configured.is_empty().then(|| {
+            "no models in models.json: press e to edit, c to browse the catalog".to_string()
+        }),
+    }
+}
+
+/// Explicitly refresh one reference catalog. Never edits models.json.
+pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
+    check_id(id)?;
+    let file = read_models(state)?;
+    let (source, models) = if id == OPENAI_ID {
+        let base_url = file
+            .providers
+            .get(id)
+            .map(|entry| entry.base_url.as_str())
+            .unwrap_or(OPENAI_ORIGIN);
+        (
+            openai::catalog_source(base_url)?,
+            openai::refresh(state, base_url)?,
+        )
+    } else {
+        let entry = file
+            .providers
+            .get(id)
+            .ok_or_else(|| Error::new(format!("unknown provider `{id}`")))?;
+        (
+            catalog_url(&entry.base_url)?,
+            fetch_catalog(&entry.base_url, id)?,
+        )
+    };
+    write_last_good(
+        state,
+        &CatalogSnapshot {
+            provider: id.to_string(),
+            source: Some(source),
+            retrieved_at: Some(
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .map_err(|err| Error::new(format!("catalog timestamp: {err}")))?,
+            ),
+            models,
+        },
+    )
+}
+
+/// Refresh every provider, continuing after failures. Errors are for this refresh,
+/// not persisted in the catalog (a failed refresh leaves that file untouched).
+pub fn refresh_all(state: &Path) -> Result<BTreeMap<String, String>> {
+    let registry = load_registry(state)?;
+    let mut errors = BTreeMap::new();
+    for provider in registry.providers {
+        if let Err(err) = refresh_provider(state, &provider.id) {
+            errors.insert(provider.id, err.to_string());
         }
     }
+    Ok(errors)
 }
 
 fn catalog_url(base_url: &str) -> Result<String> {
@@ -233,7 +388,7 @@ fn fetch_catalog(base_url: &str, gateway_id: &str) -> Result<Vec<String>> {
     }
     let mut models = Vec::new();
     for model in catalog.models {
-        if model.id.is_empty() || model.id.contains('\n') {
+        if !valid_model_id(&model.id) {
             return Err(Error::new("catalog model id is empty"));
         }
         if let Some(cost) = model.cost {
@@ -302,31 +457,96 @@ fn http_get(url: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_last_good(state: &Path, id: &str, models: &[String]) -> Result<()> {
+fn write_last_good(state: &Path, catalog: &CatalogSnapshot) -> Result<()> {
     let dir = state.join("catalogs");
     fs::create_dir_all(&dir)
         .map_err(|err| Error::new(format!("failed to create {}: {err}", dir.display())))?;
-    let path = dir.join(format!("{id}.json"));
-    let body = serde_json::to_vec(models).map_err(|err| Error::new(err.to_string()))?;
-    fs::write(&path, body)
-        .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))?;
-    Ok(())
+    let path = dir.join(format!("{}.json", catalog.provider));
+    let temp = path.with_extension("json.tmp");
+    let body = serde_json::to_vec_pretty(catalog).map_err(|err| Error::new(err.to_string()))?;
+    if body.len() as u64 > BODY_CAP {
+        return Err(Error::new("stored catalog is larger than 1 MiB"));
+    }
+    // Exclusive creation prevents concurrent refreshes from sharing a temp file.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|err| {
+            Error::new(format!(
+                "cannot create {} (another refresh or stale temp file?): {err}",
+                temp.display()
+            ))
+        })?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(&body)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result.map_err(|err| Error::new(format!("failed to replace {}: {err}", path.display())))
 }
 
-fn read_last_good(state: &Path, id: &str) -> Result<Option<Vec<String>>> {
+fn read_last_good(state: &Path, id: &str) -> Result<Option<CatalogSnapshot>> {
     let path = state.join("catalogs").join(format!("{id}.json"));
-    if !path.is_file() {
-        return Ok(None);
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(Error::new(format!("{}: {err}", path.display()))),
+    };
+    let mut bytes = Vec::new();
+    file.take(BODY_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| Error::new(format!("{}: {err}", path.display())))?;
+    if bytes.len() as u64 > BODY_CAP {
+        return Err(Error::new(format!("{}: larger than 1 MiB", path.display())));
     }
-    let text = fs::read_to_string(&path)
-        .map_err(|err| Error::new(format!("failed to read {}: {err}", path.display())))?;
-    let models = serde_json::from_str(&text)
-        .map_err(|err| Error::new(format!("last-good catalog for `{id}`: {err}")))?;
-    Ok(Some(models))
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Current(CatalogSnapshot),
+        Legacy(Vec<String>),
+    }
+    let catalog = match serde_json::from_slice(&bytes)
+        .map_err(|err| Error::new(format!("{}: {err}", path.display())))?
+    {
+        Stored::Current(catalog) => catalog,
+        Stored::Legacy(models) => CatalogSnapshot {
+            provider: id.to_string(),
+            source: None,
+            retrieved_at: None,
+            models,
+        },
+    };
+    if catalog.provider != id || catalog.models.iter().any(|id| !valid_model_id(id)) {
+        return Err(Error::new(format!(
+            "{}: invalid provider or model id",
+            path.display()
+        )));
+    }
+    if let Some(stamp) = &catalog.retrieved_at {
+        time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
+            .map_err(|_| {
+                Error::new(format!(
+                    "{}: invalid retrieved_at timestamp",
+                    path.display()
+                ))
+            })?;
+    }
+    Ok(Some(catalog))
+}
+
+fn valid_model_id(id: &str) -> bool {
+    !id.is_empty() && !id.chars().any(|ch| ch.is_control() || ch.is_whitespace())
 }
 
 fn check_id(id: &str) -> Result<()> {
     if id.is_empty()
+        || id == "."
+        || id == ".."
         || !id.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.'
         })
@@ -353,8 +573,10 @@ fn check_entry(id: &str, entry: &ProviderEntry) -> Result<()> {
         check_marker(&format!("gateway `{id}` header `{name}`"), value)?;
     }
     for model in &entry.models {
-        if model.id.is_empty() {
-            return Err(Error::new(format!("gateway `{id}` has an empty model id")));
+        if !valid_model_id(&model.id) {
+            return Err(Error::new(format!(
+                "gateway `{id}` has an invalid model id"
+            )));
         }
     }
     Ok(())
@@ -420,208 +642,8 @@ fn origin_of(base_url: &str) -> Result<String> {
     Ok(format!("{scheme}://{authority}"))
 }
 
-pub fn authorization_url(verifier: &str, state: &str) -> String {
-    let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
-    let mut url = String::from(OPENAI_AUTHORIZE);
-    url.push('?');
-    for (key, value) in [
-        ("response_type", "code"),
-        ("client_id", OPENAI_CLIENT_ID),
-        ("redirect_uri", OPENAI_REDIRECT),
-        ("scope", "openid profile email offline_access"),
-        ("code_challenge", &challenge),
-        ("code_challenge_method", "S256"),
-        ("state", state),
-        ("id_token_add_organizations", "true"),
-        ("codex_cli_simplified_flow", "true"),
-        ("originator", "ahi"),
-    ] {
-        if !url.ends_with('?') {
-            url.push('&');
-        }
-        url.push_str(key);
-        url.push('=');
-        url.push_str(&form_escape(value));
-    }
-    url
-}
-
 pub fn login(state: &Path) -> Result<()> {
-    let verifier = random_token(32)?;
-    let oauth_state = random_token(16)?;
-    let url = authorization_url(&verifier, &oauth_state);
-    eprintln!("{url}");
-    try_open_browser(&url);
-    eprintln!(
-        "waiting for {OPENAI_REDIRECT}. Paste the redirect URL or the authorization code and press enter."
-    );
-    let code = wait_for_code(&oauth_state)?;
-    let token = exchange_code(OPENAI_TOKEN, &code, &verifier)?;
-    write_credential(state, &token)
-}
-
-fn wait_for_code(expected_state: &str) -> Result<String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let callback_state = expected_state.to_string();
-    let callback_tx = tx.clone();
-    std::thread::spawn(move || match accept_callback(1455, &callback_state) {
-        Ok(code) => {
-            let _ = callback_tx.send(Ok(code));
-        }
-        Err(err) => eprintln!("callback: {err}"),
-    });
-    let paste_state = expected_state.to_string();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        if let Err(err) = std::io::stdin().read_line(&mut line) {
-            let _ = tx.send(Err(Error::new(format!(
-                "failed to read login paste: {err}"
-            ))));
-            return;
-        }
-        if line.trim().is_empty() {
-            return;
-        }
-        let _ = tx.send(code_from_paste(&line, &paste_state));
-    });
-    match rx.recv() {
-        Ok(result) => result,
-        Err(_) => Err(Error::new(
-            "login ended before a browser redirect or a pasted code",
-        )),
-    }
-}
-
-pub fn accept_callback(port: u16, expected_state: &str) -> Result<String> {
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .map_err(|err| Error::new(format!("login callback on 127.0.0.1:{port}: {err}")))?;
-    listener
-        .set_nonblocking(false)
-        .map_err(|err| Error::new(err.to_string()))?;
-    let (mut stream, _) = listener
-        .accept()
-        .map_err(|err| Error::new(format!("login callback: {err}")))?;
-    stream
-        .set_read_timeout(Some(FETCH_TIMEOUT))
-        .map_err(|err| Error::new(err.to_string()))?;
-    let mut buf = vec![0_u8; 8192];
-    let n = stream
-        .read(&mut buf)
-        .map_err(|err| Error::new(format!("login callback read: {err}")))?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let code = code_from_request(&request, expected_state)?;
-    let body = b"ahi login received the browser redirect. You can close this tab.\n";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.write_all(body);
-    Ok(code)
-}
-
-fn code_from_request(request: &str, expected_state: &str) -> Result<String> {
-    let line = request
-        .lines()
-        .next()
-        .ok_or_else(|| Error::new("login callback was empty"))?;
-    let path = line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| Error::new("login callback had no path"))?;
-    code_from_paste(path, expected_state)
-}
-
-pub fn code_from_paste(text: &str, expected_state: &str) -> Result<String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err(Error::new("login paste was empty"));
-    }
-    let query = text.split_once('?').map(|(_, query)| query).unwrap_or(text);
-    let mut code = None;
-    let mut state = None;
-    for pair in query.split('&') {
-        let Some((key, value)) = pair.split_once('=') else {
-            if code.is_none() && !pair.contains('/') {
-                code = Some(pair.to_string());
-            }
-            continue;
-        };
-        let value = form_unescape(value);
-        match key {
-            "code" => code = Some(value),
-            "state" => state = Some(value),
-            _ => {}
-        }
-    }
-    if let Some(state) = state {
-        if state != expected_state {
-            return Err(Error::new("login state did not match"));
-        }
-    } else if text.contains('?') {
-        return Err(Error::new("login redirect is missing state"));
-    }
-    code.ok_or_else(|| Error::new("login redirect is missing code"))
-}
-
-pub fn exchange_code(token_url: &str, code: &str, verifier: &str) -> Result<Value> {
-    let body = format!(
-        "grant_type=authorization_code&client_id={}&code={}&redirect_uri={}&code_verifier={}",
-        form_escape(OPENAI_CLIENT_ID),
-        form_escape(code),
-        form_escape(OPENAI_REDIRECT),
-        form_escape(verifier)
-    );
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(FETCH_TIMEOUT)
-        .build();
-    let response = agent
-        .post(token_url)
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(&body)
-        .map_err(|err| Error::new(format!("token exchange failed: {err}")))?;
-    let mut body = String::new();
-    response
-        .into_reader()
-        .take(BODY_CAP)
-        .read_to_string(&mut body)
-        .map_err(|err| Error::new(format!("token response: {err}")))?;
-    let parsed: Value =
-        serde_json::from_str(&body).map_err(|err| Error::new(format!("token response: {err}")))?;
-    let token = parsed
-        .get("access_token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::new("token response has no access_token"))?;
-    if token.is_empty() {
-        return Err(Error::new("token response has an empty access_token"));
-    }
-    Ok(parsed)
-}
-
-fn write_credential(state: &Path, token: &Value) -> Result<()> {
-    let dir = state.join("credentials");
-    fs::create_dir_all(&dir)
-        .map_err(|err| Error::new(format!("failed to create {}: {err}", dir.display())))?;
-    let path = dir.join("openai.json");
-    let stored = serde_json::json!({
-        "access_token": token.get("access_token"),
-        "refresh_token": token.get("refresh_token"),
-        "expires_in": token.get("expires_in"),
-    });
-    let mut options = OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))?;
-    file.write_all(stored.to_string().as_bytes())
-        .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))?;
-    Ok(())
+    openai::login(state)
 }
 
 fn try_open_browser(url: &str) {
@@ -719,8 +741,41 @@ fn form_unescape(value: &str) -> String {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelsFile {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_providers")]
     providers: BTreeMap<String, ProviderEntry>,
+}
+
+// Validate while serde still has the input position, so validation errors carry
+// real JSON line/column locations rather than guessed string-search offsets.
+fn deserialize_providers<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, ProviderEntry>, D::Error> {
+    use serde::de::{Error as _, MapAccess, Visitor};
+    struct Providers;
+    impl<'de> Visitor<'de> for Providers {
+        type Value = BTreeMap<String, ProviderEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a provider map")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut providers = BTreeMap::new();
+            while let Some(id) = map.next_key::<String>()? {
+                check_id(&id).map_err(A::Error::custom)?;
+                let entry = map.next_value::<ProviderEntry>()?;
+                check_entry(&id, &entry).map_err(A::Error::custom)?;
+                if providers.insert(id.clone(), entry).is_some() {
+                    return Err(A::Error::custom(format!("duplicate provider `{id}`")));
+                }
+            }
+            Ok(providers)
+        }
+    }
+    deserializer.deserialize_map(Providers)
 }
 
 #[derive(Debug, Deserialize)]
@@ -854,18 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn authorization_url_names_ahi_and_the_localhost_callback() {
-        let url = authorization_url("verifier-value", "state-value");
-        assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
-        assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
-        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("originator=ahi"));
-        assert!(url.contains("state=state-value"));
-        assert!(!url.contains("verifier-value"));
-    }
-
-    #[test]
     fn http_is_only_allowed_on_loopback() {
         assert!(origin_of("http://127.0.0.1:11434/v1").is_ok());
         assert!(origin_of("http://example.com/v1").is_err());
@@ -880,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_fetch_rejects_a_redirect_a_mismatch_and_keeps_config() {
+    fn refresh_rejects_a_redirect_and_a_provider_mismatch_without_changing_curated_ids() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("harness");
         let redirect_port = serve("302 Found", "Location: http://127.0.0.1/\r\n", b"");
         fs::write(
@@ -890,15 +933,17 @@ mod tests {
             ),
         )
         .unwrap();
+        let error = refresh_provider(&dir, "lab").unwrap_err().to_string();
+        assert!(error.contains("redirects are not followed"), "{error}");
         let registry = load_registry(&dir).unwrap();
-        let lab = registry
-            .providers
-            .iter()
-            .find(|provider| provider.id == "lab")
-            .unwrap();
-        assert_eq!(lab.models, vec!["kept".to_string()]);
-        assert!(lab.catalog.contains("kept-config"), "{}", lab.catalog);
-        assert!(lab.catalog.contains("redirects are not followed"));
+        let lab = &registry.providers[1];
+        assert_eq!(
+            lab.models,
+            vec![ModelChoice {
+                id: "kept".to_string(),
+                status: CatalogMembership::Unavailable
+            }]
+        );
 
         let mismatch = br#"{"id":"other","api":"openai-completions","apiKey":"gateway","models":[{"id":"m","cost":{"input":0,"output":0}}]}"#;
         let mismatch_port = serve("200 OK", "", mismatch);
@@ -909,19 +954,22 @@ mod tests {
             ),
         )
         .unwrap();
+        assert!(refresh_provider(&dir, "lab")
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
         let registry = load_registry(&dir).unwrap();
-        let lab = registry
-            .providers
-            .iter()
-            .find(|provider| provider.id == "lab")
-            .unwrap();
+        let lab = &registry.providers[1];
         assert!(lab.models.is_empty());
-        assert!(lab.catalog.contains("does not match"));
+        assert_eq!(
+            lab.empty_reason.as_deref(),
+            Some("no models in models.json: press e to edit, c to browse the catalog")
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn catalog_fetch_records_models_and_a_later_failure_uses_last_good() {
+    fn refresh_never_fills_curated_list_and_failure_preserves_catalog_bytes() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("catalog");
         let body = br#"{"provider":"lab","api":"openai-completions","apiKey":"gateway","models":[{"id":"qwen-3.5","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}]}"#;
         let port = serve("200 OK", "", body);
@@ -932,14 +980,17 @@ mod tests {
             ),
         )
         .unwrap();
+        refresh_provider(&dir, "lab").unwrap();
+        let saved = fs::read(dir.join("catalogs/lab.json")).unwrap();
         let registry = load_registry(&dir).unwrap();
-        let lab = registry
-            .providers
-            .iter()
-            .find(|provider| provider.id == "lab")
-            .unwrap();
-        assert_eq!(lab.models, vec!["qwen-3.5".to_string()]);
-        assert_eq!(lab.catalog, "fetched");
+        let lab = &registry.providers[1];
+        assert!(lab.models.is_empty());
+        assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
+        assert!(lab
+            .empty_reason
+            .as_ref()
+            .unwrap()
+            .contains("no models in models.json"));
         let openai = &registry.providers[0];
         assert_eq!(openai.id, "openai");
         assert_eq!(openai.auth, "signed-out");
@@ -949,87 +1000,100 @@ mod tests {
             r#"{"providers":{"lab":{"baseUrl":"http://127.0.0.1:1/v1","api":"openai-completions"}}}"#,
         )
         .unwrap();
+        assert!(refresh_provider(&dir, "lab").is_err());
+        assert_eq!(fs::read(dir.join("catalogs/lab.json")).unwrap(), saved);
         let registry = load_registry(&dir).unwrap();
-        let lab = registry
-            .providers
-            .iter()
-            .find(|provider| provider.id == "lab")
-            .unwrap();
-        assert_eq!(lab.models, vec!["qwen-3.5".to_string()]);
-        assert!(lab.catalog.starts_with("last-good"), "{}", lab.catalog);
+        let lab = &registry.providers[1];
+        assert!(lab.models.is_empty());
+        assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn token_exchange_stores_a_credential_without_printing_it() {
-        let dir = crate::fixture_directory::create_unique_fixture_directory("token");
-        let body = br#"{"access_token":"token-value","refresh_token":"refresh-value","expires_in":3,"extra":true}"#;
-        let port = serve("200 OK", "Content-Type: application/json\r\n", body);
-        let token = exchange_code(
-            &format!("http://127.0.0.1:{port}/token"),
-            "code",
-            "verifier",
+    fn load_is_local_and_curated_ids_keep_order_and_catalog_membership() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("curated-local");
+        fs::create_dir_all(dir.join("catalogs")).unwrap();
+        fs::write(
+            dir.join("catalogs/openai.json"),
+            r#"["second","first","unselected"]"#,
         )
         .unwrap();
-        write_credential(&dir, &token).unwrap();
-        let stored = fs::read_to_string(dir.join("credentials/openai.json")).unwrap();
-        assert!(stored.contains("token-value"));
-        assert!(!stored.contains("extra"));
+        let watched = TcpListener::bind("127.0.0.1:0").unwrap();
+        watched.set_nonblocking(true).unwrap();
+        let config = serde_json::json!({"providers": {
+            "openai": {"baseUrl": OPENAI_ORIGIN, "api": "openai-completions", "models": [{"id":"second"},{"id":"first"},{"id":"orphan"}]},
+            "lab": {"baseUrl":"https://192.0.2.1/v1", "api":"openai-completions", "models":[{"id":"local-only"}]},
+            "watched": {"baseUrl":format!("http://{}/v1", watched.local_addr().unwrap()), "api":"openai-completions"},
+        }});
+        fs::write(dir.join("models.json"), config.to_string()).unwrap();
+        let start = std::time::Instant::now();
         let registry = load_registry(&dir).unwrap();
-        assert_eq!(registry.providers[0].auth, "signed-in");
-        let text = render_text(&registry);
-        assert!(!text.contains("token-value"));
-        let _ = fs::remove_dir_all(dir);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "local load must not wait on unreachable gateway"
+        );
+        assert_eq!(
+            watched.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "load must not even open a gateway connection"
+        );
+        assert_eq!(
+            registry.providers[0].models,
+            vec![
+                ModelChoice {
+                    id: "second".to_string(),
+                    status: CatalogMembership::Listed
+                },
+                ModelChoice {
+                    id: "first".to_string(),
+                    status: CatalogMembership::Listed
+                },
+                ModelChoice {
+                    id: "orphan".to_string(),
+                    status: CatalogMembership::Absent
+                },
+            ]
+        );
+        assert_eq!(registry.providers[0].catalog.as_ref().unwrap().source, None);
+        assert_eq!(
+            registry.providers[0].catalog_age(),
+            "retrieval time unknown (old catalog format)"
+        );
+        assert_eq!(
+            registry.providers[1].models,
+            vec![ModelChoice {
+                id: "local-only".to_string(),
+                status: CatalogMembership::Unavailable
+            }]
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn paste_checks_state() {
-        assert!(code_from_paste(
-            "http://localhost:1455/auth/callback?code=abc&state=ok",
-            "ok"
-        )
-        .is_ok());
-        assert!(code_from_paste(
-            "http://localhost:1455/auth/callback?code=abc&state=no",
-            "ok"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn callback_reads_the_code_and_rejects_a_mismatched_state() {
-        let port = free_port();
-        let handle = thread::spawn(move || accept_callback(port, "ok"));
-        let mut client = connect_when_ready(port);
-        client
-            .write_all(b"GET /auth/callback?code=abc&state=ok HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
-        assert_eq!(handle.join().unwrap().unwrap(), "abc");
-
-        let port = free_port();
-        let handle = thread::spawn(move || accept_callback(port, "ok"));
-        let mut client = connect_when_ready(port);
-        client
-            .write_all(b"GET /auth/callback?code=abc&state=no HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
-        let err = handle.join().unwrap().unwrap_err();
-        assert!(err.to_string().contains("state"), "{err}");
-    }
-
-    fn free_port() -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        port
-    }
-
-    fn connect_when_ready(port: u16) -> std::net::TcpStream {
-        for _ in 0..50 {
-            if let Ok(stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                return stream;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("callback did not listen on {port}");
+    fn a_concurrent_or_stale_temp_file_cannot_clobber_the_previous_catalog() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("atomic-catalog");
+        fs::create_dir_all(dir.join("catalogs")).unwrap();
+        fs::write(dir.join("catalogs/lab.json"), b"[\"old\"]\n").unwrap();
+        fs::write(dir.join("catalogs/lab.json.tmp"), b"other writer").unwrap();
+        let catalog = CatalogSnapshot {
+            provider: "lab".to_string(),
+            source: None,
+            retrieved_at: None,
+            models: vec!["new".to_string()],
+        };
+        assert!(write_last_good(&dir, &catalog).is_err());
+        assert_eq!(
+            fs::read(dir.join("catalogs/lab.json")).unwrap(),
+            b"[\"old\"]\n"
+        );
+        assert_eq!(
+            fs::read(dir.join("catalogs/lab.json.tmp")).unwrap(),
+            b"other writer"
+        );
+        fs::remove_file(dir.join("catalogs/lab.json.tmp")).unwrap();
+        write_last_good(&dir, &catalog).unwrap();
+        assert_eq!(read_last_good(&dir, "lab").unwrap(), Some(catalog));
+        assert!(!dir.join("catalogs/lab.json.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

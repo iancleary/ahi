@@ -1,8 +1,10 @@
-//! Location row and session row text.
-//!
-//! The screen applies dim and normal styles when it draws these strings.
+//! Styled Powerlevel10k-like location row and session row text.
+
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use super::backend::Selection;
+use super::location::GitStatus;
 use super::thinking::ThinkingLevel;
 use super::usage::SessionMeters;
 
@@ -15,72 +17,36 @@ pub(crate) fn session_model_segment(selection: &Selection, thinking: ThinkingLev
     )
 }
 
-/// The session row, with the model segment right-aligned and never truncated.
-pub(crate) fn render_session_row(
-    width: usize,
-    meters: &SessionMeters,
-    selection: &Selection,
-    thinking: ThinkingLevel,
-) -> String {
-    let right = session_model_segment(selection, thinking);
-    let fields = session_fields(meters);
-    if width == 0 {
-        return String::new();
-    }
-    let right_len = right.chars().count();
-    if right_len >= width {
-        return right;
-    }
-    let budget = width - right_len - 1;
-    let left = fit_prefix(&fields, budget);
-    if left.is_empty() {
-        let pad = width - right_len;
-        format!("{}{right}", " ".repeat(pad))
-    } else {
-        let pad = width - left.chars().count() - right_len;
-        format!("{left}{}{right}", " ".repeat(pad))
-    }
-}
-
-fn session_fields(meters: &SessionMeters) -> Vec<String> {
-    let mut fields = Vec::new();
-    if let Some(count) = meters.input_tokens {
-        fields.push(format!("↑{}", format_count(count)));
-    }
-    if let Some(count) = meters.output_tokens {
-        fields.push(format!("↓{}", format_count(count)));
-    }
-    if let Some(count) = meters.cached_input_tokens {
-        fields.push(format!("R{}", format_count(count)));
-    }
-    if let Some(cost) = meters.cost_usd {
-        let mut field = format!("${cost:.3}");
-        if meters.subscription_sign_in {
-            field.push_str(" (sub)");
-        }
-        fields.push(field);
-    }
-    if let (Some(used), Some(window)) = (meters.context_tokens, meters.context_window) {
-        if let Some(percent) = format_percent(used, window) {
-            fields.push(format!("{percent}%/{}", format_count(window)));
+/// Embed known context usage near the right end of the input's upper rule.
+/// Keep two rule cells on either side of the padded label; compact or hide
+/// the label instead of wrapping it. Unknown/zero-capacity context stays blank.
+pub(crate) fn render_context_rule(width: usize, meters: &SessionMeters) -> Line<'static> {
+    let context = meters
+        .context_tokens
+        .zip(meters.context_window)
+        .and_then(|(used, window)| format_percent(used, window).map(|percent| (percent, window)));
+    if let Some((percent, window)) = context {
+        for label in [
+            format!("{percent}% / {}", format_count(window)),
+            format!("{percent}%"),
+        ] {
+            // Label text is ASCII. Four spaces/rule cells form the right tail
+            // and separators; two more preserve a visible leading rule.
+            if width >= label.len() + 6 {
+                return Line::from(vec![
+                    Span::raw(format!("{} ", "─".repeat(width - label.len() - 4))),
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(Color::Indexed(103))
+                            .add_modifier(Modifier::DIM),
+                    ),
+                    Span::raw(" ──"),
+                ]);
+            }
         }
     }
-    if meters.automatic_compaction {
-        fields.push("(auto)".to_string());
-    }
-    fields
-}
-
-fn fit_prefix(fields: &[String], budget: usize) -> String {
-    let mut end = fields.len();
-    while end > 0 {
-        let text = fields[..end].join(" ");
-        if text.chars().count() <= budget {
-            return text;
-        }
-        end -= 1;
-    }
-    String::new()
+    Line::raw("─".repeat(width))
 }
 
 fn format_count(count: u64) -> String {
@@ -118,36 +84,144 @@ fn format_percent(part: u64, whole: u64) -> Option<String> {
     }
 }
 
-/// Directory, with an optional git label, shortened from the left when narrow.
+/// Powerlevel10k-style platform, directory, and optional git label.
+/// Shorten from the left when narrow so the branch remains visible.
 pub(crate) fn render_location_row(
     width: usize,
+    os_icon: &str,
     directory: &str,
-    git_label: Option<&str>,
-) -> String {
-    let full = match git_label {
-        Some(label) if !label.is_empty() => format!("{directory} ({label})"),
-        _ => directory.to_string(),
-    };
-    shorten_from_the_left(&full, width)
-}
-
-fn shorten_from_the_left(text: &str, width: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= width {
-        return text.to_string();
+    git: Option<&GitStatus>,
+) -> Line<'static> {
+    // Match the operator's P10k palette: path 31, anchor 39, Git 76.
+    let path_style = Style::default().fg(Color::Indexed(31));
+    let anchor_style = Style::default()
+        .fg(Color::Indexed(39))
+        .add_modifier(Modifier::BOLD);
+    let git_style = Style::default().fg(Color::Indexed(76));
+    let (parent, anchor) = directory
+        .rfind(std::path::MAIN_SEPARATOR)
+        .map(|separator| directory.split_at(separator + 1))
+        .unwrap_or(("", directory));
+    let mut spans = vec![
+        Span::raw(format!("{os_icon} ")),
+        Span::styled(format!(" {parent}"), path_style),
+        Span::styled(anchor.to_string(), anchor_style),
+    ];
+    if let Some(git) = git {
+        spans.push(Span::raw(" on "));
+        spans.push(Span::styled(format!("  {}", git.label), git_style));
+        if let Some(changes) = &git.changes {
+            for (symbol, count, color) in [
+                ("~", changes.conflicted, 196),
+                ("+", changes.staged, 178),
+                ("!", changes.unstaged, 178),
+                ("?", changes.untracked, 39),
+            ] {
+                if count > 0 {
+                    spans.push(Span::styled(
+                        format!(" {symbol}{count}"),
+                        Style::default().fg(Color::Indexed(color)),
+                    ));
+                }
+            }
+        } else {
+            spans.push(Span::styled(
+                " status unavailable",
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+        }
     }
     if width == 0 {
-        return String::new();
+        return Line::default();
     }
-    let mut shortened = String::from("…");
-    let keep = width - 1;
-    shortened.extend(chars[chars.len() - keep..].iter());
-    shortened
+    let length: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if length > width {
+        // Trim the source spans, not a flattened string, so visible text keeps
+        // its color even when the OS/path prefix has been clipped away.
+        let mut skip = length - (width - 1);
+        for span in &mut spans {
+            let count = span.content.chars().count();
+            let removed = skip.min(count);
+            span.content = span
+                .content
+                .chars()
+                .skip(removed)
+                .collect::<String>()
+                .into();
+            skip -= removed;
+        }
+        spans.insert(0, Span::raw("…"));
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_location_keeps_the_visible_branch_green() {
+        let git = GitStatus {
+            label: "main".to_string(),
+            changes: Some(super::super::location::GitChanges::default()),
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(render_location_row(
+                        12,
+                        "",
+                        "~/Work/gh/ahi",
+                        Some(&git),
+                    )),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..12).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert_eq!(text, "…on   main");
+        for x in 4..12 {
+            assert_eq!(buffer[(x, 0)].fg, Color::Indexed(76));
+            assert!(!buffer[(x, 0)].modifier.contains(Modifier::DIM));
+        }
+    }
+
+    #[test]
+    fn git_markers_use_p10k_order_colors_and_explicit_unavailable_status() {
+        use super::super::location::GitChanges;
+        let mut git = GitStatus {
+            label: "main".to_string(),
+            changes: Some(GitChanges {
+                conflicted: 1,
+                staged: 2,
+                unstaged: 6,
+                untracked: 3,
+            }),
+        };
+        let row = render_location_row(100, "", "/tmp/ahi", Some(&git));
+        assert_eq!(row.to_string(), "  /tmp/ahi on   main ~1 +2 !6 ?3");
+        for (marker, color) in [(" ~1", 196), (" +2", 178), (" !6", 178), (" ?3", 39)] {
+            let span = row
+                .spans
+                .iter()
+                .find(|span| span.content == marker)
+                .unwrap();
+            assert_eq!(span.style.fg, Some(Color::Indexed(color)));
+        }
+        git.changes = Some(GitChanges::default());
+        assert_eq!(
+            render_location_row(100, "", "/tmp/ahi", Some(&git)).to_string(),
+            "  /tmp/ahi on   main"
+        );
+        git.changes = None;
+        assert_eq!(
+            render_location_row(100, "", "/tmp/ahi", Some(&git)).to_string(),
+            "  /tmp/ahi on   main status unavailable"
+        );
+    }
 
     fn reference_meters() -> SessionMeters {
         SessionMeters {
@@ -162,67 +236,47 @@ mod tests {
         }
     }
 
-    fn selection() -> Selection {
-        Selection {
-            gateway: "openai".to_string(),
-            model: "gpt-6.1-sol".to_string(),
-        }
-    }
-
     #[test]
-    fn session_row_matches_the_reference_order_and_drops_fields() {
-        let left = "↑139k ↓11k R1.2M $0.502 (sub) 28.4%/272k (auto)";
-        let right = "(openai) gpt-6.1-sol • medium";
-        let wide = render_session_row(
-            120,
-            &reference_meters(),
-            &selection(),
-            ThinkingLevel::Medium,
+    fn input_rule_embeds_context_and_compacts_without_wrapping() {
+        let meters = reference_meters();
+        assert_eq!(
+            render_context_rule(24, &meters).to_string(),
+            "──────── 28.4% / 272k ──"
         );
-        assert_eq!(wide.chars().count(), 120);
-        assert!(wide.starts_with(left), "{wide}");
-        assert!(wide.ends_with(right), "{wide}");
-        assert!(!wide.contains("CH"), "{wide}");
-        let mut previous = 0;
-        for marker in ["↑", "↓", "R", "$", "(sub)", "28.4%/", "(auto)"] {
-            let position = wide
-                .find(marker)
-                .unwrap_or_else(|| panic!("missing {marker} in {wide}"));
-            assert!(position >= previous, "{marker} out of order in {wide}");
-            previous = position;
-        }
-
-        let narrow =
-            render_session_row(60, &reference_meters(), &selection(), ThinkingLevel::Medium);
-        assert_eq!(narrow.chars().count(), 60, "{narrow}");
-        assert!(narrow.ends_with(right), "{narrow}");
-        assert!(narrow.contains("↑139k ↓11k R1.2M $0.502 (sub)"), "{narrow}");
-        assert!(!narrow.contains("(auto)"), "{narrow}");
-        assert!(!narrow.contains("28.4%"), "{narrow}");
-        assert!(!narrow.contains("CH"), "{narrow}");
+        assert_eq!(
+            render_context_rule(17, &meters).to_string(),
+            "──────── 28.4% ──"
+        );
+        assert_eq!(render_context_rule(10, &meters).to_string(), "──────────");
+        assert_eq!(render_context_rule(0, &meters).to_string(), "");
     }
 
     #[test]
-    fn unknown_usage_fields_are_omitted_and_zero_is_shown() {
-        let meters = SessionMeters {
-            input_tokens: Some(8),
-            output_tokens: Some(2),
-            context_tokens: Some(8),
-            context_window: Some(128_000),
-            ..SessionMeters::default()
-        };
-        let row = render_session_row(80, &meters, &selection(), ThinkingLevel::Medium);
-        assert!(row.contains("↑8 ↓2 0%/128k"), "{row}");
-        assert!(!row.contains('R'), "{row}");
-        assert!(!row.contains("CH"), "{row}");
-        assert!(!row.contains('$'), "{row}");
-        assert!(!row.contains("(sub)"), "{row}");
-        assert!(!row.contains("(auto)"), "{row}");
-
-        let mut known_zero = meters;
-        known_zero.cached_input_tokens = Some(0);
-        let row = render_session_row(80, &known_zero, &selection(), ThinkingLevel::Medium);
-        assert!(row.contains("R0"), "{row}");
-        assert!(!row.contains("CH"), "{row}");
+    fn input_rule_omits_unknown_context_but_shows_known_zero() {
+        let mut meters = SessionMeters::default();
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
+        meters.context_window = Some(128_000);
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
+        meters.context_tokens = Some(0);
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "── 0% / 128k ──"
+        );
+        meters.context_window = None;
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
+        meters.context_window = Some(0);
+        assert_eq!(
+            render_context_rule(15, &meters).to_string(),
+            "───────────────"
+        );
     }
 }

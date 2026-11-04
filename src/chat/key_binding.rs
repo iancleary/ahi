@@ -21,6 +21,8 @@ pub(crate) enum KeyAction {
     Cancel,
     ScrollTowardOlder,
     ScrollTowardNewer,
+    JumpToTop,
+    JumpToBottom,
     CycleThinkingLevel,
     Edit(EditorKey),
     Ignore,
@@ -41,6 +43,12 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::ExitIfInputEmpty
         }
+        KeyCode::Char('k' | 'K') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::JumpToTop
+        }
+        KeyCode::Char('l' | 'L') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::JumpToBottom
+        }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::CycleThinkingLevel
         }
@@ -51,6 +59,8 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
         KeyCode::Right => KeyAction::Edit(EditorKey::Right),
         KeyCode::Up => KeyAction::Edit(EditorKey::Up),
         KeyCode::Down => KeyAction::Edit(EditorKey::Down),
+        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::JumpToTop,
+        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::JumpToBottom,
         KeyCode::Home => KeyAction::Edit(EditorKey::Home),
         KeyCode::End => KeyAction::Edit(EditorKey::End),
         KeyCode::Backspace => KeyAction::Edit(EditorKey::Backspace),
@@ -133,6 +143,56 @@ mod tests {
             translate(press(KeyCode::Esc, KeyModifiers::NONE)),
             KeyAction::Cancel
         );
+    }
+
+    #[test]
+    fn jump_shortcuts_preserve_plain_editing_keys() {
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                KeyAction::JumpToTop,
+            ),
+            (
+                KeyCode::Char('K'),
+                KeyModifiers::CONTROL,
+                KeyAction::JumpToTop,
+            ),
+            (
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+                KeyAction::JumpToBottom,
+            ),
+            (
+                KeyCode::Char('L'),
+                KeyModifiers::CONTROL,
+                KeyAction::JumpToBottom,
+            ),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+                KeyAction::Edit(EditorKey::Character('k')),
+            ),
+            (
+                KeyCode::Char('l'),
+                KeyModifiers::NONE,
+                KeyAction::Edit(EditorKey::Character('l')),
+            ),
+            (KeyCode::Home, KeyModifiers::CONTROL, KeyAction::JumpToTop),
+            (KeyCode::End, KeyModifiers::CONTROL, KeyAction::JumpToBottom),
+            (
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                KeyAction::Edit(EditorKey::Home),
+            ),
+            (
+                KeyCode::End,
+                KeyModifiers::NONE,
+                KeyAction::Edit(EditorKey::End),
+            ),
+        ] {
+            assert_eq!(translate(press(code, modifiers)), expected);
+        }
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Session token, cost, and context figures.
 //!
-//! `None` means the figure is unknown and must be omitted. Zero is a known
-//! value and is shown. The backend fills these figures. The status row renders them.
+//! `None` means a figure is unknown. The backend fills these figures; only
+//! current context usage/capacity is rendered, within the input's upper rule.
+//! Cumulative accounting is retained internally, not in the permanent footer.
 
-/// Session figures shown on the left of the session row.
+/// Backend accounting and the latest response's context figures.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SessionMeters {
     pub(crate) input_tokens: Option<u64>,

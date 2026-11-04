@@ -1,15 +1,110 @@
-//! Working directory and the git label read from `HEAD`.
+//! Working directory, Git HEAD, and a read-only worktree-status snapshot.
 //!
-//! This does not spawn `git`. A worktree `.git` file is followed when it
-//! contains a `gitdir:` line.
+//! HEAD is read directly, including worktree `.git` indirection. Change counts
+//! use Git's NUL-delimited porcelain format, without optional index writes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-/// Directory display, with the home directory shortened to `~`, and the git label.
-pub(crate) fn current() -> (String, Option<String>) {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GitChanges {
+    pub conflicted: usize,
+    pub staged: usize,
+    pub unstaged: usize,
+    pub untracked: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitStatus {
+    pub label: String,
+    /// None means status could not be read, not that the worktree is clean.
+    pub changes: Option<GitChanges>,
+}
+
+/// Nerd Font platform logo, read once when a chat screen is created.
+pub(crate) fn os_icon() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ""
+    } else if cfg!(target_os = "windows") {
+        ""
+    } else if cfg!(target_os = "linux") {
+        let arch = fs::read_to_string("/etc/os-release")
+            .map(|release| {
+                release
+                    .lines()
+                    .any(|line| matches!(line, "ID=arch" | "ID=\"arch\""))
+            })
+            .unwrap_or(false);
+        if arch {
+            ""
+        } else {
+            ""
+        }
+    } else {
+        ""
+    }
+}
+
+/// Directory display, with home shortened to `~`, and the current Git snapshot.
+pub(crate) fn current() -> (String, Option<GitStatus>) {
     let directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    (display_directory(&directory), read_git_label(&directory))
+    (display_directory(&directory), read_git_status(&directory))
+}
+
+fn read_git_status(start: &Path) -> Option<GitStatus> {
+    let label = read_git_label(start)?;
+    let changes = Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .current_dir(start)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| parse_changes(&output.stdout));
+    Some(GitStatus { label, changes })
+}
+
+fn parse_changes(porcelain: &[u8]) -> Option<GitChanges> {
+    let mut changes = GitChanges::default();
+    let mut entries = porcelain.split(|byte| *byte == 0);
+    while let Some(entry) = entries.next() {
+        if entry.is_empty() {
+            continue;
+        }
+        let [x, y, b' ', _, ..] = entry else {
+            return None;
+        };
+        match [*x, *y] {
+            [b'?', b'?'] => changes.untracked += 1,
+            [b'!', b'!'] => {}
+            [b'D', b'D']
+            | [b'A', b'U']
+            | [b'U', b'D']
+            | [b'U', b'A']
+            | [b'D', b'U']
+            | [b'A', b'A']
+            | [b'U', b'U'] => changes.conflicted += 1,
+            _ if b" MADRCT".contains(x) && b" MADRCT".contains(y) => {
+                changes.staged += usize::from(*x != b' ');
+                changes.unstaged += usize::from(*y != b' ');
+            }
+            _ => return None,
+        }
+        // Renames/copies have a second NUL-delimited pathname. Neither path
+        // needs UTF-8 decoding, and spaces/newlines in filenames stay opaque.
+        if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
+            entries.next().filter(|path| !path.is_empty())?;
+        }
+    }
+    Some(changes)
 }
 
 /// Branch name, or a 7-character commit id when `HEAD` is detached.
@@ -98,29 +193,45 @@ mod tests {
         fs::write(repo.join("file"), "a\n").unwrap();
         git(&repo, &["add", "file"]);
         git(&repo, &["commit", "-m", "init"]);
-        let branch = read_git_label(&repo);
-        assert_eq!(branch.as_deref(), Some("main"));
-        let row = crate::chat::status::render_location_row(80, "/tmp/ahi", branch.as_deref());
-        assert!(row.ends_with("(main)"), "{row}");
+        let branch = read_git_status(&repo);
+        assert_eq!(
+            branch,
+            Some(GitStatus {
+                label: "main".to_string(),
+                changes: Some(GitChanges::default())
+            })
+        );
+        let row = crate::chat::status::render_location_row(80, "", "/tmp/ahi", branch.as_ref())
+            .to_string();
+        assert_eq!(row, "  /tmp/ahi on   main");
 
         let sha = git_stdout(&repo, &["rev-parse", "HEAD"]);
         let short = sha.trim().chars().take(7).collect::<String>();
         git(&repo, &["checkout", "--detach", "HEAD"]);
         assert_eq!(read_git_label(&repo).as_deref(), Some(short.as_str()));
-        let detached = crate::chat::status::render_location_row(80, "/tmp/ahi", Some(&short));
-        assert!(detached.contains(&format!("({short})")), "{detached}");
-        assert!(!detached.contains("(main)"), "{detached}");
+        let detached = crate::chat::status::render_location_row(
+            80,
+            "",
+            "/tmp/ahi",
+            read_git_status(&repo).as_ref(),
+        )
+        .to_string();
+        assert_eq!(detached, format!("  /tmp/ahi on   {short}"));
 
         let outside = crate::fixture_directory::create_unique_fixture_directory("chat-nogit");
         assert!(read_git_label(&outside).is_none());
-        let row = crate::chat::status::render_location_row(80, "/tmp/plain", None);
-        assert_eq!(row, "/tmp/plain");
-        assert!(!row.contains('('));
+        let row = crate::chat::status::render_location_row(80, "", "/tmp/plain", None).to_string();
+        assert_eq!(row, "  /tmp/plain");
 
-        let shortened =
-            crate::chat::status::render_location_row(12, "/home/user/src/ahi", Some("main"));
+        let shortened = crate::chat::status::render_location_row(
+            12,
+            "",
+            "/home/user/src/ahi",
+            branch.as_ref(),
+        )
+        .to_string();
         assert!(shortened.starts_with('…'), "{shortened}");
-        assert!(shortened.ends_with("(main)"), "{shortened}");
+        assert!(shortened.ends_with(" main"), "{shortened}");
         assert_eq!(shortened.chars().count(), 12);
 
         let work = repo.join("work");
@@ -129,6 +240,88 @@ mod tests {
         assert_eq!(read_git_label(&work).as_deref(), Some(short.as_str()));
         let _ = fs::remove_dir_all(repo);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn git_snapshot_counts_changes_and_tracks_branch_changes_without_index_writes() {
+        let repo = crate::fixture_directory::create_unique_fixture_directory("chat-git-status");
+        git(&repo, &["init", "-b", "main"]);
+        for name in ["both", "gone", "old name"] {
+            fs::write(repo.join(name), "base\n").unwrap();
+        }
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("both"), "staged\n").unwrap();
+        git(&repo, &["add", "both"]);
+        fs::write(repo.join("both"), "working\n").unwrap();
+        fs::remove_file(repo.join("gone")).unwrap();
+        git(&repo, &["mv", "old name", "new name"]);
+        fs::write(repo.join("untracked file"), "new\n").unwrap();
+        let index_before = fs::read(repo.join(".git/index")).unwrap();
+        let snapshot = read_git_status(&repo).unwrap();
+        assert_eq!(
+            snapshot,
+            GitStatus {
+                label: "main".to_string(),
+                changes: Some(GitChanges {
+                    staged: 2,
+                    unstaged: 2,
+                    untracked: 1,
+                    conflicted: 0
+                })
+            }
+        );
+        assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index_before);
+        assert_eq!(
+            crate::chat::status::render_location_row(100, "", "/tmp/ahi", Some(&snapshot))
+                .to_string(),
+            "  /tmp/ahi on   main +2 !2 ?1"
+        );
+        git(&repo, &["checkout", "-b", "tool-branch"]);
+        let next = read_git_status(&repo).unwrap();
+        assert_eq!(next.label, "tool-branch");
+        assert_eq!(
+            next.changes,
+            Some(GitChanges {
+                staged: 2,
+                unstaged: 2,
+                untracked: 1,
+                conflicted: 0
+            })
+        );
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "clean"]);
+        assert_eq!(
+            read_git_status(&repo),
+            Some(GitStatus {
+                label: "tool-branch".to_string(),
+                changes: Some(GitChanges::default())
+            })
+        );
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn porcelain_handles_conflicts_rename_paths_and_unusual_filename_bytes() {
+        assert_eq!(
+            parse_changes(b"UU conflict\0AA added\0DD deleted\0"),
+            Some(GitChanges {
+                conflicted: 3,
+                ..GitChanges::default()
+            })
+        );
+        assert_eq!(
+            parse_changes(b"R  new\nname\0old\nname\0 M modified\0?? non-utf8-\xff\0"),
+            Some(GitChanges {
+                staged: 1,
+                unstaged: 1,
+                untracked: 1,
+                conflicted: 0
+            })
+        );
+        assert_eq!(parse_changes(b"R  missing-source\0"), None);
+        assert_eq!(parse_changes(b"not porcelain\0"), None);
+        assert_eq!(parse_changes(b""), Some(GitChanges::default()));
     }
 
     fn git(directory: &Path, args: &[&str]) {

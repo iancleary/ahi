@@ -72,12 +72,13 @@ pub fn render_json(report: &Report) -> String {
             value
         })
         .collect();
-    let value = json!({
+    let mut value = json!({
         "ahi_version": VERSION,
         "result": outcome_name(report.result),
         "warnings": report.warnings,
         "hooks": hooks,
     });
+    value.sort_all_objects();
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string()) + "\n"
 }
 
@@ -115,7 +116,7 @@ pub fn render_sarif(report: &Report) -> String {
             results.push(result);
         }
     }
-    let value = json!({
+    let mut value = json!({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
@@ -129,6 +130,7 @@ pub fn render_sarif(report: &Report) -> String {
             "results": results,
         }]
     });
+    value.sort_all_objects();
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string()) + "\n"
 }
 
