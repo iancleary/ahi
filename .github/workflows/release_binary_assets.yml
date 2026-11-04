@@ -42,6 +42,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pin CI to an exact recent stable: a committed rust-toolchain.toml
+  # (channel = "stable") would otherwise float with rustup's resolution.
+  # RUSTUP_TOOLCHAIN outranks the file. Bump this and the install step
+  # deliberately when adopting a new stable.
+  RUSTUP_TOOLCHAIN: "1.99.1"
 
 defaults:
   run:
@@ -135,10 +140,10 @@ jobs:
           fetch-depth: 0
 
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
-        with:
-          toolchain: 1.88.0
-          targets: ${{ matrix.target }}
+        # Runners ship rustup preinstalled; no third-party action installs Rust.
+        # The musl cross targets need their std libraries installed.
+        shell: bash
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt --target "${{ matrix.target }}"
 
       - name: install musl C compiler
         run: sudo apt-get update && sudo apt-get install --yes musl-tools

@@ -1,0 +1,12 @@
+# Local development tracks the latest stable Rust (rustup resolves
+# "stable" to the most recently installed stable toolchain; run
+# `rustup update` to move it forward). CI, publish, and the release
+# asset workflows pin an exact recent stable with RUSTUP_TOOLCHAIN
+# (bump deliberately when adopting a new stable); the env var outranks
+# this file in rustup's precedence. The MSRV floor (rust-version = "1.88"
+# in Cargo.toml) is verified only by the publish workflow's pre-publish
+# MSRV gate.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

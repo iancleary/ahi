@@ -14,6 +14,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pin CI to an exact recent stable: a committed rust-toolchain.toml
+  # (channel = "stable") would otherwise float with rustup's resolution.
+  # RUSTUP_TOOLCHAIN outranks the file. Bump this and the install steps
+  # deliberately when adopting a new stable.
+  RUSTUP_TOOLCHAIN: "1.99.1"
 
 permissions:
   contents: read
@@ -31,10 +36,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
-        with:
-          toolchain: 1.88.0
-          components: rustfmt, clippy
+        # Runners ship rustup preinstalled; no third-party action installs Rust.
+        shell: bash
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -68,9 +72,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-16
-        with:
-          toolchain: 1.88.0
+        # Runners ship rustup preinstalled; no third-party action installs Rust.
+        # The publish job does not need clippy or rustfmt.
+        shell: bash
+        run: rustup toolchain install 1.99.1 --profile minimal
+
+      - name: verify MSRV floor
+        # rust-version = "1.88" in Cargo.toml is a promise to downstream
+        # users. Ordinary CI builds a pinned recent stable, so this is the
+        # one place the declared floor is exercised: immediately before it
+        # is published. The explicit +toolchain override outranks the
+        # RUSTUP_TOOLCHAIN env var set above.
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --all-features --locked
 
       - name: Publish to crates.io
         # The token is mapped only in this step, only in this job, and only
