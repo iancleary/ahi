@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `ahi update` replaces the running ahi binary from the attested Linux archive of the latest release. It resolves the latest GitHub release, downloads `ahi-<version>-sha256sums.txt` and the target archive, verifies both files against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary. Any failure refuses the target and leaves the binary untouched. Linux only; macOS and Windows keep `cargo install`. The command is not named `self-update`.
+
 ## 0.3.0 (unreleased)
 
 ### Breaking changes

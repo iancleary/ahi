@@ -292,14 +292,19 @@ fn list_checks_and_explain() {
 
 #[test]
 fn later_commands_fail_closed() {
-    let update = ahi().arg("update").output().unwrap();
-    assert_eq!(update.status.code(), Some(1));
-    let update_err = String::from_utf8(update.stderr).unwrap();
-    assert!(update_err.contains("not implemented until"), "{update_err}");
-    assert!(
-        update_err.contains("attested archive replacement"),
-        "{update_err}"
-    );
+    // ahi update refuses platforms without published archives before any
+    // network use. On Linux it would proceed to the release lookup, which
+    // this offline suite does not exercise.
+    if !cfg!(target_os = "linux") {
+        let update = ahi().arg("update").output().unwrap();
+        assert_eq!(update.status.code(), Some(1));
+        let update_err = String::from_utf8(update.stderr).unwrap();
+        assert!(
+            update_err.contains("attested Linux archives"),
+            "{update_err}"
+        );
+        assert!(update_err.contains("cargo install ahi"), "{update_err}");
+    }
     for cmd in ["hooks", "install", "uninstall"] {
         let output = ahi().arg(cmd).output().unwrap();
         let code = output.status.code();

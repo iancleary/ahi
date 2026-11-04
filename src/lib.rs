@@ -22,6 +22,7 @@ pub mod runner;
 mod shlex;
 pub mod store;
 pub mod tui;
+pub mod update;
 mod yaml_safe;
 
 #[cfg(test)]
