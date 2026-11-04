@@ -6,10 +6,9 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/write_sha256sums.sh --version <semver> --directory <path>
 
-The directory must contain the four published archives:
+The directory must contain the three published archives:
   ahi-<version>-linux-x86_64.tar.gz
   ahi-<version>-linux-aarch64.tar.gz
-  ahi-<version>-darwin-aarch64.tar.gz
   ahi-<version>-windows-x86_64.tar.gz
 
 The sums file lists them in that order.
@@ -49,7 +48,6 @@ fi
 names=(
   "ahi-${version}-linux-x86_64.tar.gz"
   "ahi-${version}-linux-aarch64.tar.gz"
-  "ahi-${version}-darwin-aarch64.tar.gz"
   "ahi-${version}-windows-x86_64.tar.gz"
 )
 sums_name="ahi-${version}-sha256sums.txt"

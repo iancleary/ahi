@@ -32,12 +32,7 @@ const BINARY_CAP: u64 = 64 * 1024 * 1024;
 
 /// The archive suffixes the release workflow publishes, in the order the
 /// sha256sums file lists them.
-const TARGET_SUFFIXES: [&str; 4] = [
-    "linux-x86_64",
-    "linux-aarch64",
-    "darwin-aarch64",
-    "windows-x86_64",
-];
+const TARGET_SUFFIXES: [&str; 3] = ["linux-x86_64", "linux-aarch64", "windows-x86_64"];
 
 /// Run `ahi update`.
 pub fn run() -> Result<()> {
@@ -211,7 +206,6 @@ fn artifact_for(os: &str, arch: &str) -> Result<String> {
     let suffix = match (os, arch) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
-        ("macos", "aarch64") => "darwin-aarch64",
         ("windows", "x86_64") => "windows-x86_64",
         _ => {
             return Err(Error::new(format!(
@@ -560,10 +554,8 @@ mod tests {
             artifact_for("linux", "aarch64").unwrap(),
             "ahi-linux-aarch64.tar.gz"
         );
-        assert_eq!(
-            artifact_for("macos", "aarch64").unwrap(),
-            "ahi-darwin-aarch64.tar.gz"
-        );
+        let err = artifact_for("macos", "aarch64").unwrap_err();
+        assert!(err.to_string().contains("cargo install ahi"));
         assert_eq!(
             artifact_for("windows", "x86_64").unwrap(),
             "ahi-windows-x86_64.tar.gz"
@@ -595,7 +587,7 @@ mod tests {
         format!("ahi-{VERSION_STAMP}-{suffix}.tar.gz")
     }
 
-    const DIGEST_LETTERS: [&str; 4] = ["a", "b", "c", "d"];
+    const DIGEST_LETTERS: [&str; 3] = ["a", "b", "c"];
 
     fn full_digests() -> Vec<(String, String)> {
         TARGET_SUFFIXES

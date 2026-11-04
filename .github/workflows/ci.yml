@@ -30,9 +30,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-26 instead of macos-latest: the macos-15 arm64 pool spent
-        # 2026-11-04 cancelling queued jobs for capacity.
-        os: [ubuntu-latest, macos-26, windows-latest]
+        # macOS is deferred while hosted ARM64 capacity is unavailable.
+        # See docs/macos-update-follow-up.md before restoring it.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

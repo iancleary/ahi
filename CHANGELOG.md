@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 (2026-11-04)
 
 ### Changed
 
-- Release `release_binary_assets.yml` now publishes four attested archives instead of two: `linux-x86_64` and `linux-aarch64` (musl-static, bit-reproducible as before) plus `darwin-aarch64` (built natively on `macos-15`) and `windows-x86_64` (built natively on `windows-2025`). The macOS and Windows archives ship unsigned and are attested but not promised to be bit-reproducible. `write_sha256sums.sh` and `attach_release_assets.sh` cover the four archives and the sums file.
-- `ahi update` replaces the running binary on every published target: macOS (Apple silicon) and Windows x86_64 no longer refuse. Windows uses a move-the-running-executable-aside dance because Windows refuses to replace a file a running process has open. Hosts without a published archive still refuse with a `cargo install ahi` pointer before any network use.
+- Releases now publish three attested archives: `linux-x86_64` and `linux-aarch64` (musl-static, bit-reproducible as before), plus `windows-x86_64` (built natively on `windows-2025`, unsigned and not promised to be bit-reproducible).
+- `ahi update` now supports Windows x86_64 without Cargo. Windows moves the running executable aside before replacing it. Linux support is unchanged. macOS archives and CI are deferred while hosted ARM64 runners lack capacity; use `cargo install ahi` on macOS. See `docs/macos-update-follow-up.md` for the restoration checklist.
 
 ## 0.3.1 (2026-11-04)
 

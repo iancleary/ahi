@@ -297,7 +297,6 @@ fn later_commands_fail_closed() {
     // so the network path is never exercised on any host.
     let host_supported = (cfg!(target_os = "linux")
         && (cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64")))
-        || (cfg!(target_os = "macos") && cfg!(target_arch = "aarch64"))
         || (cfg!(target_os = "windows") && cfg!(target_arch = "x86_64"));
     if !host_supported {
         let update = ahi().arg("update").output().unwrap();

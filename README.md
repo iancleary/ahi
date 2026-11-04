@@ -50,7 +50,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | `ahi doctor` | Version, git, config path, cache path and whether it is writable, scratch directory, state directory, policy summary. Sandbox detection is not in v0.1. |
 | `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
 | `ahi hooks install`, `ahi hooks uninstall` | Exit 1. They are the hook shim commands and are not implemented. Top-level `install` and `uninstall` are not commands. |
-| `ahi update` | Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, darwin-aarch64, and windows-x86_64; other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`. |
+| `ahi update` | Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, and windows-x86_64; macOS and other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`. |
 | `ahi tui [--refresh]` | Pick curated models from `models.json`. Load is local-only; `--refresh` explicitly refreshes reference catalogs. Enter saves a selection and opens local echo-backed chat (no model API calls). A pipe prints the load and catalog membership. |
 | `ahi login` | Sign in with ChatGPT using the current direct-token browser flow. Prints the URL and accepts a pasted full callback URL when the browser cannot reach ahi. |
 
@@ -140,15 +140,14 @@ exec ahi run --fix
 
 ## Release assets
 
-A published GitHub release for tag `v<version>` carries five assets. `<version>` is the SemVer string without the leading `v` (tag `v0.1.1` uses `0.1.1`).
+A published GitHub release for tag `v<version>` carries four assets. `<version>` is the SemVer string without the leading `v` (tag `v0.1.1` uses `0.1.1`).
 
 - `ahi-<version>-linux-x86_64.tar.gz`
 - `ahi-<version>-linux-aarch64.tar.gz`
-- `ahi-<version>-darwin-aarch64.tar.gz`
 - `ahi-<version>-windows-x86_64.tar.gz`
 - `ahi-<version>-sha256sums.txt`
 
-Each archive contains one `ahi` executable at the archive root (`ahi.exe` on Windows) and no other members. The Linux archives are statically linked and bit-reproducible on their runner; the macOS and Windows archives are built natively and are not promised to be bit-reproducible. The sums file is `sha256sum` output for those four archives in the order listed above.
+Each archive contains one `ahi` executable at the archive root (`ahi.exe` on Windows) and no other members. The Linux archives are statically linked and bit-reproducible on their runner; the Windows archive is built natively and is not promised to be bit-reproducible. On macOS use `cargo install ahi` until [native updates are restored](docs/macos-update-follow-up.md). The sums file is `sha256sum` output for those three archives in the order listed above.
 
 From the directory that contains the downloaded files, for release `0.1.1`:
 
@@ -156,7 +155,6 @@ From the directory that contains the downloaded files, for release `0.1.1`:
 sha256sum --check ahi-0.1.1-sha256sums.txt
 gh attestation verify ahi-0.1.1-linux-x86_64.tar.gz --repo iancleary/ahi
 gh attestation verify ahi-0.1.1-linux-aarch64.tar.gz --repo iancleary/ahi
-gh attestation verify ahi-0.1.1-darwin-aarch64.tar.gz --repo iancleary/ahi
 gh attestation verify ahi-0.1.1-windows-x86_64.tar.gz --repo iancleary/ahi
 gh attestation verify ahi-0.1.1-sha256sums.txt --repo iancleary/ahi
 ```
