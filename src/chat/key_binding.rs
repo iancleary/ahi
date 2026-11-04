@@ -24,6 +24,7 @@ pub(crate) enum KeyAction {
     JumpToTop,
     JumpToBottom,
     CycleThinkingLevel,
+    CopySelection,
     Edit(EditorKey),
     Ignore,
 }
@@ -51,6 +52,9 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::CycleThinkingLevel
+        }
+        KeyCode::Char('y' | 'Y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::CopySelection
         }
         KeyCode::Esc => KeyAction::Cancel,
         KeyCode::PageUp => KeyAction::ScrollTowardOlder,

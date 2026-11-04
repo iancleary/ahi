@@ -28,6 +28,9 @@ fn server(status: &str, content_type: &str, body: &str) -> (String, thread::Join
                 Err(error) => panic!("{error}"),
             }
         };
+        // Accepted sockets can inherit O_NONBLOCK on macOS. The listener polls,
+        // but each connected fixture request must use blocking, timed reads.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();

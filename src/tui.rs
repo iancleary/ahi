@@ -1,11 +1,11 @@
 //! Curated-model picker, catalog curation, editor handoff, and chat entry.
 //!
-//! Enter saves a curated selection and opens the local echo-backed chat.
+//! Enter saves a curated selection and opens chat.
 //! Non-terminal invocation prints the local registry without opening chat.
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -42,13 +42,23 @@ pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
     // Cancelling startup exits, even if an old selection file exists. Only
     // Enter starts chat; cancelling /model instead keeps the active selection.
     if let Some(selection) = pick(state, &mut picker, refresh)? {
-        chat::interact(state, &selection, || {
+        chat::interact(state, &selection, |view, gateway| {
             // Reopen the same curated picker, with a fresh local snapshot.
             // A malformed external edit retains the last valid registry.
             if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
                 picker.status = err.to_string();
             }
             picker.reset_view();
+            if matches!(view, chat::PickerView::Catalog) {
+                if let Some(provider) = picker
+                    .registry
+                    .providers
+                    .iter()
+                    .position(|entry| entry.id == gateway)
+                {
+                    picker.screen = Screen::Catalog { provider };
+                }
+            }
             pick(state, &mut picker, false)
         })?;
     }
@@ -105,9 +115,7 @@ impl Picker {
             registry,
             screen: Screen::Picker,
             cursor,
-            status:
-                "Enter saves the highlighted model and opens local echo chat (no model API calls)"
-                    .to_string(),
+            status: "Enter saves the highlighted model and opens chat".to_string(),
             refresh_errors: BTreeMap::new(),
             print_on_exit: Vec::new(),
         }
@@ -162,16 +170,14 @@ impl Picker {
             // Legacy terminals send uppercase letters; enhanced keyboard
             // protocols can send lowercase letters with a Shift modifier.
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J')
-                if matches!(self.screen, Screen::Catalog { .. })
-                    && (key.modifiers.contains(KeyModifiers::SHIFT)
-                        || key.code == KeyCode::Char('J')) =>
+                if (key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.code == KeyCode::Char('J')) =>
             {
                 self.reorder(state, 1)
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K')
-                if matches!(self.screen, Screen::Catalog { .. })
-                    && (key.modifiers.contains(KeyModifiers::SHIFT)
-                        || key.code == KeyCode::Char('K')) =>
+                if (key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.code == KeyCode::Char('K')) =>
             {
                 self.reorder(state, -1)
             }
@@ -180,6 +186,31 @@ impl Picker {
             _ => return false,
         }
         true
+    }
+
+    fn reorder_provider(&mut self, state: &Path, provider: usize, delta: isize) {
+        let target = provider as isize + delta;
+        if target < 0 || target >= self.registry.providers.len() as isize {
+            return;
+        }
+        let id = self.registry.providers[provider].id.clone();
+        let mut order = self
+            .registry
+            .providers
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        order.swap(provider, target as usize);
+        match harness::save_provider_order(state, &self.registry, &order) {
+            Ok(mut next) => {
+                apply_refresh_errors(&mut next, &self.refresh_errors);
+                self.registry = next;
+                let row = self.rows().iter().position(|row| matches!(row, Row::Header(index) if self.registry.providers[*index].id == id)).unwrap_or(0);
+                self.cursor.select(Some(row));
+                self.status = "Saved gateway order in models.json".to_string();
+            }
+            Err(error) => self.status = format!("Save failed: {error}; gateway order unchanged"),
+        }
     }
 
     fn reset_view(&mut self) {
@@ -233,6 +264,14 @@ impl Picker {
     }
 
     fn reorder(&mut self, state: &Path, delta: isize) {
+        if matches!(self.screen, Screen::Picker) {
+            if let Row::Header(provider) = self.selected() {
+                self.reorder_provider(state, provider, delta);
+            } else {
+                self.status = "Highlight a gateway header to reorder gateways; use c to reorder curated models".to_string();
+            }
+            return;
+        }
         let Row::Model { provider, model } = self.selected() else {
             return;
         };
@@ -375,7 +414,7 @@ impl Picker {
         );
         frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), chunks[1]);
         let help = match self.screen {
-            Screen::Picker => "r refresh all  c catalog  e edit models.json  Up/Down or j/k move  Enter save & chat  q quit",
+            Screen::Picker => "r refresh all  c catalog  e edit  Up/Down move  Shift+Up/Down or Shift+J/K on gateway header: reorder  Enter chat  q back/quit",
             Screen::Catalog { .. } => "Up/Down or j/k: move highlight\nShift+Up/Down or Shift+j/k: reorder highlighted checked model and save\nSpace toggle  y copy id  e edit  r refresh  Esc back  q quit",
         };
         frame.render_widget(
@@ -452,7 +491,7 @@ fn pick_loop(
             KeyCode::Char('y') if matches!(picker.screen, Screen::Catalog { .. }) => {
                 if let Row::Model { provider, model } = picker.selected() {
                     let id = catalog_ids(&picker.registry.providers[provider])[model].to_string();
-                    if copy_to_clipboard(&id) {
+                    if crate::clipboard::copy(&id) {
                         picker.status = format!("Copied {id}");
                     } else {
                         picker.status =
@@ -549,47 +588,64 @@ fn run_editor(state: &Path, command: Option<&str>) -> Result<std::process::ExitS
         .map_err(|err| Error::new(format!("editor for {}: {err}", path.display())))
 }
 
-fn copy_to_clipboard(text: &str) -> bool {
-    let commands: &[&[&str]] = if cfg!(windows) {
-        &[&[
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "$input | Set-Clipboard",
-        ]]
-    } else if cfg!(target_os = "macos") {
-        &[&["pbcopy"]]
-    } else {
-        &[
-            &["wl-copy"],
-            &["xclip", "-selection", "clipboard"],
-            &["xsel", "--clipboard", "--input"],
-        ]
-    };
-    for args in commands {
-        let Ok(mut child) = Command::new(args[0])
-            .args(&args[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
-        let written = child
-            .stdin
-            .take()
-            .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-        if child.wait().is_ok_and(|status| status.success()) && written {
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_header_reorder_persists_and_stale_saves_keep_the_view() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("gateway-order");
+        let path = dir.join("models.json");
+        std::fs::write(&path, r#"{"providers":{"home":{"baseUrl":"http://127.0.0.1:1234/v1","api":"openai-completions","apiKey":"gateway","models":[{"id":"local/model"}]},"work":{"baseUrl":"https://work.example/v1","api":"openai-completions","models":[{"id":"work/model"}]}}}"#).unwrap();
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut picker = Picker::new(harness::load_registry(&dir).unwrap());
+        assert_eq!(
+            picker
+                .registry
+                .providers
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["openai", "home", "work"]
+        );
+        // The empty built-in contributes a header and an empty row.
+        picker.cursor.select(Some(2));
+        picker.navigate(&dir, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(
+            picker
+                .registry
+                .providers
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["home", "openai", "work"]
+        );
+        assert!(matches!(picker.selected(), Row::Header(0)));
+        let reloaded = harness::load_registry(&dir).unwrap();
+        assert_eq!(
+            reloaded
+                .providers
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["home", "openai", "work"]
+        );
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["providers"]["home"], before["providers"]["home"]);
+        assert_eq!(after["providers"]["work"], before["providers"]["work"]);
+        assert_eq!(reloaded.providers[0].models[0].id, "local/model");
+        let original = picker.registry.clone();
+        let mut edited = std::fs::read(&path).unwrap();
+        edited.push(b'\n');
+        std::fs::write(&path, &edited).unwrap();
+        picker.navigate(&dir, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(picker.registry, original);
+        assert_eq!(std::fs::read(&path).unwrap(), edited);
+        assert!(picker.status.contains("changed outside this view"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn catalog_checkboxes_reorder_curated_ids_not_reference_catalog() {

@@ -99,7 +99,7 @@ fn resolve_marker(value: &str) -> Result<String> {
     Ok(resolved)
 }
 
-pub use curation::save_curated_models;
+pub use curation::{save_curated_models, save_provider_order};
 
 pub const OPENAI_ID: &str = "openai";
 pub const OPENAI_ORIGIN: &str = "https://api.openai.com/v1";
@@ -267,6 +267,21 @@ fn registry_from_models(state: &Path, file: ModelsFile, models_bytes: Option<Vec
             &entry.models,
             auth,
         ));
+    }
+    // Provider object order is the picker order. An unconfigured built-in
+    // OpenAI stays first until an explicit reorder materializes its entry.
+    if let Some(document) = models_bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+    {
+        if let Some(entries) = document.get("providers").and_then(Value::as_object) {
+            let order = entries
+                .keys()
+                .enumerate()
+                .map(|(index, id)| (id.as_str(), index + 1))
+                .collect::<BTreeMap<_, _>>();
+            providers.sort_by_key(|entry| order.get(entry.id.as_str()).copied().unwrap_or(0));
+        }
     }
     Registry {
         providers,

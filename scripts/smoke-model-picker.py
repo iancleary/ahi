@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -197,11 +198,21 @@ def main() -> None:
         finally:
             session.close()
 
-        session = Session(state)
+        # Disposable adapters capture copy payloads without touching the real clipboard.
+        clipboard_bin = state / "clipboard-bin"
+        clipboard_bin.mkdir()
+        copied_text = state / "copied-selection.txt"
+        for name in ("pbcopy", "wl-copy", "xclip", "xsel"):
+            helper = clipboard_bin / name
+            helper.write_text("#!/bin/sh\n/bin/cat > " + shlex.quote(str(copied_text)) + "\n")
+            helper.chmod(0o700)
+        session = Session(state, git_bin_dir=clipboard_bin)
         try:
             session.expect("vendor/model/variant")
             session.send("j\r")
             session.expect("(openai) vendor/model/variant • medium")
+            mouse_enable = rb"\x1b\[\?(?:1000|1002|1003|1006|1015)h"
+            assert re.search(mouse_enable, session.output), "chat must enable mouse controls by default"
             assert "128k" not in session.screen()  # Context is initially unknown.
             assert (state / "selection").read_text() == "openai/vendor/model/variant\n"
             # Typing alone wraps the draft into three visual rows and moves
@@ -223,7 +234,55 @@ def main() -> None:
             assert all(character == "─" for character in rows[-2])
             assert "↑" not in rows[-1]  # No permanent token-accounting row.
 
-            # /model reloads local curation instead of capturing the startup
+            # SGR coordinates are one-based: drag-select "merge" on row 1.
+            session.send("\x1b[<0;1;1M\x1b[<32;5;1M\x1b[<0;5;1m")
+            session.expect("Selection copied")
+            assert copied_text.read_text() == "merge"
+            copied_text.write_text("retry-marker")
+            session.send("\x19")  # Ctrl+Y copies the retained selection again.
+            end = time.monotonic() + 10
+            while copied_text.read_text() != "merge" and time.monotonic() < end:
+                session.read()
+            assert copied_text.read_text() == "merge"
+            session.send("\x1b")  # Escape clears the highlight, not the transcript.
+            end = time.monotonic() + 10
+            while "Selection copied" in session.screen() and time.monotonic() < end:
+                session.read()
+            assert "Selection copied" not in session.screen()
+
+            # Mouse capture is the default. Turning it off must emit the actual
+            # terminal reset sequences so native text selection can take over.
+            session.send("/mouse\r")
+            session.expect("mouse on: wheel and jump controls enabled")
+            assert b"\x1b[?1000h" in session.output
+            session.send("/mouse off\r")
+            end = time.monotonic() + 10
+            while session.output.rfind(b"\x1b[?1000l") < session.output.rfind(b"\x1b[?1000h") and time.monotonic() < end:
+                session.read()
+            assert session.output.rfind(b"\x1b[?1000l") > session.output.rfind(b"\x1b[?1000h")
+            mouse_enables = len(re.findall(mouse_enable, session.output))
+
+            # Slash opens local settings immediately, filters as you type,
+            # and Escape dismisses without submitting or clearing the draft.
+            session.send("/")
+            session.expect("Settings · ↑/↓ Enter Esc")
+            session.expect("Choose provider and model")
+            session.send("mouse ")
+            session.expect("Native text selection")
+            session.send("\x1b")
+            end = time.monotonic() + 10
+            while "Settings ·" in session.screen() and time.monotonic() < end:
+                session.read()
+            assert "Settings ·" not in session.screen()
+            assert "/mouse " in session.screen()
+            session.send("\x03")  # Clear the preserved draft, not exit chat.
+            session.send("/catalog\r")
+            session.expect("catalog — curate models.json")
+            session.expect("catalog-only")
+            session.send("q")
+            session.expect("(openai) vendor/model/variant • medium")
+
+            # /models reloads local curation instead of capturing the startup
             # registry. Reference-only IDs must not become picker defaults.
             original = (state / "models.json").read_bytes()
             updated = json.loads(original)
@@ -231,20 +290,21 @@ def main() -> None:
                 {"id": "vendor/model/variant"}, {"id": "fresh/from-disk"}
             ]
             (state / "models.json").write_text(json.dumps(updated))
-            session.send("/model\r")
+            session.send("/models\r")
             session.expect("curated models (Enter opens chat)")
             session.expect("fresh/from-disk")
             assert "catalog-only" not in session.screen()
             session.send("jj\r")
             session.expect("(openai) fresh/from-disk • medium")
             session.expect("merge smoke")  # Transcript survived switching.
+            assert len(re.findall(mouse_enable, session.output)) == mouse_enables
             assert (state / "selection").read_text() == "openai/fresh/from-disk\n"
             session.send("/model\r")
             session.expect("curated models (Enter opens chat)")
             session.send("q")
             session.expect("(openai) fresh/from-disk • medium")
             assert (state / "selection").read_text() == "openai/fresh/from-disk\n"
-            session.send("\x04")  # Ctrl+D on empty input exits chat.
+            session.send("/quit\r")  # Explicit quit closes chat without a model request.
             output = session.finish()
             assert "Selected openai/vendor/model/variant; saved to" in output
             assert "provider openai origin" not in output
@@ -416,6 +476,7 @@ def main() -> None:
         "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
         "explicit unsupported-provider error, /model local reload/switch/cancel, transcript retention, clean chat exit, "
         "real Git counts and branch/status refresh on message submission, "
+        "default mouse controls, managed drag-selection and exact clipboard payload, native text-selection mode via /mouse off, slash settings/filter/dismiss, /catalog, /models, /quit, "
         "single-row footer, context in the input rule, and pre-submit draft wrapping/growth"
     )
 

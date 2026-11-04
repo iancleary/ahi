@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod chat;
 pub mod check;
+mod clipboard;
 pub mod config;
 pub mod error;
 pub mod filter;
