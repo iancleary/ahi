@@ -303,7 +303,10 @@ fn later_commands_fail_closed() {
         assert_eq!(update.status.code(), Some(1));
         let update_err = String::from_utf8(update.stderr).unwrap();
         assert!(update_err.contains("no published archive"), "{update_err}");
-        assert!(update_err.contains("cargo install ahi"), "{update_err}");
+        assert!(
+            update_err.contains("`cargo install ahi --locked`"),
+            "{update_err}"
+        );
     }
     for cmd in ["hooks", "install", "uninstall"] {
         let output = ahi().arg(cmd).output().unwrap();

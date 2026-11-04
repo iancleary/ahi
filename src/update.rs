@@ -209,7 +209,7 @@ fn artifact_for(os: &str, arch: &str) -> Result<String> {
         ("windows", "x86_64") => "windows-x86_64",
         _ => {
             return Err(Error::new(format!(
-                "no published archive for {}-{}; published targets: {}. On this platform install with `cargo install ahi`",
+                "no published archive for {}-{}; published targets: {}. On this platform install with `cargo install ahi --locked`",
                 os,
                 arch,
                 TARGET_SUFFIXES.join(", ")
@@ -555,7 +555,7 @@ mod tests {
             "ahi-linux-aarch64.tar.gz"
         );
         let err = artifact_for("macos", "aarch64").unwrap_err();
-        assert!(err.to_string().contains("cargo install ahi"));
+        assert!(err.to_string().contains("`cargo install ahi --locked`"));
         assert_eq!(
             artifact_for("windows", "x86_64").unwrap(),
             "ahi-windows-x86_64.tar.gz"
@@ -563,7 +563,7 @@ mod tests {
         let err = artifact_for("macos", "x86_64").unwrap_err();
         assert!(err.to_string().contains("no published archive"));
         let err = artifact_for("freebsd", "x86_64").unwrap_err();
-        assert!(err.to_string().contains("cargo install ahi"));
+        assert!(err.to_string().contains("`cargo install ahi --locked`"));
     }
 
     #[test]
