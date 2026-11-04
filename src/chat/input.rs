@@ -88,6 +88,23 @@ impl InputEditor {
         }
     }
 
+    /// Insert clipboard text as edits, never as submit keys.
+    pub(crate) fn insert_paste(&mut self, text: &str) {
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\r' => {
+                    if characters.peek() == Some(&'\n') {
+                        characters.next();
+                    }
+                    self.insert_newline();
+                }
+                '\n' => self.insert_newline(),
+                character => self.insert_char(character),
+            }
+        }
+    }
+
     pub(crate) fn contents(&self) -> String {
         self.lines.join("\n")
     }

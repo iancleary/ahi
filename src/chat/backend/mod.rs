@@ -58,6 +58,12 @@ pub(crate) enum ResponseEvent {
     /// The echo backend has no tools and must not emit it.
     #[allow(dead_code)] // Integration seam for the future tool runner.
     ToolCallReturned,
+    /// Output from a completed tool invocation; nonzero exit codes indicate failure.
+    #[allow(dead_code)] // Integration seam for the future tool runner.
+    ToolResult {
+        output: String,
+        exit_code: i32,
+    },
     Completed,
     /// A completion that could not be produced. The stand-in backend does not emit this.
     #[allow(dead_code)]

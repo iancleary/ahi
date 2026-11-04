@@ -23,8 +23,11 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
-use crossterm::event::{Event, KeyEvent};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    MouseEventKind,
+};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -73,6 +76,7 @@ struct ChatScreen {
     receiver: Option<Receiver<ResponseEvent>>,
     assistant_open: bool,
     scroll_from_bottom: usize,
+    transcript_area: Rect,
     transcript_width: usize,
     transcript_height: usize,
     spinner_frame: usize,
@@ -95,6 +99,7 @@ impl ChatScreen {
             receiver: None,
             assistant_open: false,
             scroll_from_bottom: 0,
+            transcript_area: Rect::default(),
             transcript_width: 80,
             transcript_height: 1,
             spinner_frame: 0,
@@ -145,12 +150,36 @@ impl ChatScreen {
         self.input = InputEditor::from_text(text);
     }
 
-    fn apply_key(
+    fn apply_terminal_event(
         &mut self,
-        key: KeyEvent,
+        event: Event,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
-        self.apply_action(key_binding::translate(key), backend)
+        match event {
+            Event::Key(key) => self.apply_action(key_binding::translate(key), backend),
+            Event::Mouse(mouse)
+                if self
+                    .transcript_area
+                    .contains(Position::new(mouse.column, mouse.row)) =>
+            {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(3);
+                    }
+                    _ => return Ok(ScreenAction::Continue),
+                }
+                self.clamp_scroll();
+                Ok(ScreenAction::Continue)
+            }
+            Event::Paste(text) => {
+                self.input.insert_paste(&text);
+                Ok(ScreenAction::Continue)
+            }
+            _ => Ok(ScreenAction::Continue),
+        }
     }
 
     fn apply_action(
@@ -243,12 +272,16 @@ impl ChatScreen {
                 Constraint::Length(1),
             ])
             .split(frame.area());
+        self.transcript_area = chunks[0];
         self.transcript_width = chunks[0].width as usize;
         self.transcript_height = chunks[0].height as usize;
         self.clamp_scroll();
-        let lines = transcript::wrapped_lines(&self.messages, self.transcript_width);
-        let visible =
-            transcript::visible_text(&lines, self.transcript_height, self.scroll_from_bottom);
+        let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width);
+        let visible = transcript::render::visible_text(
+            &lines,
+            self.transcript_height,
+            self.scroll_from_bottom,
+        );
         frame.render_widget(Paragraph::new(visible), chunks[0]);
 
         let activity = if self.response_in_progress {
@@ -408,6 +441,15 @@ impl ChatScreen {
                 self.refresh_location();
                 false
             }
+            ResponseEvent::ToolResult { output, exit_code } => {
+                self.messages.push(ChatMessage {
+                    role: TranscriptRole::Tool { exit_code },
+                    text: output,
+                });
+                self.assistant_open = false;
+                self.refresh_location();
+                false
+            }
             ResponseEvent::Completed => {
                 transcript::attach_stand_in_note(&mut self.messages);
                 true
@@ -435,8 +477,8 @@ impl ChatScreen {
     }
 
     fn clamp_scroll(&mut self) {
-        let lines = transcript::wrapped_lines(&self.messages, self.transcript_width.max(1));
-        transcript::clamp_scroll(
+        let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1));
+        transcript::render::clamp_scroll(
             &mut self.scroll_from_bottom,
             lines.len(),
             self.transcript_height,
@@ -459,8 +501,17 @@ pub(crate) fn interact(
     loop {
         let mut terminal =
             ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
-        let outcome = session_loop(&mut terminal, &mut screen, &mut backend);
+        let outcome =
+            crossterm::execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)
+                .map_err(|err| Error::new(format!("enable paste: {err}")))
+                .and_then(|()| session_loop(&mut terminal, &mut screen, &mut backend));
+        let cleanup = crossterm::execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         ratatui::restore();
+        cleanup.map_err(|err| Error::new(format!("disable paste: {err}")))?;
         match outcome? {
             SessionEnd::Exit => return Ok(()),
             SessionEnd::ReopenModelPicker => {
@@ -483,13 +534,11 @@ fn session_loop(
             .map_err(|err| Error::new(format!("terminal draw: {err}")))?;
         if crossterm::event::poll(FRAME_INTERVAL).map_err(|err| Error::new(err.to_string()))? {
             let event = crossterm::event::read().map_err(|err| Error::new(err.to_string()))?;
-            if let Event::Key(key) = event {
-                match screen.apply_key(key, backend)? {
-                    ScreenAction::Continue => {}
-                    ScreenAction::Exit => return Ok(SessionEnd::Exit),
-                    ScreenAction::ReopenModelPicker => {
-                        return Ok(SessionEnd::ReopenModelPicker);
-                    }
+            match screen.apply_terminal_event(event, backend)? {
+                ScreenAction::Continue => {}
+                ScreenAction::Exit => return Ok(SessionEnd::Exit),
+                ScreenAction::ReopenModelPicker => {
+                    return Ok(SessionEnd::ReopenModelPicker);
                 }
             }
         }
@@ -553,6 +602,44 @@ mod tests {
             .unwrap();
         assert_eq!(screen.input_text(), "one\n");
         assert_eq!(backend.requests.len(), 1);
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn multiline_paste_stays_in_draft_until_enter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-paste");
+        for pasted in ["α\nβ\n", "α\r\nβ\r\n", "α\rβ\r"] {
+            let mut screen = screen_in(&state);
+            let mut backend = RecordingBackend {
+                requests: Vec::new(),
+            };
+            screen.set_input_text("beforeafter");
+            for _ in 0..5 {
+                screen
+                    .apply_action(KeyAction::Edit(input::EditorKey::Left), &mut backend)
+                    .unwrap();
+            }
+            assert_eq!(
+                screen
+                    .apply_terminal_event(Event::Paste(pasted.into()), &mut backend)
+                    .unwrap(),
+                ScreenAction::Continue
+            );
+            assert_eq!(screen.input_text(), "beforeα\nβ\nafter");
+            assert!(backend.requests.is_empty());
+            assert!(screen.messages().is_empty());
+            screen
+                .apply_terminal_event(
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    &mut backend,
+                )
+                .unwrap();
+            assert_eq!(backend.requests.len(), 1);
+            assert_eq!(backend.requests[0].messages[0].text, "beforeα\nβ\nafter");
+            assert!(screen.input_text().is_empty());
+        }
         let _ = fs::remove_dir_all(state);
     }
 
@@ -816,6 +903,98 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn tool_results_render_as_tinted_blocks_between_streamed_text() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-blocks");
+        let mut screen = screen_in(&state);
+        screen.messages.push(ChatMessage {
+            role: TranscriptRole::Operator,
+            text: "question".into(),
+        });
+        assert!(!screen.apply_event(ResponseEvent::TextDelta("before".into())));
+        assert!(!screen.apply_event(ResponseEvent::ToolResult {
+            output: "ok".into(),
+            exit_code: 0,
+        }));
+        assert!(!screen.apply_event(ResponseEvent::TextDelta("after".into())));
+        assert!(!screen.apply_event(ResponseEvent::TextDelta(" more".into())));
+        assert!(!screen.apply_event(ResponseEvent::ToolResult {
+            output: "failed (exit 2)".into(),
+            exit_code: 2,
+        }));
+        assert_eq!(screen.messages[3].text, "after more");
+        assert_eq!(screen.messages[1].text, "before");
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for (row, text, background) in [
+            (0, "question", Color::Rgb(30, 45, 60)),
+            (2, "before", Color::Reset),
+            (4, "ok", Color::Rgb(30, 60, 45)),
+            (6, "after more", Color::Reset),
+            (8, "failed (exit 2)", Color::Rgb(60, 30, 30)),
+        ] {
+            let rendered: String = (0..text.len() as u16)
+                .map(|x| buffer[(x, row)].symbol())
+                .collect();
+            assert_eq!(rendered, text);
+            // The tint covers the entire row, not only its text.
+            assert_eq!(buffer[(0, row)].bg, background);
+            assert_eq!(buffer[(39, row)].bg, background);
+        }
+        for row in [1, 3, 5, 7] {
+            assert_eq!(buffer[(0, row)].symbol(), " ");
+            assert_eq!(buffer[(0, row)].bg, Color::Reset);
+        }
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_output_without_changing_the_draft() {
+        use crossterm::event::{KeyModifiers, MouseEvent};
+
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-wheel");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage {
+            role: TranscriptRole::Operator,
+            text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
+        });
+        screen.set_input_text("my draft");
+        let bottom = draw_lines(&mut screen, 60, 12);
+        let wheel = |kind, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 1,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        screen
+            .apply_terminal_event(wheel(MouseEventKind::ScrollUp, 0), &mut backend)
+            .unwrap();
+        let older = draw_lines(&mut screen, 60, 12);
+        assert_ne!(older[0], bottom[0]);
+        assert_eq!(screen.scroll_from_bottom, 3);
+        assert_eq!(
+            &older[screen.transcript_height..],
+            &bottom[screen.transcript_height..]
+        );
+        screen
+            .apply_terminal_event(wheel(MouseEventKind::ScrollUp, 10), &mut backend)
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 3);
+        screen
+            .apply_terminal_event(wheel(MouseEventKind::ScrollDown, 0), &mut backend)
+            .unwrap();
+        assert_eq!(draw_lines(&mut screen, 60, 12), bottom);
+        assert_eq!(screen.input_text(), "my draft");
+        assert!(backend.requests.is_empty());
+        let _ = fs::remove_dir_all(state);
     }
 
     #[test]

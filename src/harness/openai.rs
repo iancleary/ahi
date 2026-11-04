@@ -758,8 +758,15 @@ mod tests {
             std::thread::spawn(move || receive_callback(listener, "ok", &AtomicBool::new(false)));
         client.write_all(b"GET /auth/callback?code=abc&state=ok&client_id=issued-client HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         assert_eq!(handle.join().unwrap().unwrap().code, "abc");
-        drop(client);
-        assert!(bind_callback(port).is_ok());
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        // Read to EOF to verify the accepted connection closed. Rebinding this
+        // port is not a closure check: TCP may retain it in TIME_WAIT.
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("ahi login received the callback."));
     }
 
     #[test]
@@ -787,11 +794,10 @@ mod tests {
         assert_eq!(handle.join().unwrap().unwrap().code, "abc");
         // Completion closes the old listener and every spare connection.
         assert_eq!(spare.read(&mut [0; 1]).unwrap(), 0);
-        assert!(bind_callback(port).is_ok());
     }
 
     #[test]
-    fn callback_rejects_state_mismatch_with_http_error_and_cancel_releases_listener() {
+    fn callback_rejects_state_mismatch_with_http_error_and_honors_cancellation() {
         let listener = bind_callback(0).unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -809,13 +815,20 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("state"));
-        let mut response = [0; 64];
-        let n = client.read(&mut response).unwrap();
-        assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 400"));
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
         let listener = bind_callback(0).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(receive_callback(listener, "ok", &AtomicBool::new(true)).is_err());
-        assert!(bind_callback(port).is_ok());
+        assert_eq!(
+            receive_callback(listener, "ok", &AtomicBool::new(true))
+                .err()
+                .unwrap()
+                .to_string(),
+            "OpenAI login cancelled"
+        );
     }
 
     #[test]
