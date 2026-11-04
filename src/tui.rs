@@ -1,4 +1,7 @@
-//! Local curated-model picker, catalog curation, and editor handoff.
+//! Curated-model picker, catalog curation, editor handoff, and chat entry.
+//!
+//! Enter saves a curated selection and opens the local echo-backed chat.
+//! Non-terminal invocation prints the local registry without opening chat.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -10,6 +13,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
+use crate::chat;
 use crate::error::{Error, Result};
 use crate::harness::{self, Registry};
 
@@ -34,13 +38,31 @@ pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
             refresh_failed: !errors.is_empty(),
         });
     }
-    let mut terminal = ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
-    let result = pick_loop(&mut terminal, state, registry, refresh);
-    ratatui::restore();
-    result.map(|text| RunOutput {
-        text,
+    let mut picker = Picker::new(registry);
+    // Cancelling startup exits, even if an old selection file exists. Only
+    // Enter starts chat; cancelling /model instead keeps the active selection.
+    if let Some(selection) = pick(state, &mut picker, refresh)? {
+        chat::interact(state, &selection, || {
+            // Reopen the same curated picker, with a fresh local snapshot.
+            // A malformed external edit retains the last valid registry.
+            if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
+                picker.status = err.to_string();
+            }
+            picker.reset_view();
+            pick(state, &mut picker, false)
+        })?;
+    }
+    Ok(RunOutput {
+        text: picker.print_on_exit.join("\n"),
         refresh_failed: false,
     })
+}
+
+fn pick(state: &Path, picker: &mut Picker, refresh: bool) -> Result<Option<String>> {
+    let mut terminal = ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
+    let result = pick_loop(&mut terminal, state, picker, refresh);
+    ratatui::restore();
+    result
 }
 
 #[derive(Clone, Copy)]
@@ -83,7 +105,9 @@ impl Picker {
             registry,
             screen: Screen::Picker,
             cursor,
-            status: "Enter saves a selection and exits; this is not a chat session".to_string(),
+            status:
+                "Enter saves the highlighted model and opens local echo chat (no model API calls)"
+                    .to_string(),
             refresh_errors: BTreeMap::new(),
             print_on_exit: Vec::new(),
         }
@@ -327,7 +351,7 @@ impl Picker {
             })
             .collect();
         let title = match self.screen {
-            Screen::Picker => "models.json — curated models (Enter saves and exits)",
+            Screen::Picker => "models.json — curated models (Enter opens chat)",
             Screen::Catalog { .. } => "catalog — curate models.json (Space toggle; Esc back)",
         };
         frame.render_stateful_widget(
@@ -351,7 +375,7 @@ impl Picker {
         );
         frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), chunks[1]);
         let help = match self.screen {
-            Screen::Picker => "r refresh all  c catalog  e edit models.json  arrows move  Enter save & exit  q quit",
+            Screen::Picker => "r refresh all  c catalog  e edit models.json  Up/Down or j/k move  Enter save & chat  q quit",
             Screen::Catalog { .. } => "Up/Down or j/k: move highlight\nShift+Up/Down or Shift+j/k: reorder highlighted checked model and save\nSpace toggle  y copy id  e edit  r refresh  Esc back  q quit",
         };
         frame.render_widget(
@@ -364,10 +388,9 @@ impl Picker {
 fn pick_loop(
     terminal: &mut ratatui::DefaultTerminal,
     state: &Path,
-    registry: Registry,
+    picker: &mut Picker,
     refresh: bool,
-) -> Result<String> {
-    let mut picker = Picker::new(registry);
+) -> Result<Option<String>> {
     if refresh {
         picker.refresh(terminal, state)?;
     }
@@ -448,18 +471,18 @@ fn pick_loop(
             _ => {}
         }
     }
-    if let Some(selection) = selection {
+    if let Some(selection) = &selection {
         std::fs::create_dir_all(state)
             .map_err(|err| Error::new(format!("{}: {err}", state.display())))?;
         let path = state.join("selection");
         std::fs::write(&path, format!("{selection}\n"))
             .map_err(|err| Error::new(format!("{}: {err}", path.display())))?;
         picker.print_on_exit.push(format!(
-            "Selected {selection}; saved to {}. No chat session was started.",
+            "Selected {selection}; saved to {}.",
             path.display()
         ));
     }
-    Ok(picker.print_on_exit.join("\n"))
+    Ok(selection)
 }
 
 /// Commit the new registry only after the complete local load succeeds.
@@ -808,7 +831,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("no models in models.json: press e to edit, c to browse the catalog"));
-        assert!(text.contains("Enter saves and exits"));
+        assert!(text.contains("Enter opens chat"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

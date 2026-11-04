@@ -129,7 +129,7 @@ def main() -> None:
         (state / "models.json").write_text(body)
         session = Session(state)
         try:
-            session.expect("curated models (Enter saves and exits)")
+            session.expect("curated models (Enter opens chat)")
             session.send("r")
             session.expect("OpenAI credential unavailable")
             session.send("c")
@@ -160,7 +160,7 @@ def main() -> None:
         catalog_body = (state / "catalogs/openai.json").read_bytes()
         session = Session(state)
         try:
-            session.expect("curated models (Enter saves and exits)")
+            session.expect("curated models (Enter opens chat)")
             session.send("c")
             session.expect("[x] second")
             session.expect("[ ] catalog-only")
@@ -196,10 +196,38 @@ def main() -> None:
         try:
             session.expect("vendor/model/variant")
             session.send("j\r")
+            session.expect("(openai) vendor/model/variant • medium")
+            assert (state / "selection").read_text() == "openai/vendor/model/variant\n"
+            session.send("merge smoke\r")
+            session.expect("[stand-in] merge smoke")
+            session.expect("replies and token counts are not from a model")
+
+            # /model reloads local curation instead of capturing the startup
+            # registry. Reference-only IDs must not become picker defaults.
+            original = (state / "models.json").read_bytes()
+            updated = json.loads(original)
+            updated["providers"]["openai"]["models"] = [
+                {"id": "vendor/model/variant"}, {"id": "fresh/from-disk"}
+            ]
+            (state / "models.json").write_text(json.dumps(updated))
+            session.send("/model\r")
+            session.expect("curated models (Enter opens chat)")
+            session.expect("fresh/from-disk")
+            assert "catalog-only" not in session.screen()
+            session.send("jj\r")
+            session.expect("(openai) fresh/from-disk • medium")
+            session.expect("[stand-in] merge smoke")  # Transcript survived switching.
+            assert (state / "selection").read_text() == "openai/fresh/from-disk\n"
+            session.send("/model\r")
+            session.expect("curated models (Enter opens chat)")
+            session.send("q")
+            session.expect("(openai) fresh/from-disk • medium")
+            assert (state / "selection").read_text() == "openai/fresh/from-disk\n"
+            session.send("\x04")  # Ctrl+D on empty input exits chat.
             output = session.finish()
             assert "Selected openai/vendor/model/variant; saved to" in output
-            assert "No chat session was started." in output
-            assert (state / "selection").read_text() == "openai/vendor/model/variant\n"
+            assert "provider openai origin" not in output
+            (state / "models.json").write_bytes(original)
         finally:
             session.close()
 
@@ -257,18 +285,20 @@ def main() -> None:
         finally:
             session.close()
 
-        # Editor handoff, local reload, ordered selection, and confirmation.
+        # Editor handoff, local reload, ordered selection, and chat entry.
         editor = state / "fixture editor.sh"
         config["providers"]["openai"]["models"] = [{"id": "chosen/from-editor"}]
         edited = json.dumps(config, indent=2) + "\n"
         editor.write_text("printf '%s' '" + edited + "' > \"$1\"\nexit 7\n")
         session = Session(state, editor)
         try:
-            session.expect("curated models (Enter saves and exits)")
+            session.expect("curated models (Enter opens chat)")
             session.send("e")
             session.expect("Editor exited")
             session.expect("chosen/from-editor")
             session.send("j\r")
+            session.expect("(openai) chosen/from-editor • medium")
+            session.send("\x04")
             output = session.finish()
             assert "Selected openai/chosen/from-editor; saved to" in output
             assert "provider openai origin" not in output
@@ -285,6 +315,13 @@ def main() -> None:
             session.send("e")
             session.expect("line 2")
             session.send("j\r")
+            session.expect("(openai) chosen/from-editor • medium")
+            session.send("/model\r")
+            session.expect("line 2")
+            session.expect("chosen/from-editor")
+            session.send("q")
+            session.expect("(openai) chosen/from-editor • medium")
+            session.send("\x04")
             session.finish()
             assert (state / "selection").read_text() == "openai/chosen/from-editor\n"
             assert (state / "models.json").read_text() == "{\ninvalid\n}"
@@ -322,7 +359,8 @@ def main() -> None:
         "Shift+arrows and Shift+j/k reorder, quit/restart persistence, embedded-slash IDs, "
         "missing-catalog ID retention/reorder/removal, save conflict/failure retention, "
         "editor resume/reload and byte preservation, "
-        "invalid-edit retention, missing editor, explicit config creation, selection confirmation"
+        "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
+        "echo reply, /model local reload/switch/cancel, transcript retention, clean chat exit"
     )
 
 
