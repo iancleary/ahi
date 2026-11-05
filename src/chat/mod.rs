@@ -5,6 +5,7 @@
 //! Terminal drawing stays in this module. Key codes are translated by
 //! `key_binding` before the screen applies them.
 
+mod approval;
 mod backend;
 mod command;
 pub(crate) mod input;
@@ -40,7 +41,7 @@ use command::ParsedCommand;
 use input::InputEditor;
 use key_binding::KeyAction;
 use thinking::ThinkingLevel;
-use transcript::{ChatMessage, TranscriptRole};
+use transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use usage::SessionMeters;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
@@ -88,6 +89,7 @@ struct ChatScreen {
     response_in_progress: bool,
     receiver: Option<Receiver<ResponseEvent>>,
     assistant_open: bool,
+    approval: Option<approval::PendingApproval>,
     scroll_navigation: scroll_navigation::ScrollNavigation,
     mouse_capture: bool,
     settings_menu: CommandMenu,
@@ -118,6 +120,7 @@ impl ChatScreen {
             response_in_progress: false,
             receiver: None,
             assistant_open: false,
+            approval: None,
             scroll_navigation: scroll_navigation::ScrollNavigation::default(),
             mouse_capture: true,
             settings_menu: CommandMenu::default(),
@@ -232,6 +235,17 @@ impl ChatScreen {
             }
         }
         match event {
+            // Approval keys apply only while the input is blank, so a draft or
+            // `/quit` can still be typed; submission waits for the turn anyway.
+            Event::Key(key) if self.approval.is_some() && self.input.is_blank() => {
+                match key_binding::translate_approval(key) {
+                    Some(answer) => {
+                        self.answer_approval(answer);
+                        Ok(ScreenAction::Continue)
+                    }
+                    None => self.apply_action(key_binding::translate(key), backend),
+                }
+            }
             Event::Key(key) => self.apply_action(key_binding::translate(key), backend),
             Event::Mouse(mouse)
                 if self
@@ -485,6 +499,8 @@ impl ChatScreen {
             .filter(|(_, when)| when.elapsed() < Duration::from_secs(4))
         {
             format!("{status} ")
+        } else if let Some(pending) = &self.approval {
+            pending.hint()
         } else if self.response_in_progress {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             if chunks[1].width < 12 {
@@ -572,10 +588,8 @@ impl ChatScreen {
         if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim());
         }
-        self.messages.push(ChatMessage {
-            role: TranscriptRole::Operator,
-            text,
-        });
+        self.messages
+            .push(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
         self.refresh_location();
         let request = ChatRequest {
@@ -609,6 +623,7 @@ impl ChatScreen {
                 self.meters.clear_counts();
                 self.scroll_from_bottom = 0;
                 self.receiver = None;
+                self.approval = None;
                 self.response_in_progress = false;
                 self.assistant_open = false;
                 Ok(ScreenAction::Continue)
@@ -656,10 +671,8 @@ impl ChatScreen {
         let finished = match event {
             ResponseEvent::TextDelta(text) => {
                 if !self.assistant_open {
-                    self.messages.push(ChatMessage {
-                        role: TranscriptRole::Assistant,
-                        text: String::new(),
-                    });
+                    self.messages
+                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
                 }
                 if let Some(message) = self.messages.last_mut() {
@@ -668,13 +681,24 @@ impl ChatScreen {
                 false
             }
             ResponseEvent::ToolCallsRequested(calls) => {
-                for call in calls {
-                    self.push_notice(format!(
-                        "tool requested: {} ({}); not executed",
-                        call.name, call.id
-                    ));
+                // The calls end the assistant message that requested them and
+                // are replayed with their results on later requests.
+                if !self.assistant_open {
+                    self.messages
+                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
                 }
-                // A notice is not part of the assistant's streamed text.
+                if let Some(message) = self.messages.last_mut() {
+                    message.tool = Some(ToolPayload::Calls(calls));
+                }
+                self.assistant_open = false;
+                false
+            }
+            ResponseEvent::ToolApprovalRequested(request) => {
+                self.push_notice(String::new());
+                let pending = approval::PendingApproval::new(request, self.messages.len() - 1);
+                self.messages[pending.notice_index].text = pending.prompt();
+                // Replacing an unanswered approval drops its reply: a denial.
+                self.approval = Some(pending);
                 self.assistant_open = false;
                 false
             }
@@ -702,17 +726,30 @@ impl ChatScreen {
                 self.refresh_location();
                 false
             }
-            ResponseEvent::ToolResult { output, exit_code } => {
-                self.messages.push(ChatMessage {
-                    role: TranscriptRole::Tool { exit_code },
-                    text: output,
+            ResponseEvent::ToolResult {
+                call_id,
+                tool,
+                output,
+                content,
+                exit_code,
+            } => {
+                let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
+                message.tool = Some(ToolPayload::Result {
+                    call_id,
+                    name: tool,
+                    content,
                 });
+                self.messages.push(message);
                 self.assistant_open = false;
                 self.refresh_location();
                 false
             }
-            ResponseEvent::Completed => true,
+            ResponseEvent::Completed => {
+                self.approval = None;
+                true
+            }
             ResponseEvent::Failed(message) => {
+                self.approval = None;
                 self.push_notice(message);
                 true
             }
@@ -737,10 +774,25 @@ impl ChatScreen {
     }
 
     fn push_notice(&mut self, text: String) {
-        self.messages.push(ChatMessage {
-            role: TranscriptRole::Notice,
-            text,
-        });
+        self.messages
+            .push(ChatMessage::new(TranscriptRole::Notice, text));
+    }
+
+    fn answer_approval(&mut self, answer: approval::ApprovalKey) {
+        let Some(pending) = self.approval.as_mut() else {
+            return;
+        };
+        let complete = pending.apply(answer);
+        let prompt = pending.prompt();
+        if let Some(message) = self.messages.get_mut(pending.notice_index) {
+            message.text = prompt;
+        }
+        if complete {
+            if let Some(pending) = self.approval.take() {
+                pending.finish();
+            }
+        }
+        self.scroll_from_bottom = 0;
     }
 
     fn refresh_location(&mut self) {
@@ -1001,6 +1053,7 @@ mod tests {
             screen.messages.push(ChatMessage {
                 role: TranscriptRole::Notice,
                 text: text.to_string(),
+                tool: None,
             });
         }
         screen
@@ -1088,6 +1141,7 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: "kept".to_string(),
+            tool: None,
         });
         screen.meters.input_tokens = Some(12);
         screen.set_input_text("/clear");
@@ -1149,6 +1203,7 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: "explain the hook runner".to_string(),
+            tool: None,
         });
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
@@ -1269,15 +1324,22 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: "question".into(),
+            tool: None,
         });
         assert!(!screen.apply_event(ResponseEvent::TextDelta("before".into())));
         assert!(!screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "call".into(),
+            tool: "read_file".into(),
+            content: String::new(),
             output: "ok".into(),
             exit_code: 0,
         }));
         assert!(!screen.apply_event(ResponseEvent::TextDelta("after".into())));
         assert!(!screen.apply_event(ResponseEvent::TextDelta(" more".into())));
         assert!(!screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "call".into(),
+            tool: "read_file".into(),
+            content: String::new(),
             output: "failed (exit 2)".into(),
             exit_code: 2,
         }));
@@ -1334,6 +1396,9 @@ mod tests {
             ResponseEvent::TextDelta("new line\n".into()),
             ResponseEvent::TextDelta("x".repeat(125)),
             ResponseEvent::ToolResult {
+                call_id: "call".into(),
+                tool: "read_file".into(),
+                content: String::new(),
                 output: "tool output\nmore output".into(),
                 exit_code: 0,
             },
@@ -1441,6 +1506,7 @@ mod tests {
                 .map(|n| format!("line{n:02}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            tool: None,
         });
         screen.set_input_text("keep draft");
         draw_lines(&mut screen, 40, 12);
@@ -1497,6 +1563,7 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
+            tool: None,
         });
         assert!(draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
         screen.set_input_text("/mouse off");
@@ -1623,6 +1690,7 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
+            tool: None,
         });
         screen.set_input_text("my draft");
         let bottom = draw_lines(&mut screen, 60, 12);
@@ -1735,24 +1803,183 @@ mod tests {
     }
 
     #[test]
-    fn tool_requests_are_visible_as_notices_without_argument_disclosure() {
+    fn tool_requests_attach_to_the_assistant_turn_without_argument_disclosure() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-tool-request");
         let mut screen = screen_in(&state);
-        assert!(
-            !screen.apply_event(ResponseEvent::ToolCallsRequested(vec![backend::ToolCall {
-                id: "call_a".into(),
-                name: "read_file".into(),
-                arguments: serde_json::from_value(serde_json::json!({"path": "private-path"}))
-                    .unwrap(),
-            }]))
-        );
+        let call = backend::ToolCall {
+            id: "call_a".into(),
+            name: "read_file".into(),
+            arguments: serde_json::from_value(serde_json::json!({"path": "private-path"})).unwrap(),
+        };
+        assert!(!screen.apply_event(ResponseEvent::TextDelta("looking".into())));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call.clone()])));
         assert_eq!(
             screen.messages,
             vec![ChatMessage {
-                role: TranscriptRole::Notice,
-                text: "tool requested: read_file (call_a); not executed".into(),
+                role: TranscriptRole::Assistant,
+                text: "looking".into(),
+                tool: Some(ToolPayload::Calls(vec![call.clone()])),
             }]
         );
+        // A tool-only assistant turn renders nothing; raw arguments never render.
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call])));
+        assert_eq!(screen.messages.len(), 2);
+        let rendered = draw_lines(&mut screen, 40, 12).join("\n");
+        assert!(rendered.contains("looking"));
+        assert!(!rendered.contains("private-path"), "{rendered}");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    fn approval(
+        calls: &[(&str, &str)],
+    ) -> (
+        ResponseEvent,
+        std::sync::mpsc::Receiver<Vec<backend::ToolDecision>>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let calls = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (target, prefix))| backend::ProposedAction {
+                call_id: format!("c{index}"),
+                tool: "read_file".into(),
+                target: target.to_string(),
+                grant_prefix: prefix.to_string(),
+            })
+            .collect();
+        let event = ResponseEvent::ToolApprovalRequested(backend::ApprovalRequest {
+            batch: 7,
+            calls,
+            reply: backend::ApprovalReply::new(7, sender),
+        });
+        (event, receiver)
+    }
+
+    fn press(
+        screen: &mut ChatScreen,
+        backend: &mut RecordingBackend,
+        code: crossterm::event::KeyCode,
+    ) -> ScreenAction {
+        screen
+            .apply_terminal_event(
+                Event::Key(crossterm::event::KeyEvent::new(
+                    code,
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                backend,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn approval_keys_decide_each_call_then_send_once() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-approval");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.response_in_progress = true;
+        let (event, decisions) = approval(&[("src/a.rs", "src"), ("top.rs", ""), ("b", "")]);
+        assert!(!screen.apply_event(event));
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "Tool approval · 3 calls\n› 1. read_file src/a.rs\n  2. read_file top.rs\n  3. read_file b"
+        );
+        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        assert!(
+            hint.contains("Approve read_file? y once · s session under src/"),
+            "{hint}"
+        );
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('s'),
+        );
+        // No whole-workspace session grant: `s` is ignored at the root.
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('s'),
+        );
+        assert!(decisions.try_recv().is_err());
+        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        assert!(!hint.contains("s session"), "{hint}");
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('n'),
+        );
+        assert!(decisions.try_recv().is_err());
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('a'),
+        );
+        assert_eq!(
+            decisions.try_recv().unwrap(),
+            vec![
+                backend::ToolDecision::ApproveForSession,
+                backend::ToolDecision::Deny,
+                backend::ToolDecision::Approve,
+            ]
+        );
+        assert!(screen.approval.is_none());
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "Tool approval · 3 calls\n✓ 1. read_file src/a.rs · approved for session under src/\n✗ 2. read_file top.rs · denied\n✓ 3. read_file b · approved once"
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_draft_bypasses_approval_keys_and_quit_drops_the_reply() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-approval-quit");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.response_in_progress = true;
+        let (event, decisions) = approval(&[("src/a.rs", "src")]);
+        screen.apply_event(event);
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('/'),
+        );
+        for key in "quit".chars() {
+            press(
+                &mut screen,
+                &mut backend,
+                crossterm::event::KeyCode::Char(key),
+            );
+        }
+        assert_eq!(screen.input.contents(), "/quit");
+        assert!(decisions.try_recv().is_err());
+        assert_eq!(
+            press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter),
+            ScreenAction::Exit
+        );
+        drop(screen);
+        // The reply was never sent; dropping the screen closes the channel.
+        assert!(matches!(
+            decisions.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_finished_turn_discards_an_unanswered_approval() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-approval-end");
+        let mut screen = screen_in(&state);
+        let (event, decisions) = approval(&[("src/a.rs", "src")]);
+        screen.apply_event(event);
+        assert!(screen.apply_event(ResponseEvent::Failed("ended".into())));
+        assert!(screen.approval.is_none());
+        assert!(matches!(
+            decisions.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
         fs::remove_dir_all(state).unwrap();
     }
 

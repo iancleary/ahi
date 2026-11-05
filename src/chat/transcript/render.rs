@@ -17,6 +17,10 @@ pub(crate) struct TranscriptRow {
 pub(crate) fn rows(messages: &[ChatMessage], width: usize) -> Vec<TranscriptRow> {
     let mut rows = Vec::new();
     for message in messages {
+        // A tool-only assistant turn has nothing to show; its results do.
+        if message.text.is_empty() && message.tool.is_some() {
+            continue;
+        }
         if !rows.is_empty() {
             rows.push(TranscriptRow {
                 text: String::new(),

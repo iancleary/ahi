@@ -1,8 +1,9 @@
 //! Streaming gateway Chat Completions and browser-login OpenAI Responses.
-//! No redirect following, tool execution, or synthetic usage.
+//! Gateway builtin tools are policy-gated; Responses tool execution is disabled.
+//! No redirect following or synthetic usage.
 
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -10,8 +11,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::tool_call::{ToolCallAssembler, ToolCallDelta};
+use super::tool_loop::{SessionGrants, ToolRuntime};
 use super::{ChatRequest, CompletionBackend, ResponseEvent, ToolCall};
-use crate::chat::transcript::TranscriptRole;
+use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
 
 #[cfg(test)]
@@ -25,11 +27,27 @@ const DEFAULT_OUTPUT_BUDGET: u64 = 4096;
 
 pub(crate) struct HttpBackend {
     state: PathBuf,
+    /// Tool root and `ahi.actions.yaml` location; `None` is the process's
+    /// working directory at each submission.
+    workspace: Option<PathBuf>,
+    grants: SessionGrants,
 }
 
 impl HttpBackend {
     pub(crate) fn new(state: PathBuf) -> Self {
-        Self { state }
+        Self {
+            state,
+            workspace: None,
+            grants: SessionGrants::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_workspace(state: PathBuf, workspace: PathBuf) -> Self {
+        Self {
+            workspace: Some(workspace),
+            ..Self::new(state)
+        }
     }
 }
 
@@ -37,8 +55,11 @@ impl CompletionBackend for HttpBackend {
     fn submit(&mut self, request: ChatRequest) -> Receiver<ResponseEvent> {
         let (sender, receiver) = mpsc::channel();
         let state = self.state.clone();
+        let workspace = self.workspace.clone();
+        let grants = self.grants.clone();
         std::thread::spawn(move || {
-            let result = complete(&state, &request, &sender);
+            let workspace = workspace.or_else(|| std::env::current_dir().ok());
+            let result = complete(&state, workspace.as_deref(), grants, &request, &sender);
             let event = match result {
                 Ok(()) => ResponseEvent::Completed,
                 Err(error) => ResponseEvent::Failed(error.to_string()),
@@ -50,7 +71,9 @@ impl CompletionBackend for HttpBackend {
 }
 
 fn complete(
-    state: &std::path::Path,
+    state: &Path,
+    workspace: Option<&Path>,
+    grants: SessionGrants,
     request: &ChatRequest,
     sender: &Sender<ResponseEvent>,
 ) -> Result<()> {
@@ -69,33 +92,49 @@ fn complete(
     if let Some(window) = metadata.context_window {
         emit(sender, ResponseEvent::ContextWindow(window.get()))?;
     }
-    let messages = request
-        .messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                TranscriptRole::Operator => "user",
-                TranscriptRole::Assistant => "assistant",
-                TranscriptRole::Notice | TranscriptRole::Tool { .. } => return None,
-            };
-            let mut value = json!({"role": role, "content": message.text});
-            if role == "assistant"
-                && metadata
-                    .compat
-                    .requires_reasoning_content_on_assistant_messages
-                    == Some(true)
-            {
-                value["reasoning_content"] = json!("");
+    let mut tools = match workspace {
+        Some(directory) => ToolRuntime::load(directory, state, &request.selection.gateway, grants)?,
+        None => None,
+    };
+    let mut messages = request.messages.clone();
+    loop {
+        let body = request_body(request, &connection.metadata, &messages, tools.as_ref())?;
+        let outcome = stream_completion(url, headers, &connection.metadata, &body, sender)?;
+        match outcome {
+            StreamOutcome::Stopped => return Ok(()),
+            StreamOutcome::ToolCalls { text, calls } => {
+                emit(sender, ResponseEvent::ToolCallsRequested(calls.clone()))?;
+                let Some(tools) = tools.as_mut() else {
+                    return Err(Error::new(format!(
+                        "tool execution is disabled: no {} rule approves a builtin tool in this working directory",
+                        crate::actions::FILE_NAME
+                    )));
+                };
+                let results = tools.run_round(&calls, sender)?;
+                let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
+                assistant.tool = Some(ToolPayload::Calls(calls));
+                messages.push(assistant);
+                messages.extend(results);
             }
-            Some(value)
-        })
-        .collect::<Vec<_>>();
+        }
+    }
+}
+
+fn request_body(
+    request: &ChatRequest,
+    metadata: &crate::harness::ModelMetadata,
+    messages: &[ChatMessage],
+    tools: Option<&ToolRuntime>,
+) -> Result<Vec<u8>> {
     let mut body = json!({
         "model": request.selection.model,
-        "messages": messages,
+        "messages": super::wire::messages(messages, &metadata.compat),
         "stream": true,
         "stream_options": {"include_usage": true}
     });
+    if let Some(tools) = tools {
+        body["tools"] = serde_json::Value::Array(tools.definitions());
+    }
     if metadata.compat.supports_usage_in_streaming == Some(false) {
         body.as_object_mut()
             .expect("request object")
@@ -127,6 +166,16 @@ fn complete(
     {
         return Err(Error::new("model request exceeds inputLimits.maxRequestBytes; shorten the conversation or select another model"));
     }
+    Ok(body)
+}
+
+fn stream_completion(
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    metadata: &crate::harness::ModelMetadata,
+    body: &[u8],
+    sender: &Sender<ResponseEvent>,
+) -> Result<StreamOutcome> {
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(Duration::from_secs(120))
@@ -138,7 +187,7 @@ fn complete(
     for (name, value) in headers {
         call = call.set(name, value);
     }
-    let response = match call.send_bytes(&body) {
+    let response = match call.send_bytes(body) {
         Ok(response) => response,
         Err(ureq::Error::Status(status, _)) => return Err(http_error(status)),
         // Transport errors can contain URLs, credentials, or upstream text.
@@ -154,13 +203,7 @@ fn complete(
     {
         return Err(Error::new("model response must be text/event-stream"));
     }
-    match read_stream_with_metadata(response.into_reader(), sender, metadata)? {
-        StreamOutcome::Stopped => Ok(()),
-        StreamOutcome::ToolCalls(calls) => {
-            emit(sender, ResponseEvent::ToolCallsRequested(calls))?;
-            Err(Error::new("tool execution is disabled until an authorization policy and sandbox are implemented"))
-        }
-    }
+    read_stream_with_metadata(response.into_reader(), sender, metadata)
 }
 
 fn http_error(status: u16) -> Error {
@@ -211,7 +254,11 @@ fn emit(sender: &Sender<ResponseEvent>, event: ResponseEvent) -> Result<()> {
 
 enum StreamOutcome {
     Stopped,
-    ToolCalls(Vec<ToolCall>),
+    /// `text` is the assistant content streamed before the calls.
+    ToolCalls {
+        text: String,
+        calls: Vec<ToolCall>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -235,6 +282,7 @@ fn read_stream_with_metadata(
     let mut total = 0u64;
     let mut finished = None;
     let mut tool_calls = ToolCallAssembler::default();
+    let mut text = String::new();
     loop {
         let mut line = Vec::new();
         let size = reader
@@ -273,9 +321,9 @@ fn read_stream_with_metadata(
                     Some(FinishReason::Stop) => Err(Error::new(
                         "model tool calls require the tool_calls finish reason",
                     )),
-                    Some(FinishReason::ToolCalls) => {
-                        tool_calls.finish().map(StreamOutcome::ToolCalls)
-                    }
+                    Some(FinishReason::ToolCalls) => tool_calls
+                        .finish()
+                        .map(|calls| StreamOutcome::ToolCalls { text, calls }),
                     None => Err(Error::new("model stream completed without a finish reason")),
                 };
             }
@@ -302,8 +350,9 @@ fn read_stream_with_metadata(
                 if let Some(deltas) = choice.delta.tool_calls {
                     tool_calls.extend(deltas)?;
                 }
-                if let Some(text) = choice.delta.content {
-                    emit(sender, ResponseEvent::TextDelta(text))?;
+                if let Some(content) = choice.delta.content {
+                    text.push_str(&content);
+                    emit(sender, ResponseEvent::TextDelta(content))?;
                 }
                 if let Some(reason) = choice.finish_reason {
                     match reason.as_str() {

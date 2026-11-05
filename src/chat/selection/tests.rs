@@ -5,6 +5,7 @@ fn messages(text: &str) -> Vec<ChatMessage> {
     vec![ChatMessage {
         role: TranscriptRole::Assistant,
         text: text.into(),
+        tool: None,
     }]
 }
 

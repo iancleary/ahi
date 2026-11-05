@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+mod actions;
 pub mod audit;
 pub mod chat;
 pub mod check;
