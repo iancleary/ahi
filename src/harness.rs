@@ -546,10 +546,31 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
 /// not persisted in the catalog (a failed refresh leaves that file untouched).
 pub fn refresh_all(state: &Path) -> Result<BTreeMap<String, String>> {
     let registry = load_registry(state)?;
+    // Providers refresh concurrently: each writes only its own catalog file,
+    // so N providers take one round trip, not N in sequence.
+    let outcomes = std::thread::scope(|scope| {
+        let handles: Vec<_> = registry
+            .providers
+            .iter()
+            .map(|provider| {
+                let id = provider.id.as_str();
+                (id, scope.spawn(move || refresh_provider(state, id)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(id, handle)| {
+                let outcome = handle
+                    .join()
+                    .unwrap_or_else(|_| Err(Error::new("catalog refresh thread panicked")));
+                (id, outcome)
+            })
+            .collect::<Vec<_>>()
+    });
     let mut errors = BTreeMap::new();
-    for provider in registry.providers {
-        if let Err(err) = refresh_provider(state, &provider.id) {
-            errors.insert(provider.id, err.to_string());
+    for (id, outcome) in outcomes {
+        if let Err(err) = outcome {
+            errors.insert(id.to_string(), err.to_string());
         }
     }
     Ok(errors)

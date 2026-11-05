@@ -89,6 +89,22 @@ Mechanism, from the same page and the local `claude --help` (2.1.318): one `clau
 
 Recommendation when the branch starts: HTTP-transport MCP in the TUI process, no permission-prompt tool.
 
+### D18. Where the time goes, measured (2026-11-05)
+
+Ian asked for paths that make the app 10× faster. Release-build probes on this machine (M-series, 120×40 terminal), then removed from the tree:
+
+| Path | Measured | Verdict |
+| --- | --- | --- |
+| Idle frame, 300 messages | 180 µs per draw, 0.36 % of a core at 20 Hz | Not a bottleneck. Left alone: draw-on-change would cut idle wakeups, not speed. |
+| `load_registry` | 68 µs | Not a bottleneck. |
+| Binary start to `--help` | under 10 ms warm | Not a bottleneck. |
+| `visible_lines` for a 50-row window | 6 µs | Not a bottleneck. |
+| Re-wrap of a streamed 32 KiB message | 205 µs per delta averaged over the stream, 410 µs for the final delta, 33 MB re-segmented in total | Quadratic in message length. Fixed: 1.9 µs per delta, bounded by the delta, not the message. Deltas are batched per frame, so the per-frame saving is one full message layout (0.4–0.7 ms for 32 KiB). |
+| `git status --porcelain --untracked-files=all` | 8.2 ms per call here, unbounded on a large tree, on the UI thread at load, on every Enter, and once per drained tool batch | The only stall a user can feel. Fixed: probed on a worker thread, one in flight, footer keeps its last snapshot. |
+| `refresh_all` | one provider after another, up to 15 s each | Fixed: one scoped thread per provider; each writes only its own catalog file. N providers now cost the slowest one. |
+
+The wall clock of a turn is the model and the network. Nothing in the UI loop or the request path is within an order of magnitude of either, so there is no local 10× left to take without changing what is sent. The one lever that would change what is sent is provider-side prompt caching (Anthropic `cache_control` breakpoints; OpenAI applies it automatically). It is a request flag, not an application cache, and it cuts input cost by about 90 % and time to first token on tool rounds and long chats, but cache writes cost 25 % more and expire after five minutes, so an idle chat can pay more. Not implemented; Ian's call. `ErrorKind` to the screen stays open: no screen behaviour yet justifies carrying it (D7). Cancellation of blocked reads stays open as a design change.
+
 ## Codex review
 
 GPT-6-Astra ran twice through the Codex CLI, read-only (`codex exec -m gpt-6-astra -s read-only`), with the same "work to completion, state assumptions instead of asking" guidance the owner gave the implementer. The first prompt briefed it with file paths and three questions, not with conclusions, and asked it to disagree with the docs where warranted.
@@ -130,10 +146,10 @@ Verdict was "ship after fixing items 1–6"; all six were fixed on the branch, t
 | 6 | Inline drain could block a finished turn until the HTTP deadline | Fixed: detached bounded drain (D13) |
 | 7 | `request.clone()` still duplicated the transcript per turn | Fixed: `messages` is moved out of the request |
 | 8 | Materializing an implicit provider reordered saved providers | Fixed: inserted at the front, saved positions untouched |
-| 9 | A long streaming message is re-wrapped from its start on every delta while scrolled | Not fixed; noted. Row-level incremental wrapping within a message is the next step if it shows up. |
+| 9 | A long streaming message is re-wrapped from its start on every delta while scrolled | Fixed later on the branch (D18): an append to the last message resumes from its last row. |
 | 10 | Doc wording: headers cannot override auth headers; 64 KiB is per call; stale `http/responses.rs` link | Fixed |
 
-Codex also confirmed: every validated call gets exactly one result; cancelled batches run nothing; grants carry the destination; raw arguments stay out of diagnostics; no route exists from the browser credential to a gateway; no production mutation of the transcript misses a dirty mark. Still open from both passes: real cancellation of blocked reads, a turn-configuration snapshot (the disclosure notice is D16), `ErrorKind` on the screen, and the roadmap's `AssistantTurn` type.
+Codex also confirmed: every validated call gets exactly one result; cancelled batches run nothing; grants carry the destination; raw arguments stay out of diagnostics; no route exists from the browser credential to a gateway; no production mutation of the transcript misses a dirty mark. Still open from both passes: real cancellation of blocked reads, a turn-configuration snapshot (the disclosure notice is D16), `ErrorKind` on the screen, and the roadmap's `AssistantTurn` type. Item 9 was fixed afterwards (D18).
 
 ## Review answers (2026-11-05)
 

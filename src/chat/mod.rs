@@ -104,9 +104,11 @@ struct ChatScreen {
     spinner_frame: usize,
     /// Wrapped rows, re-laid from `dirty_from` on demand, never per frame.
     layout: transcript::render::TranscriptLayout,
-    dirty_from: usize,
+    dirty: transcript::render::Dirty,
     /// A tool returned since the last drain; refresh Git status once per drain.
     location_dirty: bool,
+    /// A Git status probe in flight on its own thread; the UI never waits on it.
+    location_receiver: Option<Receiver<(String, Option<location::GitStatus>)>>,
 }
 
 impl ChatScreen {
@@ -139,8 +141,9 @@ impl ChatScreen {
             transcript_height: 1,
             spinner_frame: 0,
             layout: transcript::render::TranscriptLayout::new(),
-            dirty_from: 0,
+            dirty: transcript::render::Dirty::From(0),
             location_dirty: false,
+            location_receiver: None,
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -156,7 +159,29 @@ impl ChatScreen {
 
     /// Mark the message at `index` (and everything after it) for re-layout.
     fn mark_dirty(&mut self, index: usize) {
-        self.dirty_from = self.dirty_from.min(index);
+        use transcript::render::Dirty;
+        self.dirty = match self.dirty {
+            Dirty::From(from) => Dirty::From(from.min(index)),
+            // An earlier full mark outranks an append of the last message.
+            Dirty::AppendedLast => Dirty::From(index.min(self.messages.len().saturating_sub(1))),
+        };
+    }
+
+    /// Text was appended to the last message and nothing else changed.
+    fn mark_appended_last(&mut self) {
+        use transcript::render::Dirty;
+        let last = self.messages.len().saturating_sub(1);
+        if let Dirty::From(from) = self.dirty {
+            if from >= last {
+                // Clean, or only the last message dirty: resume from its tail
+                // unless it was already marked for a full re-layout.
+                self.dirty = if from == last {
+                    Dirty::From(last)
+                } else {
+                    Dirty::AppendedLast
+                };
+            }
+        }
     }
 
     fn push_message(&mut self, message: ChatMessage) {
@@ -167,7 +192,7 @@ impl ChatScreen {
     /// Bring the row layout up to date with the transcript and width.
     fn sync_layout(&mut self) {
         self.layout
-            .sync(&self.messages, self.transcript_width, &mut self.dirty_from);
+            .sync(&self.messages, self.transcript_width, &mut self.dirty);
     }
 
     fn row_count(&mut self) -> usize {
@@ -489,10 +514,24 @@ impl ChatScreen {
                 }
             }
         }
-        // One Git status per drained batch of tool returns, not one per
-        // call: a 32-call batch would otherwise run 32 synchronous processes
-        // before the next frame.
-        if self.location_dirty {
+        self.poll_location();
+    }
+
+    /// Land a finished Git status probe, then start the one a drained batch
+    /// of tool returns asked for. One probe at a time, never on this thread.
+    fn poll_location(&mut self) {
+        if let Some(receiver) = &self.location_receiver {
+            match receiver.try_recv() {
+                Ok((directory, git_status)) => {
+                    self.location_receiver = None;
+                    self.location_directory = directory;
+                    self.location_git = git_status;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.location_receiver = None,
+            }
+        }
+        if self.location_dirty && self.location_receiver.is_none() {
             self.location_dirty = false;
             self.refresh_location();
         }
@@ -671,7 +710,7 @@ impl ChatScreen {
             ParsedCommand::Exit => Ok(ScreenAction::Exit),
             ParsedCommand::Clear => {
                 self.messages.clear();
-                self.dirty_from = 0;
+                self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
                 self.meters.clear_counts();
                 self.scroll_from_bottom = 0;
@@ -725,11 +764,10 @@ impl ChatScreen {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
                 }
-                let last = self.messages.len().saturating_sub(1);
                 if let Some(message) = self.messages.last_mut() {
                     message.text.push_str(&text);
                 }
-                self.mark_dirty(last);
+                self.mark_appended_last();
                 false
             }
             ResponseEvent::ToolCallsRequested { calls, native } => {
@@ -847,11 +885,29 @@ impl ChatScreen {
         self.scroll_from_bottom = 0;
     }
 
+    /// Probe the working directory and Git status on a worker thread. The
+    /// footer keeps its last snapshot until the probe lands, so `git status`
+    /// on a large tree never stalls a keystroke or a frame.
     fn refresh_location(&mut self) {
-        let (directory, git_status) = location::current();
-        if self.location_directory != directory || self.location_git != git_status {
-            self.location_directory = directory;
-            self.location_git = git_status;
+        if self.location_receiver.is_some() {
+            self.location_dirty = true;
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(location::current());
+        });
+        self.location_receiver = Some(receiver);
+    }
+
+    /// Block until the in-flight Git status probe lands. Tests only.
+    #[cfg(test)]
+    fn wait_for_location(&mut self) {
+        if let Some(receiver) = self.location_receiver.take() {
+            if let Ok((directory, git_status)) = receiver.recv() {
+                self.location_directory = directory;
+                self.location_git = git_status;
+            }
         }
     }
 
@@ -999,6 +1055,27 @@ mod tests {
 
     fn screen_in(state: &Path) -> ChatScreen {
         ChatScreen::load(state, "openai/gpt-4.1")
+    }
+
+    #[test]
+    fn git_status_is_probed_off_the_ui_thread_and_lands_on_poll() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-location");
+        let mut screen = screen_in(&state);
+        // Construction starts a probe; the footer keeps its empty snapshot
+        // until the probe lands rather than waiting on `git status`.
+        assert!(screen.location_receiver.is_some());
+        screen.wait_for_location();
+        assert!(screen.location_receiver.is_none());
+        assert!(!screen.location_directory.is_empty());
+        // A request while one is in flight is remembered, not stacked.
+        screen.refresh_location();
+        screen.refresh_location();
+        assert!(screen.location_dirty);
+        screen.wait_for_location();
+        screen.poll_location();
+        assert!(!screen.location_dirty);
+        assert!(screen.location_receiver.is_some());
+        screen.wait_for_location();
     }
 
     #[test]

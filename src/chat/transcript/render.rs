@@ -24,6 +24,17 @@ pub(crate) struct TranscriptLayout {
     rows: Vec<TranscriptRow>,
     /// Row index where each laid-out message begins, separator included.
     starts: Vec<usize>,
+    /// Bytes of the last message that the rows cover, for append-only resumes.
+    last_len: usize,
+}
+
+/// What changed since the last `sync`, as the screen tracked it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dirty {
+    /// Messages from this index on may have changed in any way.
+    From(usize),
+    /// Only the last message changed, and only by appending text.
+    AppendedLast,
 }
 
 impl TranscriptLayout {
@@ -32,18 +43,23 @@ impl TranscriptLayout {
             width: 0,
             rows: Vec::new(),
             starts: Vec::new(),
+            last_len: 0,
         }
     }
 
     /// Bring rows up to date. A width change re-lays everything; otherwise
-    /// only messages from `*dirty_from` on are re-laid, and messages appended
-    /// without a dirty mark are picked up too. Leaves `*dirty_from` clean.
-    pub(crate) fn sync(&mut self, messages: &[ChatMessage], width: usize, dirty_from: &mut usize) {
+    /// only messages from the dirty index on are re-laid, and messages appended
+    /// without a dirty mark are picked up too. An append to the last message
+    /// resumes from that message's last row instead of its first byte, so a
+    /// streamed reply costs the new text, not the whole message, per frame.
+    /// Leaves `*dirty` clean.
+    pub(crate) fn sync(&mut self, messages: &[ChatMessage], width: usize, dirty: &mut Dirty) {
         let width = width.max(1);
-        let from = if width == self.width {
-            (*dirty_from).min(self.starts.len()).min(messages.len())
-        } else {
-            0
+        let from = match *dirty {
+            _ if width != self.width => 0,
+            Dirty::AppendedLast if self.resume_last(messages, width) => messages.len(),
+            Dirty::AppendedLast => messages.len().saturating_sub(1),
+            Dirty::From(index) => index.min(self.starts.len()).min(messages.len()),
         };
         self.width = width;
         let keep_rows = self.starts.get(from).copied().unwrap_or(self.rows.len());
@@ -53,7 +69,38 @@ impl TranscriptLayout {
             self.starts.push(self.rows.len());
             layout_message(&mut self.rows, message, width);
         }
-        *dirty_from = messages.len();
+        if let Some(last) = messages.last() {
+            self.last_len = last.text.len();
+        }
+        *dirty = Dirty::From(messages.len());
+    }
+
+    /// Re-wrap only the last row of the last message plus its new text.
+    /// False when the rows do not cover a prefix of that message, in which
+    /// case the caller re-lays it in full.
+    fn resume_last(&mut self, messages: &[ChatMessage], width: usize) -> bool {
+        let Some(message) = messages.last() else {
+            return false;
+        };
+        if self.starts.len() != messages.len() || message.text.len() < self.last_len {
+            return false;
+        }
+        let first_row = self.starts[messages.len() - 1];
+        // Messages with no rows (tool-only turns) and the separator do not
+        // carry text to resume from.
+        if self.rows.len() <= first_row + 1 && (first_row > 0 || self.rows.len() <= first_row) {
+            return false;
+        }
+        if !message.text.is_char_boundary(self.last_len) {
+            return false;
+        }
+        let Some(tail) = self.rows.pop() else {
+            return false;
+        };
+        let mut text = tail.text;
+        text.push_str(&message.text[self.last_len..]);
+        layout_paragraphs(&mut self.rows, &text, tail.style, width);
+        true
     }
 
     pub(crate) fn rows(&self) -> &[TranscriptRow] {
@@ -86,7 +133,12 @@ fn layout_message(rows: &mut Vec<TranscriptRow>, message: &ChatMessage, width: u
         TranscriptRole::Assistant | TranscriptRole::Notice => Color::Reset,
     };
     let style = Style::default().bg(background);
-    for paragraph in message.text.split('\n') {
+    layout_paragraphs(rows, &message.text, style, width);
+}
+
+/// Wrap `text` by grapheme cell width, one row per soft wrap or newline.
+fn layout_paragraphs(rows: &mut Vec<TranscriptRow>, text: &str, style: Style, width: usize) {
+    for paragraph in text.split('\n') {
         let mut text = String::new();
         let mut cells = 0;
         for grapheme in paragraph.graphemes(true) {
@@ -178,16 +230,16 @@ mod tests {
             message(TranscriptRole::Assistant, "a\nlonger reply here"),
         ];
         let mut layout = TranscriptLayout::new();
-        let mut dirty = 0;
+        let mut dirty = Dirty::From(0);
         layout.sync(&messages, 6, &mut dirty);
         let texts =
             |rows: &[TranscriptRow]| rows.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
-        assert_eq!(dirty, 2);
+        assert_eq!(dirty, Dirty::From(2));
 
         // Streaming appends to the last message: only it is re-laid.
         messages[1].text.push_str(" and more");
-        dirty = 1;
+        dirty = Dirty::From(1);
         layout.sync(&messages, 6, &mut dirty);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
 
@@ -198,7 +250,7 @@ mod tests {
 
         // An earlier message edited in place re-lays from there.
         messages[0].text = "edited".into();
-        dirty = 0;
+        dirty = Dirty::From(0);
         layout.sync(&messages, 6, &mut dirty);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
 
@@ -206,9 +258,90 @@ mod tests {
         layout.sync(&messages, 40, &mut dirty);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 40)));
         messages.clear();
-        dirty = 0;
+        dirty = Dirty::From(0);
         layout.sync(&messages, 40, &mut dirty);
         assert!(layout.rows().is_empty());
+    }
+
+    #[test]
+    fn appending_to_the_last_message_resumes_from_its_last_row() {
+        let texts =
+            |rows: &[TranscriptRow]| rows.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
+        let breaks =
+            |rows: &[TranscriptRow]| rows.iter().map(|r| r.break_after).collect::<Vec<_>>();
+        let check = |layout: &TranscriptLayout, messages: &[ChatMessage], width| {
+            let expected = rows(messages, width);
+            assert_eq!(texts(layout.rows()), texts(&expected));
+            assert_eq!(breaks(layout.rows()), breaks(&expected));
+        };
+        let width = 7;
+        // Deltas that cross wrap boundaries, carry newlines (including a
+        // trailing one), wide graphemes, and a combining mark joining the
+        // previous grapheme.
+        let deltas = [
+            "stream",
+            "ing wor",
+            "ds\n",
+            "next p",
+            "aragraph that wraps",
+            "\n\n",
+            "日本語テキスト",
+            "e",
+            "\u{301}",
+            "",
+            "tail",
+        ];
+
+        // First message of the transcript: no separator row precedes it.
+        let mut messages = vec![message(TranscriptRole::Assistant, "")];
+        let mut layout = TranscriptLayout::new();
+        let mut dirty = Dirty::From(0);
+        layout.sync(&messages, width, &mut dirty);
+        for delta in deltas {
+            messages[0].text.push_str(delta);
+            dirty = Dirty::AppendedLast;
+            layout.sync(&messages, width, &mut dirty);
+            check(&layout, &messages, width);
+            assert_eq!(dirty, Dirty::From(1));
+        }
+
+        // Later message: a separator precedes it and the resume must keep it.
+        messages.push(message(TranscriptRole::Operator, "question"));
+        messages.push(message(TranscriptRole::Assistant, ""));
+        layout.sync(&messages, width, &mut dirty);
+        for delta in deltas {
+            messages[2].text.push_str(delta);
+            dirty = Dirty::AppendedLast;
+            layout.sync(&messages, width, &mut dirty);
+            check(&layout, &messages, width);
+        }
+
+        // An append flag on a message whose rows were never laid out (a
+        // tool-only turn with no text) falls back to a full layout of it.
+        let mut tool_turn = message(TranscriptRole::Assistant, "");
+        tool_turn.tool = Some(super::super::ToolPayload::Calls {
+            calls: Vec::new(),
+            native: None,
+        });
+        messages.push(tool_turn);
+        layout.sync(&messages, width, &mut dirty);
+        check(&layout, &messages, width);
+        messages[3].text.push_str("late text");
+        dirty = Dirty::AppendedLast;
+        layout.sync(&messages, width, &mut dirty);
+        check(&layout, &messages, width);
+
+        // A width change with the append flag re-lays everything.
+        messages[3].text.push_str(" more");
+        dirty = Dirty::AppendedLast;
+        layout.sync(&messages, 11, &mut dirty);
+        check(&layout, &messages, 11);
+
+        // Text that shrank is not an append: full layout of the last message.
+        messages[3].text = "short".into();
+        dirty = Dirty::AppendedLast;
+        layout.sync(&messages, 11, &mut dirty);
+        check(&layout, &messages, 11);
     }
 
     #[test]
