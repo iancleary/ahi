@@ -715,7 +715,7 @@ impl ChatScreen {
                 self.mark_dirty(last);
                 false
             }
-            ResponseEvent::ToolCallsRequested(calls) => {
+            ResponseEvent::ToolCallsRequested { calls, native } => {
                 // The calls end the assistant message that requested them and
                 // are replayed with their results on later requests.
                 if !self.assistant_open {
@@ -723,7 +723,7 @@ impl ChatScreen {
                 }
                 let last = self.messages.len().saturating_sub(1);
                 if let Some(message) = self.messages.last_mut() {
-                    message.tool = Some(ToolPayload::Calls(calls));
+                    message.tool = Some(ToolPayload::Calls { calls, native });
                 }
                 self.mark_dirty(last);
                 self.assistant_open = false;
@@ -1847,17 +1847,26 @@ mod tests {
             arguments: serde_json::from_value(serde_json::json!({"path": "private-path"})).unwrap(),
         };
         assert!(!screen.apply_event(ResponseEvent::TextDelta("looking".into())));
-        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call.clone()])));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested {
+            calls: vec![call.clone()],
+            native: None
+        }));
         assert_eq!(
             screen.messages,
             vec![ChatMessage {
                 role: TranscriptRole::Assistant,
                 text: "looking".into(),
-                tool: Some(ToolPayload::Calls(vec![call.clone()])),
+                tool: Some(ToolPayload::Calls {
+                    calls: vec![call.clone()],
+                    native: None
+                }),
             }]
         );
         // A tool-only assistant turn renders nothing; raw arguments never render.
-        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call])));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested {
+            calls: vec![call],
+            native: None
+        }));
         assert_eq!(screen.messages.len(), 2);
         let rendered = draw_lines(&mut screen, 40, 12).join("\n");
         assert!(rendered.contains("looking"));

@@ -17,6 +17,16 @@ impl TokenParameter {
     }
 }
 
+/// How an Anthropic model takes a thinking setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    /// `thinking: {type: "enabled", budget_tokens}` (the default).
+    Budget,
+    /// `thinking: {type: "adaptive"}` with `output_config.effort`.
+    Adaptive,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputModality {
@@ -71,6 +81,7 @@ optional_fields!(CompletionCompatibility {
     requires_assistant_after_tool_result: bool,
     requires_thinking_as_text: bool,
     requires_reasoning_content_on_assistant_messages: bool,
+    thinking_mode: ThinkingMode,
 });
 optional_fields!(ModelCost {
     input: TokenPrice,

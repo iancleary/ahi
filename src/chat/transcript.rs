@@ -2,7 +2,10 @@
 
 pub(crate) mod render;
 
+use serde_json::Value;
+
 use super::backend::ToolCall;
+use crate::harness::Protocol;
 
 /// One transcript entry sent to a backend, or a local notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,11 +17,26 @@ pub(crate) struct ChatMessage {
     pub(crate) tool: Option<ToolPayload>,
 }
 
+/// Provider-native output captured at a terminal event and replayed verbatim
+/// to the protocol that produced it: Responses output items (reasoning with
+/// encrypted content, message, function calls) or Anthropic thinking blocks.
+/// Opaque data, never displayed, never interpreted, dropped on a protocol
+/// change. Bounded by the stream caps that admitted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeReplay {
+    pub(crate) protocol: Protocol,
+    pub(crate) items: Vec<Value>,
+}
+
 /// The model-facing half of a tool exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolPayload {
-    /// Calls the assistant requested at the end of this assistant message.
-    Calls(Vec<ToolCall>),
+    /// Calls the assistant requested at the end of this assistant message,
+    /// with the native blocks the continuation must carry.
+    Calls {
+        calls: Vec<ToolCall>,
+        native: Option<NativeReplay>,
+    },
     /// The `role: "tool"` reply to one call.
     Result {
         call_id: String,

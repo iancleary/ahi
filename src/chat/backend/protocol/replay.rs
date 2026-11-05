@@ -42,7 +42,7 @@ impl Exchanges {
         let mut open: Option<(usize, &[crate::chat::backend::ToolCall], u64)> = None;
         for (index, message) in messages.iter().enumerate() {
             match (&message.role, &message.tool) {
-                (TranscriptRole::Assistant, Some(ToolPayload::Calls(calls))) => {
+                (TranscriptRole::Assistant, Some(ToolPayload::Calls { calls, .. })) => {
                     open = Some((index, calls, 0));
                 }
                 (TranscriptRole::Assistant | TranscriptRole::Operator, _) => open = None,
@@ -98,11 +98,13 @@ mod tests {
 
     fn assistant(ids: &[&str]) -> ChatMessage {
         let mut message = ChatMessage::new(TranscriptRole::Assistant, "");
-        message.tool = Some(ToolPayload::Calls(
-            ids.iter()
+        message.tool = Some(ToolPayload::Calls {
+            calls: ids
+                .iter()
                 .map(|id| call(id, "read_file", json!({"path": "a"})))
                 .collect(),
-        ));
+            native: None,
+        });
         message
     }
 

@@ -82,7 +82,7 @@ pub(super) fn messages(messages: &[ChatMessage], compat: &CompletionCompatibilit
             }
             TranscriptRole::Assistant => {
                 let calls: Vec<Value> = match &message.tool {
-                    Some(ToolPayload::Calls(calls)) => calls
+                    Some(ToolPayload::Calls { calls, .. }) => calls
                         .iter()
                         .enumerate()
                         .filter(|(position, _)| exchanges.is_answered(index, *position))
@@ -176,7 +176,7 @@ enum FinishReason {
 }
 
 pub(super) fn read_stream(
-    reader: impl Read,
+    reader: impl Read + Send + 'static,
     sender: &Sender<crate::chat::backend::ResponseEvent>,
     metadata: &ModelMetadata,
 ) -> Result<StreamOutcome> {
@@ -210,9 +210,13 @@ pub(super) fn read_stream(
                 Some(FinishReason::Stop) => Err(Error::protocol(
                     "model tool calls require the tool_calls finish reason",
                 )),
-                Some(FinishReason::ToolCalls) => tool_calls
-                    .finish()
-                    .map(|calls| StreamOutcome::ToolCalls { text, calls }),
+                Some(FinishReason::ToolCalls) => {
+                    tool_calls.finish().map(|calls| StreamOutcome::ToolCalls {
+                        text,
+                        calls,
+                        native: None,
+                    })
+                }
                 None => Err(Error::protocol(
                     "model stream completed without a finish reason",
                 )),
@@ -291,11 +295,13 @@ mod tests {
     fn assistant(text: &str, ids: &[&str]) -> ChatMessage {
         let mut message = ChatMessage::new(TranscriptRole::Assistant, text);
         if !ids.is_empty() {
-            message.tool = Some(ToolPayload::Calls(
-                ids.iter()
+            message.tool = Some(ToolPayload::Calls {
+                calls: ids
+                    .iter()
                     .map(|id| call(id, "read_file", json!({"path": "a"})))
                     .collect(),
-            ));
+                native: None,
+            });
         }
         message
     }

@@ -44,14 +44,9 @@ pub fn save_curated_models(
                 "unknown provider `{provider}` in models.json"
             )));
         };
-        // Materializing an implicit built-in must not move it behind gateways:
-        // built-ins stay ahead of configured gateways, openai first.
+        // An implicit built-in sorts first in the picker (no saved position);
+        // materialize it at the front and leave every saved position alone.
         let mut ordered = serde_json::Map::new();
-        if provider != OPENAI_ID {
-            if let Some(openai) = providers.remove(OPENAI_ID) {
-                ordered.insert(OPENAI_ID.to_string(), openai);
-            }
-        }
         ordered.insert(provider.to_string(), implicit);
         ordered.extend(std::mem::take(providers));
         *providers = ordered;

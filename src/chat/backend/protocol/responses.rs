@@ -16,20 +16,26 @@ use crate::chat::backend::sse::{SseError, SseReader};
 use crate::chat::backend::tool_call::ToolCallAssembler;
 use crate::chat::backend::tools::ToolSchema;
 use crate::chat::backend::ResponseEvent;
-use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
+use crate::chat::transcript::{ChatMessage, NativeReplay, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
-use crate::harness::ModelMetadata;
+use crate::harness::{ModelMetadata, Protocol};
 
 /// Output items one response may carry.
 const MAX_SLOTS: usize = 128;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
+/// Bound on the raw output items kept for native replay.
+const MAX_NATIVE_BYTES: usize = 1024 * 1024;
 
 pub(super) fn request(context: &RequestContext<'_>) -> Value {
+    // With `store: false`, a reasoning model's `reasoning` item must be sent
+    // back with the function calls it preceded; ask for the encrypted state
+    // that makes that possible.
     let mut body = json!({
         "model": context.model,
         "input": input(context.messages),
         "stream": true,
-        "store": false
+        "store": false,
+        "include": ["reasoning.encrypted_content"]
     });
     if let Some(tools) = context.tools {
         body["tools"] = Value::Array(tools.iter().map(definition).collect());
@@ -54,8 +60,10 @@ fn definition(schema: &ToolSchema) -> Value {
     })
 }
 
-/// Text history plus complete tool exchanges as `function_call` and
-/// `function_call_output` items. Native reasoning items are not replayed.
+/// Text history plus complete tool exchanges. A fully answered call batch
+/// produced by this protocol is replayed as its native output items, so
+/// reasoning items (with encrypted content) stay with their function calls.
+/// Anything else is synthesized as `function_call`/`function_call_output`.
 fn input(messages: &[ChatMessage]) -> Vec<Value> {
     let exchanges = Exchanges::of(messages);
     let mut items = Vec::with_capacity(messages.len());
@@ -66,10 +74,22 @@ fn input(messages: &[ChatMessage]) -> Vec<Value> {
                 "content": [{"type": "input_text", "text": message.text}]
             })),
             TranscriptRole::Assistant => {
+                if let Some(ToolPayload::Calls {
+                    calls,
+                    native: Some(native),
+                }) = &message.tool
+                {
+                    let complete = native.protocol == Protocol::OpenAiResponses
+                        && (0..calls.len()).all(|position| exchanges.is_answered(index, position));
+                    if complete {
+                        items.extend(native.items.iter().cloned());
+                        continue;
+                    }
+                }
                 if !message.text.is_empty() {
                     items.push(json!({"role": "assistant", "content": message.text}));
                 }
-                if let Some(ToolPayload::Calls(calls)) = &message.tool {
+                if let Some(ToolPayload::Calls { calls, .. }) = &message.tool {
                     for (position, call) in calls.iter().enumerate() {
                         if exchanges.is_answered(index, position) {
                             items.push(json!({
@@ -151,7 +171,8 @@ struct ResponseIdentity {
 struct TerminalResponse {
     id: String,
     status: String,
-    output: Vec<Item>,
+    /// Raw so the items can be replayed verbatim; each is also parsed as `Item`.
+    output: Vec<Value>,
     usage: Option<Usage>,
     error: Option<Value>,
     incomplete_details: Option<Value>,
@@ -285,7 +306,7 @@ impl Slots {
 }
 
 pub(super) fn read_stream(
-    reader: impl Read,
+    reader: impl Read + Send + 'static,
     sender: &Sender<ResponseEvent>,
     metadata: &ModelMetadata,
 ) -> Result<StreamOutcome> {
@@ -517,12 +538,15 @@ pub(super) fn read_stream(
                 }
                 let mut calls = ToolCallAssembler::default();
                 let mut call_index = 0;
-                for (index, item) in response.output.into_iter().enumerate() {
+                let mut native_bytes = 0;
+                for (index, raw) in response.output.iter().enumerate() {
+                    let item: Item = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
                     if slots.finished(index) != Some(&item) {
                         return Err(Error::protocol(
                             "OpenAI completed with unfinished or conflicting output items",
                         ));
                     }
+                    native_bytes += raw.to_string().len();
                     if let Item::Function {
                         call_id,
                         name,
@@ -533,6 +557,11 @@ pub(super) fn read_stream(
                         calls.push_function(call_index, call_id, name, arguments)?;
                         call_index += 1;
                     }
+                }
+                if native_bytes > MAX_NATIVE_BYTES {
+                    return Err(Error::limit(
+                        "OpenAI response output exceeds replay size limit",
+                    ));
                 }
                 if let Some(usage) = response.usage {
                     let cached = usage
@@ -552,6 +581,10 @@ pub(super) fn read_stream(
                     StreamOutcome::ToolCalls {
                         text: text_out,
                         calls: calls.finish()?,
+                        native: Some(NativeReplay {
+                            protocol: Protocol::OpenAiResponses,
+                            items: response.output,
+                        }),
                     }
                 };
                 sse.drain();
@@ -586,10 +619,13 @@ mod tests {
     #[test]
     fn complete_exchanges_replay_as_function_call_items() {
         let mut assistant = ChatMessage::new(TranscriptRole::Assistant, "checking");
-        assistant.tool = Some(ToolPayload::Calls(vec![
-            call("call_a", "read_file", json!({"path": "a"})),
-            call("call_b", "read_file", json!({"path": "b"})),
-        ]));
+        assistant.tool = Some(ToolPayload::Calls {
+            calls: vec![
+                call("call_a", "read_file", json!({"path": "a"})),
+                call("call_b", "read_file", json!({"path": "b"})),
+            ],
+            native: None,
+        });
         let mut result = ChatMessage::new(TranscriptRole::Tool { exit_code: 0 }, "preview");
         result.tool = Some(ToolPayload::Result {
             call_id: "call_a".into(),
@@ -613,5 +649,55 @@ mod tests {
                 json!({"role": "user", "content": [{"type": "input_text", "text": "next"}]}),
             ]
         );
+    }
+
+    #[test]
+    fn a_fully_answered_native_batch_replays_its_output_items_verbatim() {
+        let reasoning =
+            json!({"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"opaque"});
+        let function = json!({"id":"fc_1","type":"function_call","call_id":"call_a","name":"read_file","arguments":"{\"path\":\"a\"}","status":"completed"});
+        let mut assistant = ChatMessage::new(TranscriptRole::Assistant, "");
+        assistant.tool = Some(ToolPayload::Calls {
+            calls: vec![call("call_a", "read_file", json!({"path": "a"}))],
+            native: Some(NativeReplay {
+                protocol: Protocol::OpenAiResponses,
+                items: vec![reasoning.clone(), function.clone()],
+            }),
+        });
+        let mut result = ChatMessage::new(TranscriptRole::Tool { exit_code: 0 }, "");
+        result.tool = Some(ToolPayload::Result {
+            call_id: "call_a".into(),
+            name: "read_file".into(),
+            content: "fn a() {}".into(),
+        });
+        let answered = input(&[
+            ChatMessage::new(TranscriptRole::Operator, "q"),
+            assistant.clone(),
+            result,
+        ]);
+        assert_eq!(answered[1], reasoning);
+        assert_eq!(answered[2], function);
+        assert_eq!(answered[3]["type"], "function_call_output");
+        // Unanswered: native items are not replayed and neither is the call.
+        let unanswered = input(&[ChatMessage::new(TranscriptRole::Operator, "q"), assistant]);
+        assert_eq!(unanswered.len(), 1);
+        // Another protocol's native items never cross over.
+        let mut foreign = ChatMessage::new(TranscriptRole::Assistant, "");
+        foreign.tool = Some(ToolPayload::Calls {
+            calls: vec![call("toolu_1", "read_file", json!({"path": "a"}))],
+            native: Some(NativeReplay {
+                protocol: Protocol::AnthropicMessages,
+                items: vec![json!({"type": "thinking"})],
+            }),
+        });
+        let mut foreign_result = ChatMessage::new(TranscriptRole::Tool { exit_code: 0 }, "");
+        foreign_result.tool = Some(ToolPayload::Result {
+            call_id: "toolu_1".into(),
+            name: "read_file".into(),
+            content: "x".into(),
+        });
+        let crossed = input(&[foreign, foreign_result]);
+        assert_eq!(crossed[0]["type"], "function_call");
+        assert!(!crossed.iter().any(|item| item["type"] == "thinking"));
     }
 }

@@ -106,17 +106,19 @@ fn complete(
         )?,
         None => None,
     };
+    // `request` is consumed below; the destructure moves `messages` out.
     let schemas = tools.as_ref().map(ToolRuntime::schemas);
     // The request's history is the turn's working transcript; tool exchanges
     // are appended to it, never copied.
     let ChatRequest {
-        selection: _,
-        thinking: _,
+        selection,
+        thinking,
         mut messages,
-    } = request.clone();
+    } = request;
     loop {
         let context = RequestContext::new(
-            &request,
+            &selection.model,
+            thinking,
             metadata,
             &messages,
             schemas.as_deref(),
@@ -127,8 +129,18 @@ fn complete(
         let outcome = decode(connection.protocol, metadata, response, sender)?;
         match outcome {
             StreamOutcome::Stopped => return Ok(()),
-            StreamOutcome::ToolCalls { text, calls } => {
-                protocol::emit(sender, ResponseEvent::ToolCallsRequested(calls.clone()))?;
+            StreamOutcome::ToolCalls {
+                text,
+                calls,
+                native,
+            } => {
+                protocol::emit(
+                    sender,
+                    ResponseEvent::ToolCallsRequested {
+                        calls: calls.clone(),
+                        native: native.clone(),
+                    },
+                )?;
                 let Some(tools) = tools.as_mut() else {
                     return Err(Error::policy(format!(
                         "tool execution is disabled: no {} rule approves a builtin tool in this working directory",
@@ -137,7 +149,7 @@ fn complete(
                 };
                 let results = tools.run_round(&calls, sender)?;
                 let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
-                assistant.tool = Some(ToolPayload::Calls(calls));
+                assistant.tool = Some(ToolPayload::Calls { calls, native });
                 messages.push(assistant);
                 messages.extend(results);
             }

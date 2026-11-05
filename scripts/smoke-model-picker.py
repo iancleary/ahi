@@ -676,6 +676,7 @@ def main() -> None:
             session.close()
         environment = os.environ.copy()
         environment["PATH"] = "/nonexistent"
+        environment.pop("ANTHROPIC_API_KEY", None)
         result = subprocess.run(
             [str(binary), "--state-dir", str(login_state), "login"],
             input="bare-code\n", text=True, capture_output=True,

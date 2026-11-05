@@ -113,16 +113,24 @@ impl<R: Read> SseReader<R> {
     }
 
     /// Read what follows a terminal event, bounded, so an HTTP client that
-    /// pools connections sees the body consumed. Errors here are irrelevant.
-    pub(super) fn drain(mut self) {
-        let mut remaining = DRAIN_CAP;
-        let mut chunk = [0_u8; 4096];
-        while remaining > 0 {
-            match self.reader.read(&mut chunk) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => remaining = remaining.saturating_sub(n),
+    /// pools connections sees the body consumed. Runs on a detached thread:
+    /// the turn never waits on a server that leaves the body open, and the
+    /// connection is simply not reused if the read never completes. Errors
+    /// here are irrelevant.
+    pub(super) fn drain(mut self)
+    where
+        R: Send + 'static,
+    {
+        std::thread::spawn(move || {
+            let mut remaining = DRAIN_CAP;
+            let mut chunk = [0_u8; 4096];
+            while remaining > 0 {
+                match self.reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => remaining = remaining.saturating_sub(n),
+                }
             }
-        }
+        });
     }
 }
 

@@ -53,7 +53,8 @@ The following uses the same field structure as the reported Pi catalog. An enter
           "requiresToolResultName": false,
           "requiresAssistantAfterToolResult": false,
           "requiresThinkingAsText": false,
-          "requiresReasoningContentOnAssistantMessages": false
+          "requiresReasoningContentOnAssistantMessages": false,
+          "thinkingMode": "budget"
         }
       }]
     }

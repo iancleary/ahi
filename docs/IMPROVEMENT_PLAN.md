@@ -20,7 +20,7 @@ What was implemented instead: a full **Anthropic Messages** transport (`api: ant
 
 ### D3. The builtin tool loop runs for every transport, including browser-login OpenAI Responses
 
-`docs/TOOL_CALLS.md` said Responses stops at `tool execution is disabled until an authorization policy and sandbox are implemented`. The policy (`ahi.actions.yaml`, `ask` prompts, session grants) exists and the in-process path checks are the same for every transport, so the gate was the same for gateways. The loop was lifted out of the gateway branch into `HttpBackend::complete`, and each protocol supplies three things: request body, stream reader, and tool definitions. Responses replays `function_call` and `function_call_output` items; Anthropic replays `tool_use` and `tool_result` blocks. Not done: native reasoning-item replay for Responses (text and tool exchanges only). A live check against a reasoning model with `store: false` is still owed.
+`docs/TOOL_CALLS.md` said Responses stops at `tool execution is disabled until an authorization policy and sandbox are implemented`. The policy (`ahi.actions.yaml`, `ask` prompts, session grants) exists and the in-process path checks are the same for every transport, so the gate was the same for gateways. The loop was lifted out of the gateway branch into `HttpBackend::complete`, and each protocol supplies three things: request body, stream reader, and tool definitions. Responses replays `function_call` and `function_call_output` items; Anthropic replays `tool_use` and `tool_result` blocks. Native replay: with `store: false`, OpenAI's reasoning models require the `reasoning` item that preceded a `function_call` to be sent back with it. The request now asks for `reasoning.encrypted_content`, the parser keeps the terminal output items verbatim, and a fully answered batch is replayed as those items (`NativeReplay`, see D12). This follows the published contract; it has not been exercised against a live reasoning model, which is the first thing to do with a real credential.
 
 ### D4. Codex (GPT-6-Astra) reviews; it does not edit
 
@@ -49,6 +49,22 @@ OpenAI always shows an implicit picker group because its login lives inside ahi.
 ### D10. Browser-token Responses keeps its restricted request profile
 
 Pi omits `max_output_tokens` and sampling fields for Sign in with ChatGPT. That restriction is now a property of the credential (`CompletionConnection::browser_token`), not of the Responses protocol, so a gateway speaking Responses receives the output budget. The two protocol-neutral limits (`REQUEST_CAP`, `inputLimits.maxRequestBytes`) apply to every protocol before any network use.
+
+### D12. Provider-native blocks ride with the tool calls that need them
+
+Both APIs require a tool-calling assistant turn to be continued with the provider's own opaque output: Anthropic wants the signed `thinking`/`redacted_thinking` blocks in front of the `tool_use` blocks; OpenAI Responses with `store: false` wants the `reasoning` item (with `encrypted_content`) in front of the `function_call`. `ToolPayload::Calls` therefore carries an optional `NativeReplay { protocol, items }`, captured at the terminal event and replayed verbatim, in order, by the same protocol only. It is never shown, never parsed beyond size checks (1 MiB of Responses items, 256 KiB of thinking), and dropped when the transcript is sent to another protocol. A first version of this branch instead disabled thinking whenever tools were advertised; Codex's second pass argued, correctly, that replaying the blocks is the contract and gating only hides it.
+
+### D13. Draining a finished stream never blocks the turn
+
+ureq returns a connection to its pool only when the body was read to its end. Draining inline risked waiting on a gateway that leaves the body open until the 120-second deadline, so the bounded drain runs on a detached thread. Connection reuse is best effort; the turn continues at the terminal event, as before this branch.
+
+### D14. Anthropic thinking mode is model metadata
+
+Newer Anthropic models reject `budget_tokens` and take `thinking: {type: "adaptive"}` with `output_config.effort`. The typed `compat` block gained `thinkingMode: "budget" | "adaptive"` (default budget). Pi keeps a per-model table for this; ahi keeps it in the same place as every other capability flag, the gateway catalog or the curated entry.
+
+### D15. Tests do not read `ANTHROPIC_API_KEY`
+
+The implicit `anthropic` provider is gated on that variable in the binary. In test builds the check reads a per-thread flag that a test sets explicitly, so a developer who exports the key does not shift provider indexes under unrelated fixtures. The PTY smoke script removes the variable from the child environment for the same reason.
 
 ### D11. Session grants bind to the destination URL
 
@@ -83,4 +99,19 @@ Codex also corrected the brief: configuration and policy load once per turn, not
 
 ### Pass 2: the finished branch
 
-Pending; appended below when it completes.
+Verdict was "ship after fixing items 1–6"; all six were fixed on the branch, then the suite, Clippy, rustdoc and the PTY workflow were rerun.
+
+| # | Finding | Outcome |
+| --- | --- | --- |
+| 1 | Anthropic tool continuation dropped thinking blocks and signatures | Fixed: captured and replayed (D12) |
+| 2 | Responses replay dropped `reasoning` items required with `store: false` | Fixed: `include: reasoning.encrypted_content`, native output items replayed (D12) |
+| 3 | Budget-style `thinking` is rejected by newer models that need adaptive thinking | Fixed: `compat.thinkingMode` (D14) |
+| 4 | Parser accepted content events after `message_delta`, so a late `tool_use` block could reach execution | Fixed: `message_delta` requires every block closed and closes content; later block events fail. `pause_turn` is now an unsupported stop reason. |
+| 5 | `/models` refresh replaced discovery metadata with names only | Fixed: previous typed metadata for still-listed ids is kept; the name overlays it |
+| 6 | Inline drain could block a finished turn until the HTTP deadline | Fixed: detached bounded drain (D13) |
+| 7 | `request.clone()` still duplicated the transcript per turn | Fixed: `messages` is moved out of the request |
+| 8 | Materializing an implicit provider reordered saved providers | Fixed: inserted at the front, saved positions untouched |
+| 9 | A long streaming message is re-wrapped from its start on every delta while scrolled | Not fixed; noted. Row-level incremental wrapping within a message is the next step if it shows up. |
+| 10 | Doc wording: headers cannot override auth headers; 64 KiB is per call; stale `http/responses.rs` link | Fixed |
+
+Codex also confirmed: every validated call gets exactly one result; cancelled batches run nothing; grants carry the destination; raw arguments stay out of diagnostics; no route exists from the browser credential to a gateway; no production mutation of the transcript misses a dirty mark. Still open from both passes: real cancellation of blocked reads, a turn-configuration snapshot and history-disclosure policy on provider switch, `ErrorKind` on the screen, and the roadmap's `AssistantTurn` type.

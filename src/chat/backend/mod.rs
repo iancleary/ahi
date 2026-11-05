@@ -54,7 +54,11 @@ pub(crate) struct ChatRequest {
 pub(crate) enum ResponseEvent {
     TextDelta(String),
     /// Validated requests only. This event never grants execution authority.
-    ToolCallsRequested(Vec<ToolCall>),
+    /// `native` is the provider's own output the screen stores for replay.
+    ToolCallsRequested {
+        calls: Vec<ToolCall>,
+        native: Option<super::transcript::NativeReplay>,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,

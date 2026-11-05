@@ -13,10 +13,10 @@ use std::sync::mpsc;
 use std::thread;
 
 /// Chat Completions stream decoding with default metadata.
-fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<StreamOutcome> {
+fn read_stream(body: &[u8], sender: &Sender<ResponseEvent>) -> Result<StreamOutcome> {
     protocol::read_stream(
         Protocol::OpenAiCompletions,
-        reader,
+        std::io::Cursor::new(body.to_vec()),
         sender,
         &ModelMetadata::default(),
     )
@@ -26,7 +26,14 @@ fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<Stre
 fn responses_request_body(request: &ChatRequest, metadata: &ModelMetadata) -> Result<Vec<u8>> {
     protocol::request_body(
         Protocol::OpenAiResponses,
-        &RequestContext::new(request, metadata, &request.messages, None, true),
+        &RequestContext::new(
+            &request.selection.model,
+            request.thinking,
+            metadata,
+            &request.messages,
+            None,
+            true,
+        ),
     )
 }
 
@@ -276,6 +283,7 @@ fn verify_responses_http_workflow() {
         serde_json::from_str::<serde_json::Value>(body).unwrap(),
         json!({
             "model":"curated-model", "stream":true,"store":false,
+            "include":["reasoning.encrypted_content"],
             "input":[{"role":"user","content":[{"type":"input_text","text":"first"}]},{"role":"assistant","content":"previous reply"},{"role":"user","content":[{"type":"input_text","text":"why?"}]}]
         })
     );
@@ -383,7 +391,7 @@ fn verify_responses_http_failures() {
         assert!(!format!("{events:?}").contains(RESPONSE_SECRET_MARKER));
         assert!(!events.iter().any(|event| matches!(
             event,
-            ResponseEvent::Completed | ResponseEvent::ToolCallsRequested(_)
+            ResponseEvent::Completed | ResponseEvent::ToolCallsRequested { .. }
         )));
     }
     let bodies = [
@@ -462,7 +470,12 @@ fn verify_responses_tool_requests() {
     let (result, events, _) = responses_fixture(&body);
     // The parser yields validated calls; only the turn loop may run them,
     // and only through the same policy gate as every other protocol.
-    let StreamOutcome::ToolCalls { text, calls } = result.unwrap() else {
+    let StreamOutcome::ToolCalls {
+        text,
+        calls,
+        native,
+    } = result.unwrap()
+    else {
         panic!("expected validated tool calls");
     };
     assert!(text.is_empty());
@@ -471,6 +484,11 @@ fn verify_responses_tool_requests() {
             && calls[0].id == "call_first"
             && calls[0].arguments["path"] == "src/世界.rs"
     );
+    // The terminal output items travel with the calls for native replay.
+    let native = native.expect("native output items");
+    assert_eq!(native.protocol, Protocol::OpenAiResponses);
+    assert_eq!(native.items.len(), 2);
+    assert_eq!(native.items[0]["call_id"], "call_first");
     assert!(matches!(&events[..], [ResponseEvent::Usage { .. }]));
     for (first, second, complete) in [
         (first.clone(), second.clone(), false),
@@ -524,7 +542,7 @@ fn verify_responses_tool_requests() {
         assert!(result.is_err());
         assert!(!events
             .iter()
-            .any(|event| matches!(event, ResponseEvent::ToolCallsRequested(_))));
+            .any(|event| matches!(event, ResponseEvent::ToolCallsRequested { .. })));
     }
 }
 
@@ -724,10 +742,13 @@ fn fragmented_parallel_tool_calls_are_validated_but_never_executed() {
     let state = state_for(&url);
     let events = collect(&mut backend(&state), request());
     assert_eq!(events, vec![
-        ResponseEvent::ToolCallsRequested(vec![
-            ToolCall { id: "call_a".into(), name: "read_file".into(), arguments: serde_json::from_value(json!({"path": "src/main.rs"})).unwrap() },
-            ToolCall { id: "call_b".into(), name: "bash".into(), arguments: serde_json::from_value(json!({"command": "echo secret"})).unwrap() }
-        ]),
+        ResponseEvent::ToolCallsRequested {
+            calls: vec![
+                ToolCall { id: "call_a".into(), name: "read_file".into(), arguments: serde_json::from_value(json!({"path": "src/main.rs"})).unwrap() },
+                ToolCall { id: "call_b".into(), name: "bash".into(), arguments: serde_json::from_value(json!({"command": "echo secret"})).unwrap() }
+            ],
+            native: None,
+        },
         ResponseEvent::Failed("tool execution is disabled: no ahi.actions.yaml rule approves a builtin tool in this working directory".into())
     ]);
     let received = server.join().unwrap();
@@ -997,11 +1018,14 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
     assert_eq!(
         events,
         vec![
-            ResponseEvent::ToolCallsRequested(vec![super::super::tools::call(
-                "call_a",
-                "read_file",
-                json!({"path": "./src/a.rs"})
-            )]),
+            ResponseEvent::ToolCallsRequested {
+                calls: vec![super::super::tools::call(
+                    "call_a",
+                    "read_file",
+                    json!({"path": "./src/a.rs"})
+                )],
+                native: None,
+            },
             ResponseEvent::ToolResult {
                 call_id: "call_a".into(),
                 tool: "read_file".into(),
@@ -1334,11 +1358,14 @@ fn earlier_tool_exchanges_replay_on_the_next_turn() {
     let (url, server) = server_sequence(vec![text_stream("again")]);
     let state = state_for(&url);
     let mut assistant = ChatMessage::new(TranscriptRole::Assistant, "checking");
-    assistant.tool = Some(ToolPayload::Calls(vec![super::super::tools::call(
-        "call_a",
-        "read_file",
-        json!({"path": "a"}),
-    )]));
+    assistant.tool = Some(ToolPayload::Calls {
+        calls: vec![super::super::tools::call(
+            "call_a",
+            "read_file",
+            json!({"path": "a"}),
+        )],
+        native: None,
+    });
     let mut result = ChatMessage::new(TranscriptRole::Tool { exit_code: 0 }, "preview only");
     result.tool = Some(ToolPayload::Result {
         call_id: "call_a".into(),

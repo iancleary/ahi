@@ -14,12 +14,12 @@ use std::io::Read;
 use std::sync::mpsc::Sender;
 
 use crate::chat::thinking::ThinkingLevel;
-use crate::chat::transcript::ChatMessage;
+use crate::chat::transcript::{ChatMessage, NativeReplay};
 use crate::error::{Error, Result};
 use crate::harness::{ModelMetadata, Protocol};
 
 use super::tools::ToolSchema;
-use super::{ChatRequest, ResponseEvent, ToolCall};
+use super::{ResponseEvent, ToolCall};
 
 /// Conservative output budget sent when a model declares `maxTokens`.
 pub(super) const DEFAULT_OUTPUT_BUDGET: u64 = 4096;
@@ -30,10 +30,12 @@ pub(super) const REQUEST_CAP: u64 = 16 * 1024 * 1024;
 #[derive(Debug, PartialEq)]
 pub(super) enum StreamOutcome {
     Stopped,
-    /// `text` is the assistant content streamed before the calls.
+    /// `text` is the assistant content streamed before the calls; `native`
+    /// is what the continuation must replay verbatim (see `NativeReplay`).
     ToolCalls {
         text: String,
         calls: Vec<ToolCall>,
+        native: Option<NativeReplay>,
     },
 }
 
@@ -51,15 +53,16 @@ pub(super) struct RequestContext<'a> {
 
 impl<'a> RequestContext<'a> {
     pub(super) fn new(
-        request: &'a ChatRequest,
+        model: &'a str,
+        thinking: ThinkingLevel,
         metadata: &'a ModelMetadata,
         messages: &'a [ChatMessage],
         tools: Option<&'a [ToolSchema]>,
         browser_token: bool,
     ) -> Self {
         Self {
-            model: &request.selection.model,
-            thinking: request.thinking,
+            model,
+            thinking,
             metadata,
             messages,
             tools,
@@ -111,7 +114,7 @@ pub(super) fn request_body(protocol: Protocol, context: &RequestContext<'_>) -> 
 /// Decode one streamed response into events and exactly one outcome.
 pub(super) fn read_stream(
     protocol: Protocol,
-    reader: impl Read,
+    reader: impl Read + Send + 'static,
     sender: &Sender<ResponseEvent>,
     metadata: &ModelMetadata,
 ) -> Result<StreamOutcome> {

@@ -16,13 +16,15 @@ use crate::chat::backend::tool_call::ToolCallAssembler;
 use crate::chat::backend::tools::ToolSchema;
 use crate::chat::backend::ResponseEvent;
 use crate::chat::thinking::ThinkingLevel;
-use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
+use crate::chat::transcript::{ChatMessage, NativeReplay, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
-use crate::harness::ModelMetadata;
+use crate::harness::{ModelMetadata, Protocol, ThinkingMode};
 
 /// Content blocks one message may carry.
 const MAX_BLOCKS: usize = 128;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
+/// Bound on thinking text, signatures, and redacted data kept for replay.
+const MAX_THINKING_BYTES: usize = 256 * 1024;
 /// Anthropic requires at least this much budget for extended thinking, and
 /// the output budget must leave room for the answer after it.
 const MIN_THINKING_BUDGET: u64 = 1024;
@@ -38,17 +40,30 @@ pub(super) fn request(context: &RequestContext<'_>) -> Result<Value> {
     if let Some(tools) = context.tools {
         body["tools"] = Value::Array(tools.iter().map(definition).collect());
     }
-    if context.reasoning_effort().is_some() {
-        let wanted = match context.thinking {
-            ThinkingLevel::Off => 0,
-            ThinkingLevel::Minimal => 1024,
-            ThinkingLevel::Low => 2048,
-            ThinkingLevel::Medium => 4096,
-            ThinkingLevel::High => 8192,
-        };
-        let budget = wanted.min(max_tokens.saturating_sub(MIN_THINKING_BUDGET));
-        if budget >= MIN_THINKING_BUDGET {
-            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+    if let Some(effort) = context.reasoning_effort() {
+        match context.metadata.compat.thinking_mode {
+            // Newer models reject `budget_tokens` and take an effort instead.
+            Some(ThinkingMode::Adaptive) => {
+                body["thinking"] = json!({"type": "adaptive"});
+                body["output_config"] = json!({"effort": match effort {
+                    "minimal" | "low" => "low",
+                    "medium" => "medium",
+                    _ => "high",
+                }});
+            }
+            Some(ThinkingMode::Budget) | None => {
+                let wanted = match context.thinking {
+                    ThinkingLevel::Off => 0,
+                    ThinkingLevel::Minimal => 1024,
+                    ThinkingLevel::Low => 2048,
+                    ThinkingLevel::Medium => 4096,
+                    ThinkingLevel::High => 8192,
+                };
+                let budget = wanted.min(max_tokens.saturating_sub(MIN_THINKING_BUDGET));
+                if budget >= MIN_THINKING_BUDGET {
+                    body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+                }
+            }
         }
     }
     Ok(body)
@@ -64,6 +79,8 @@ fn definition(schema: &ToolSchema) -> Value {
 
 /// User text, assistant text plus `tool_use` blocks, and `tool_result` blocks
 /// in a user message. Consecutive results are batched into one user message.
+/// A `tool_use` turn made with thinking on is replayed with its signed
+/// thinking blocks first, as the API requires.
 fn messages(messages: &[ChatMessage]) -> Vec<Value> {
     let exchanges = Exchanges::of(messages);
     let mut output: Vec<Value> = Vec::with_capacity(messages.len());
@@ -75,10 +92,19 @@ fn messages(messages: &[ChatMessage]) -> Vec<Value> {
             })),
             TranscriptRole::Assistant => {
                 let mut content = Vec::new();
+                if let Some(ToolPayload::Calls {
+                    native: Some(native),
+                    ..
+                }) = &message.tool
+                {
+                    if native.protocol == Protocol::AnthropicMessages {
+                        content.extend(native.items.iter().cloned());
+                    }
+                }
                 if !message.text.is_empty() {
                     content.push(json!({"type": "text", "text": message.text}));
                 }
-                if let Some(ToolPayload::Calls(calls)) = &message.tool {
+                if let Some(ToolPayload::Calls { calls, .. }) = &message.tool {
                     for (position, call) in calls.iter().enumerate() {
                         if exchanges.is_answered(index, position) {
                             content.push(json!({
@@ -178,7 +204,7 @@ enum BlockStart {
     #[serde(rename = "thinking")]
     Thinking,
     #[serde(rename = "redacted_thinking")]
-    RedactedThinking,
+    RedactedThinking { data: String },
     #[serde(other)]
     Other,
 }
@@ -191,9 +217,9 @@ enum Delta {
     #[serde(rename = "input_json_delta")]
     InputJson { partial_json: String },
     #[serde(rename = "thinking_delta")]
-    Thinking,
+    Thinking { thinking: String },
     #[serde(rename = "signature_delta")]
-    Signature,
+    Signature { signature: String },
     #[serde(other)]
     Other,
 }
@@ -217,7 +243,14 @@ enum Block {
         name: String,
         input: String,
     },
-    Thinking,
+    /// Kept opaque, for replay only, never displayed.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
 }
 
 struct Slot {
@@ -230,13 +263,16 @@ fn invalid() -> Error {
 }
 
 pub(super) fn read_stream(
-    reader: impl Read,
+    reader: impl Read + Send + 'static,
     sender: &Sender<ResponseEvent>,
     metadata: &ModelMetadata,
 ) -> Result<StreamOutcome> {
     let mut sse = SseReader::new(reader, true);
     let mut slots: Vec<Option<Slot>> = Vec::new();
     let mut started = false;
+    // After message_delta, only message_stop (and pings) may follow.
+    let mut content_closed = false;
+    let mut thinking_bytes = 0usize;
     let mut input_tokens = None;
     let mut cached = None;
     let mut output_tokens = None;
@@ -294,7 +330,7 @@ pub(super) fn read_stream(
                 index,
                 content_block,
             } => {
-                if !started || index >= MAX_BLOCKS {
+                if !started || content_closed || index >= MAX_BLOCKS {
                     return Err(invalid());
                 }
                 if slots.len() <= index {
@@ -310,7 +346,19 @@ pub(super) fn read_stream(
                         name,
                         input: String::new(),
                     },
-                    BlockStart::Thinking | BlockStart::RedactedThinking => Block::Thinking,
+                    BlockStart::Thinking => Block::Thinking {
+                        thinking: String::new(),
+                        signature: String::new(),
+                    },
+                    BlockStart::RedactedThinking { data } => {
+                        thinking_bytes += data.len();
+                        if thinking_bytes > MAX_THINKING_BYTES {
+                            return Err(Error::limit(
+                                "Anthropic thinking exceeds replay size limit",
+                            ));
+                        }
+                        Block::RedactedThinking { data }
+                    }
                     BlockStart::Other => {
                         return Err(Error::protocol(
                             "Anthropic sent an unsupported content block type",
@@ -320,6 +368,9 @@ pub(super) fn read_stream(
                 slots[index] = Some(Slot { block, open: true });
             }
             Event::BlockDelta { index, delta } => {
+                if content_closed {
+                    return Err(invalid());
+                }
                 let Some(Some(Slot { block, open: true })) = slots.get_mut(index) else {
                     return Err(invalid());
                 };
@@ -334,11 +385,31 @@ pub(super) fn read_stream(
                         }
                         input.push_str(&partial_json);
                     }
-                    (Block::Thinking, Delta::Thinking | Delta::Signature) => {}
+                    (Block::Thinking { thinking, .. }, Delta::Thinking { thinking: more }) => {
+                        thinking_bytes += more.len();
+                        if thinking_bytes > MAX_THINKING_BYTES {
+                            return Err(Error::limit(
+                                "Anthropic thinking exceeds replay size limit",
+                            ));
+                        }
+                        thinking.push_str(&more);
+                    }
+                    (Block::Thinking { signature, .. }, Delta::Signature { signature: more }) => {
+                        thinking_bytes += more.len();
+                        if thinking_bytes > MAX_THINKING_BYTES {
+                            return Err(Error::limit(
+                                "Anthropic thinking exceeds replay size limit",
+                            ));
+                        }
+                        signature.push_str(&more);
+                    }
                     _ => return Err(invalid()),
                 }
             }
             Event::BlockStop { index } => {
+                if content_closed {
+                    return Err(invalid());
+                }
                 let Some(Some(slot)) = slots.get_mut(index) else {
                     return Err(invalid());
                 };
@@ -348,9 +419,11 @@ pub(super) fn read_stream(
                 slot.open = false;
             }
             Event::MessageDelta { delta, usage } => {
-                if !started || stop_reason.is_some() {
+                if !started || stop_reason.is_some() || slots.iter().flatten().any(|slot| slot.open)
+                {
                     return Err(invalid());
                 }
+                content_closed = true;
                 stop_reason = delta.stop_reason;
                 if let Some(usage) = usage {
                     output_tokens = Some(usage.output_tokens);
@@ -365,28 +438,44 @@ pub(super) fn read_stream(
                 }
                 let mut calls = ToolCallAssembler::default();
                 let mut call_index = 0;
+                let mut native = Vec::new();
                 for slot in slots.iter_mut().flatten() {
-                    if let Block::ToolUse { id, name, input } = &mut slot.block {
-                        let input = if input.is_empty() {
-                            // An argument-less call streams no input deltas.
-                            "{}".to_string()
-                        } else {
-                            std::mem::take(input)
-                        };
-                        calls.push_function(
-                            call_index,
-                            std::mem::take(id),
-                            std::mem::take(name),
-                            input,
-                        )?;
-                        call_index += 1;
+                    match &mut slot.block {
+                        Block::ToolUse { id, name, input } => {
+                            let input = if input.is_empty() {
+                                // An argument-less call streams no input deltas.
+                                "{}".to_string()
+                            } else {
+                                std::mem::take(input)
+                            };
+                            calls.push_function(
+                                call_index,
+                                std::mem::take(id),
+                                std::mem::take(name),
+                                input,
+                            )?;
+                            call_index += 1;
+                        }
+                        Block::Thinking {
+                            thinking,
+                            signature,
+                        } => native.push(json!({
+                            "type": "thinking",
+                            "thinking": std::mem::take(thinking),
+                            "signature": std::mem::take(signature)
+                        })),
+                        Block::RedactedThinking { data } => native.push(json!({
+                            "type": "redacted_thinking",
+                            "data": std::mem::take(data)
+                        })),
+                        Block::Text => {}
                     }
                 }
                 let outcome = match stop_reason.as_deref() {
-                    Some("end_turn" | "stop_sequence" | "pause_turn") if calls.is_empty() => {
+                    Some("end_turn" | "stop_sequence") if calls.is_empty() => {
                         StreamOutcome::Stopped
                     }
-                    Some("end_turn" | "stop_sequence" | "pause_turn") => {
+                    Some("end_turn" | "stop_sequence") => {
                         return Err(Error::protocol(
                             "model tool calls require the tool_use stop reason",
                         ))
@@ -394,6 +483,10 @@ pub(super) fn read_stream(
                     Some("tool_use") if !calls.is_empty() => StreamOutcome::ToolCalls {
                         text: text_out,
                         calls: calls.finish()?,
+                        native: (!native.is_empty()).then_some(NativeReplay {
+                            protocol: Protocol::AnthropicMessages,
+                            items: native,
+                        }),
                     },
                     Some("tool_use") => {
                         return Err(Error::protocol(
@@ -447,7 +540,8 @@ mod tests {
 
     fn run(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>) {
         let (sender, receiver) = mpsc::channel();
-        let result = read_stream(body.as_bytes(), &sender, &ModelMetadata::default());
+        let reader = std::io::Cursor::new(body.as_bytes().to_vec());
+        let result = read_stream(reader, &sender, &ModelMetadata::default());
         (result, receiver.try_iter().collect())
     }
 
@@ -484,6 +578,12 @@ mod tests {
     fn tool_use_blocks_assemble_after_message_stop_only() {
         let body = events(&[
             json!({"type":"message_start","message":{"id":"msg_1","role":"assistant"}}),
+            json!({"type":"content_block_start","index":3,"content_block":{"type":"thinking","thinking":""}}),
+            json!({"type":"content_block_delta","index":3,"delta":{"type":"thinking_delta","thinking":"hmm"}}),
+            json!({"type":"content_block_delta","index":3,"delta":{"type":"signature_delta","signature":"sig"}}),
+            json!({"type":"content_block_stop","index":3}),
+            json!({"type":"content_block_start","index":4,"content_block":{"type":"redacted_thinking","data":"opaque"}}),
+            json!({"type":"content_block_stop","index":4}),
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Reading."}}),
             json!({"type":"content_block_stop","index":0}),
@@ -497,10 +597,25 @@ mod tests {
             json!({"type":"message_stop"}),
         ]);
         let (result, events) = run(&body);
-        let StreamOutcome::ToolCalls { text, calls } = result.unwrap() else {
+        let StreamOutcome::ToolCalls {
+            text,
+            calls,
+            native,
+        } = result.unwrap()
+        else {
             panic!("expected tool calls");
         };
         assert_eq!(text, "Reading.");
+        assert_eq!(
+            native,
+            Some(NativeReplay {
+                protocol: Protocol::AnthropicMessages,
+                items: vec![
+                    json!({"type": "thinking", "thinking": "hmm", "signature": "sig"}),
+                    json!({"type": "redacted_thinking", "data": "opaque"}),
+                ],
+            })
+        );
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].id, "toolu_01A");
         assert_eq!(calls[0].arguments["path"], "src/a.rs");
@@ -554,6 +669,37 @@ mod tests {
                 ],
                 "streaming error",
             ),
+            // Content after message_delta, or message_delta with a block open.
+            (
+                vec![
+                    start.clone(),
+                    text_block.clone(),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
+                    json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}),
+                    json!({"type":"content_block_stop","index":1}),
+                    json!({"type":"message_stop"}),
+                ],
+                "invalid or conflicting",
+            ),
+            (
+                vec![
+                    start.clone(),
+                    text_block.clone(),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_stop"}),
+                ],
+                "invalid or conflicting",
+            ),
+            (
+                vec![
+                    start.clone(),
+                    json!({"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}),
+                    json!({"type":"message_stop"}),
+                ],
+                "unsupported stop reason",
+            ),
         ] {
             let (result, _) = run(&events(&events_));
             let message = result.unwrap_err().to_string();
@@ -570,10 +716,16 @@ mod tests {
     #[test]
     fn replay_batches_tool_results_into_one_user_message() {
         let mut assistant = ChatMessage::new(TranscriptRole::Assistant, "");
-        assistant.tool = Some(ToolPayload::Calls(vec![
-            call("toolu_a", "read_file", json!({"path": "a"})),
-            call("toolu_b", "read_file", json!({"path": "b"})),
-        ]));
+        assistant.tool = Some(ToolPayload::Calls {
+            calls: vec![
+                call("toolu_a", "read_file", json!({"path": "a"})),
+                call("toolu_b", "read_file", json!({"path": "b"})),
+            ],
+            native: Some(NativeReplay {
+                protocol: Protocol::AnthropicMessages,
+                items: vec![json!({"type": "thinking", "thinking": "t", "signature": "s"})],
+            }),
+        });
         let result = |id: &str, code: i32| {
             let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code: code }, "");
             message.tool = Some(ToolPayload::Result {
@@ -595,6 +747,7 @@ mod tests {
             vec![
                 json!({"role": "user", "content": [{"type": "text", "text": "q"}]}),
                 json!({"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "t", "signature": "s"},
                     {"type": "tool_use", "id": "toolu_a", "name": "read_file", "input": {"path": "a"}},
                     {"type": "tool_use", "id": "toolu_b", "name": "read_file", "input": {"path": "b"}}
                 ]}),
@@ -637,6 +790,21 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert!(body["tools"][0]["input_schema"].is_object());
         assert!(body.get("system").is_none());
+        let adaptive = ModelMetadata {
+            compat: crate::harness::CompletionCompatibility {
+                thinking_mode: Some(ThinkingMode::Adaptive),
+                ..metadata.compat.clone()
+            },
+            ..metadata.clone()
+        };
+        let context_adaptive = RequestContext {
+            metadata: &adaptive,
+            ..context
+        };
+        let body = request(&context_adaptive).unwrap();
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"], json!({"effort": "high"}));
+        assert!(body.get("thinking").unwrap().get("budget_tokens").is_none());
         let context = RequestContext {
             thinking: ThinkingLevel::Off,
             metadata: &ModelMetadata::default(),

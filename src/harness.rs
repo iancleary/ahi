@@ -23,8 +23,8 @@ mod metadata;
 mod openai;
 mod protocol;
 pub use metadata::{
-    CompletionCompatibility, InputLimits, InputModality, ModelCost, ModelMetadata, TokenParameter,
-    TokenPrice,
+    CompletionCompatibility, InputLimits, InputModality, ModelCost, ModelMetadata, ThinkingMode,
+    TokenParameter, TokenPrice,
 };
 pub(crate) use protocol::CatalogRoute;
 pub use protocol::Protocol;
@@ -511,7 +511,17 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
             }
             CatalogRoute::StandardModels => {
                 let headers = gateway_headers(&entry)?;
-                let (models, metadata) = fetch_standard_models(&entry.base_url, &headers)?;
+                let (models, mut metadata) = fetch_standard_models(&entry.base_url, &headers)?;
+                // `/models` lists ids and names only. Typed metadata that
+                // discovery or an earlier refresh recorded for an id that is
+                // still listed survives; the fresh name overlays it.
+                if let Ok(Some(previous)) = read_last_good(state, id) {
+                    for (model, fresh) in metadata.iter_mut() {
+                        if let Some(kept) = previous.metadata.get(model) {
+                            *fresh = kept.overlay(fresh);
+                        }
+                    }
+                }
                 (standard_models_url(&entry.base_url), models, metadata)
             }
         }
@@ -1167,18 +1177,39 @@ fn implicit_entry(id: &str) -> Option<ProviderEntry> {
             headers: BTreeMap::new(),
             compat: CompletionCompatibility::default(),
         }),
-        ANTHROPIC_ID if std::env::var_os(ANTHROPIC_KEY_ENV).is_some_and(|v| !v.is_empty()) => {
-            Some(ProviderEntry {
-                base_url: ANTHROPIC_ORIGIN.to_string(),
-                api: Protocol::AnthropicMessages,
-                api_key: Some(format!("${ANTHROPIC_KEY_ENV}")),
-                models: Vec::new(),
-                headers: BTreeMap::new(),
-                compat: CompletionCompatibility::default(),
-            })
-        }
+        ANTHROPIC_ID if anthropic_key_present() => Some(ProviderEntry {
+            base_url: ANTHROPIC_ORIGIN.to_string(),
+            api: Protocol::AnthropicMessages,
+            api_key: Some(format!("${ANTHROPIC_KEY_ENV}")),
+            models: Vec::new(),
+            headers: BTreeMap::new(),
+            compat: CompletionCompatibility::default(),
+        }),
         _ => None,
     }
+}
+
+/// Whether `ANTHROPIC_API_KEY` is set. Tests decide this per thread, so a
+/// developer's exported key cannot change what a fixture loads.
+#[cfg(not(test))]
+fn anthropic_key_present() -> bool {
+    std::env::var_os(ANTHROPIC_KEY_ENV).is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ANTHROPIC_KEY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn anthropic_key_present() -> bool {
+    TEST_ANTHROPIC_KEY.with(std::cell::Cell::get)
+}
+
+/// Pretend `ANTHROPIC_API_KEY` is set for the calling test thread.
+#[cfg(test)]
+pub(crate) fn test_set_anthropic_key(present: bool) {
+    TEST_ANTHROPIC_KEY.with(|cell| cell.set(present));
 }
 
 /// The JSON written when a reserved id is first materialized by a save.
@@ -1337,6 +1368,16 @@ mod tests {
         port
     }
 
+    /// Look a provider up by id: the implicit `anthropic` entry appears when
+    /// the developer's shell exports ANTHROPIC_API_KEY, shifting indexes.
+    fn provider<'a>(registry: &'a Registry, id: &str) -> &'a LoadedProvider {
+        registry
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .unwrap_or_else(|| panic!("provider {id}"))
+    }
+
     fn read_http_request(sock: &mut std::net::TcpStream) {
         let mut buf = Vec::new();
         let mut tmp = [0_u8; 1024];
@@ -1444,6 +1485,71 @@ mod tests {
     }
 
     #[test]
+    fn the_implicit_anthropic_provider_follows_the_key_and_materializes_in_front() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("harness-anthropic");
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"lab":{"baseUrl":"https://lab.example/v1","api":"openai-completions","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        let ids = |registry: &Registry| {
+            registry
+                .providers
+                .iter()
+                .map(|provider| provider.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&load_registry(&dir).unwrap()), ["openai", "lab"]);
+        test_set_anthropic_key(true);
+        let registry = load_registry(&dir).unwrap();
+        assert_eq!(ids(&registry), ["openai", "anthropic", "lab"]);
+        let anthropic = provider(&registry, ANTHROPIC_ID);
+        assert_eq!(anthropic.auth, "env");
+        assert_eq!(anthropic.base_url, ANTHROPIC_ORIGIN);
+        assert!(anthropic.models.is_empty());
+        // Curating a model materializes the entry at the front, with the
+        // environment reference and protocol, leaving saved order alone.
+        let saved =
+            save_curated_models(&dir, &registry, ANTHROPIC_ID, &["claude-x".to_string()]).unwrap();
+        assert_eq!(ids(&saved), ["openai", "anthropic", "lab"]);
+        let document: Value =
+            serde_json::from_slice(&fs::read(dir.join("models.json")).unwrap()).unwrap();
+        let keys: Vec<&String> = document["providers"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["anthropic", "lab"]);
+        assert_eq!(
+            document["providers"]["anthropic"]["apiKey"],
+            format!("${ANTHROPIC_KEY_ENV}")
+        );
+        assert_eq!(
+            document["providers"]["anthropic"]["api"],
+            "anthropic-messages"
+        );
+        // The key is resolved from the real environment only at submission.
+        match completion_connection(&dir, ANTHROPIC_ID, "claude-x") {
+            Ok(connection) => {
+                assert!(std::env::var_os(ANTHROPIC_KEY_ENV).is_some());
+                assert_eq!(connection.protocol, Protocol::AnthropicMessages);
+                assert_eq!(
+                    connection.destination(),
+                    format!("{ANTHROPIC_ORIGIN}/messages")
+                );
+            }
+            Err(error) => {
+                assert!(std::env::var_os(ANTHROPIC_KEY_ENV).is_none());
+                assert!(error
+                    .to_string()
+                    .contains("environment variable is missing"));
+            }
+        }
+        test_set_anthropic_key(false);
+        assert_eq!(
+            ids(&load_registry(&dir).unwrap()),
+            ["openai", "anthropic", "lab"]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn standard_models_refresh_keeps_display_names_and_sends_the_configured_key() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("harness-standard");
         let body = br#"{"data":[{"id":"claude-b","display_name":"Claude B","type":"model"},{"id":"claude-a","display_name":" "}],"has_more":false}"#;
@@ -1498,7 +1604,7 @@ mod tests {
         let error = refresh_provider(&dir, "lab").unwrap_err().to_string();
         assert!(error.contains("redirects are not followed"), "{error}");
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert_eq!(
             lab.models,
             vec![ModelChoice {
@@ -1522,7 +1628,7 @@ mod tests {
             .to_string()
             .contains("does not match"));
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(
             lab.empty_reason.as_deref(),
@@ -1546,7 +1652,7 @@ mod tests {
         refresh_provider(&dir, "lab").unwrap();
         let saved = fs::read(dir.join("catalogs/lab.json")).unwrap();
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
         assert!(lab
@@ -1566,7 +1672,7 @@ mod tests {
         assert!(refresh_provider(&dir, "lab").is_err());
         assert_eq!(fs::read(dir.join("catalogs/lab.json")).unwrap(), saved);
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
         let _ = fs::remove_dir_all(dir);
@@ -1626,7 +1732,7 @@ mod tests {
             "retrieval time unknown (old catalog format)"
         );
         assert_eq!(
-            registry.providers[1].models,
+            provider(&registry, "lab").models,
             vec![ModelChoice {
                 id: "local-only".to_string(),
                 metadata: ModelMetadata::default(),
