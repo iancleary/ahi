@@ -45,7 +45,7 @@ There are three independent identities:
 
 A tool's registry name is none of these. Two calls to `read_file` need distinct call IDs and independent authorization/results. An output index is local to one response and must not become a durable execution key.
 
-Implemented Responses slots transition from `Pending` to `Finished`. Argument deltas must identify the pending function item; a completed argument payload cannot conflict with its prefix, and item completion cannot change a completed argument payload. Final output must match the finished slots in order. Provider item IDs and execution call IDs are separately checked for duplicate/conflicting use; normalized function calls are contiguous even when reasoning/text output occupies other indexes. The current `ToolCall` retains the execution call ID only; native item IDs are kept for parsing/reconciliation, not yet for replay or persistence.
+Implemented Responses slots transition from `Pending` to `Finished`. Argument deltas must identify the pending function item; a completed argument payload cannot conflict with its prefix, and item completion cannot change a completed argument payload. Final output must match the finished slots in order. Provider item IDs and execution call IDs are separately checked for duplicate/conflicting use; normalized function calls are contiguous even when reasoning/text output occupies other indexes. The current `ToolCall` retains the execution call ID only; the terminal output items themselves, native IDs and reasoning included, ride alongside the calls as `NativeReplay` for the continuation request. Nothing is persisted.
 
 For future replay, introduce distinct `TurnId`, `CallId`, and `ResponsesItemId` newtypes, plus `ProviderOutputIdentity { provider, model, protocol, response_id, item_id }`. Do not squeeze provider IDs into the current validated execution ID field or change its character restrictions merely to accommodate `|`.
 
@@ -94,7 +94,7 @@ Serialization must be explicit per protocol:
 
 Always serialize validated structured arguments, not unfinished stream buffers. Replaying a transcript is not permission to execute it again. Never manufacture a tool success to satisfy pairing constraints. On a model/protocol switch, preserve local call/result correlation and apply an explicit provider conversion policy. Pi's `convertResponsesMessages` drops or normalizes incompatible item identity on foreign/different-model replay; Rust should encode that rule, preserve audit identity separately, and reject unsupported unresolved histories instead of blindly forwarding encrypted items.
 
-All three protocols replay complete structured builtin exchanges; none replays native reasoning items. The proposed richer turn model is future work for protocol-neutral identity, native reasoning and durable recovery, not a prerequisite retroactively claimed by the current subset.
+All three protocols replay complete structured builtin exchanges. Responses and Anthropic also replay the provider-native output a tool-calling turn needs (reasoning items with encrypted content, signed thinking blocks) verbatim and only to the protocol that produced it. The proposed richer turn model is future work for protocol-neutral identity and durable recovery, not a prerequisite retroactively claimed by the current subset.
 
 ## Proposed registry, schema and authorization
 

@@ -27,21 +27,22 @@ const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_NATIVE_BYTES: usize = 1024 * 1024;
 
 pub(super) fn request(context: &RequestContext<'_>) -> Value {
-    // With `store: false`, a reasoning model's `reasoning` item must be sent
-    // back with the function calls it preceded; ask for the encrypted state
-    // that makes that possible.
     let mut body = json!({
         "model": context.model,
         "input": input(context.messages),
         "stream": true,
-        "store": false,
-        "include": ["reasoning.encrypted_content"]
+        "store": false
     });
     if let Some(tools) = context.tools {
         body["tools"] = Value::Array(tools.iter().map(definition).collect());
     }
     if let Some(effort) = context.reasoning_effort() {
         body["reasoning"] = json!({"effort": effort});
+        // With `store: false`, a reasoning model's `reasoning` item must be
+        // sent back with the function calls it preceded; ask for the encrypted
+        // state that makes that possible. Pi sends this under the same
+        // condition, on the browser-login path too.
+        body["include"] = json!(["reasoning.encrypted_content"]);
     }
     if !context.browser_token {
         if let Some(budget) = context.output_budget() {

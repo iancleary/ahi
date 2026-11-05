@@ -283,7 +283,6 @@ fn verify_responses_http_workflow() {
         serde_json::from_str::<serde_json::Value>(body).unwrap(),
         json!({
             "model":"curated-model", "stream":true,"store":false,
-            "include":["reasoning.encrypted_content"],
             "input":[{"role":"user","content":[{"type":"input_text","text":"first"}]},{"role":"assistant","content":"previous reply"},{"role":"user","content":[{"type":"input_text","text":"why?"}]}]
         })
     );
@@ -294,6 +293,7 @@ fn verify_responses_http_workflow() {
     let body: serde_json::Value =
         serde_json::from_slice(&responses_request_body(&request(), &metadata).unwrap()).unwrap();
     assert_eq!(body["reasoning"], json!({"effort":"medium"}));
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert!(body.get("max_output_tokens").is_none());
     let metadata = serde_json::from_value::<crate::harness::ModelMetadata>(
         json!({"inputLimits":{"maxRequestBytes":1}}),

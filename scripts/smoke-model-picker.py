@@ -57,6 +57,8 @@ def main() -> None:
                     os.chdir(cwd)
                 env.pop("VISUAL", None)
                 env.pop("EDITOR", None)
+                # A developer's Anthropic key would add an implicit provider.
+                env.pop("ANTHROPIC_API_KEY", None)
                 if editor:
                     env["VISUAL"] = f"/bin/sh '{editor}'"
                 os.execve(binary, [str(binary), "--state-dir", str(state), "tui"], env)

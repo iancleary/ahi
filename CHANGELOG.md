@@ -8,6 +8,8 @@
 - Anthropic Messages transport. A built-in `anthropic` provider appears in the picker when `ANTHROPIC_API_KEY` is set (or a `providers.anthropic` entry exists); the key is sent as `x-api-key` with `anthropic-version: 2023-06-01`. Streaming text, `tool_use`/`tool_result` exchanges, extended-thinking budgets, usage with cache reads, and `GET /v1/models` catalog refresh are supported. There is no Claude subscription login; the plan records why.
 - Catalog refresh for `openai-responses` and `anthropic-messages` providers uses the provider's standard `GET <baseUrl>/models` with the configured authentication.
 - `ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`).
+- Native replay: a tool-calling turn keeps the provider's own output and the continuation replays it verbatim to the same protocol. Responses keeps its terminal output items (reasoning items with `encrypted_content`, requested with `include: ["reasoning.encrypted_content"]` whenever reasoning effort is sent); Anthropic keeps `thinking`/`redacted_thinking` blocks with signatures. Never displayed; dropped on a protocol change.
+- `compat.thinkingMode` (`budget`, the default, or `adaptive`) selects how an Anthropic model receives extended thinking: `thinking: {type: "enabled", budget_tokens}` or `thinking: {type: "adaptive"}` with `output_config.effort`.
 
 ### Changed
 
