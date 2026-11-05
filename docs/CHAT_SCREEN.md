@@ -69,7 +69,7 @@ The stored preference becomes a request parameter only when effective metadata e
 
 ## Backend interface
 
-`src/chat/` talks to a model through one trait. A typed `CompletionTransport` selects either gateway Chat Completions or pinned public OpenAI Responses, and each adapter normalizes streaming data into the same screen events. See [Gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md) for metadata resolution and request limits.
+`src/chat/` talks to a model through one trait. A `CompletionConnection` carries the wire protocol, the destination and authentication (`CompletionTransport`), and the model metadata separately; each protocol adapter normalizes streaming data into the same screen events. See [Gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md) for metadata resolution and request limits.
 
 ```rust
 pub struct ChatRequest {
@@ -101,7 +101,7 @@ The screen drains the receiver on each frame tick (about 50 ms), so the user int
 
 ## Tool calls
 
-Gateway tools are deny-by-default and builtin-only. OpenAI Responses parses requests but never enters this execution loop. ahi is not a package manager: it never downloads a tool, names a program from configuration, or loads a remote tool definition. `ahi.actions.yaml` in the working directory only selects and bounds the builtin tools compiled into ahi, the same posture as `repo: builtin` checkers. The file is found only in the working directory where `ahi tui` started, not in a parent repository root; starting in a subdirectory disables tools.
+Tools are deny-by-default and builtin-only, on every protocol including browser-login OpenAI Responses. ahi is not a package manager: it never downloads a tool, names a program from configuration, or loads a remote tool definition. `ahi.actions.yaml` in the working directory only selects and bounds the builtin tools compiled into ahi, the same posture as `repo: builtin` checkers. The file is found only in the working directory where `ahi tui` started, not in a parent repository root; starting in a subdirectory disables tools.
 
 | Tool | Arguments | Output |
 |---|---|---|
@@ -156,11 +156,12 @@ That was the original screen-development baseline, not current production behavi
 | `approval.rs` | Pending tool approval: per-call decisions, prompt text, and key hint |
 | `thinking.rs` | `ThinkingLevel` and `<state>/thinking` |
 | `backend/mod.rs` | `CompletionBackend`, `ChatRequest`, and `ResponseEvent` |
-| `backend/http.rs` | Transport dispatch, gateway streaming Chat Completions and builtin round loop |
+| `backend/http.rs` | The protocol-neutral turn loop: send, decode, run approved builtins, continue |
+| `backend/protocol/` | One adapter per wire protocol (Chat Completions, Responses, Anthropic Messages): request body, stream decoder, tool definitions; `replay.rs` pairs calls with results |
+| `backend/sse.rs` | Bounded SSE framing with reusable buffers, shared by the adapters |
 | `backend/http/responses.rs` | OpenAI Responses serialization, bounded stream normalization, and validated function requests |
 | `backend/tool_loop.rs` | One tool round: policy, approval, execution, results, and session grants |
 | `backend/tools/` | Builtin `read_file` and `list_dir`, and working-directory containment |
-| `backend/wire.rs` | Transcript to Chat Completions `messages`, including complete tool exchanges |
 | `../actions.rs` | `ahi.actions.yaml` parsing and rule evaluation |
 | `../commands.rs` | Shared context-aware command registry, popup state/rendering, and explicit picker outcomes |
 

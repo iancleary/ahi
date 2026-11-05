@@ -4,6 +4,21 @@
 
 ### Added
 
+- `models.json` `api` is a typed wire protocol: `openai-completions`, `openai-responses`, or `anthropic-messages`. Gateways may declare any of the three; `/gateway` discovery accepts and saves the declared value. The reserved `openai` id keeps its legacy `openai-completions` spelling and still means browser-login Responses. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
+- Anthropic Messages transport. A built-in `anthropic` provider appears in the picker when `ANTHROPIC_API_KEY` is set (or a `providers.anthropic` entry exists); the key is sent as `x-api-key` with `anthropic-version: 2023-06-01`. Streaming text, `tool_use`/`tool_result` exchanges, extended-thinking budgets, usage with cache reads, and `GET /v1/models` catalog refresh are supported. There is no Claude subscription login; the plan records why.
+- Catalog refresh for `openai-responses` and `anthropic-messages` providers uses the provider's standard `GET <baseUrl>/models` with the configured authentication.
+- `ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`).
+
+### Changed
+
+- The builtin tool loop is protocol-neutral and runs for every transport, including browser-login OpenAI Responses, behind the same `ahi.actions.yaml` policy. Responses replays `function_call`/`function_call_output` items and, for gateways, sends `max_output_tokens`. Without an approving rule every transport still fails with `tool execution is disabled`.
+- Session grants (`s` at an approval prompt) are bound to the gateway's exact destination URL as well as its id and the working directory; reconfiguring a gateway's `baseUrl` requires a new approval.
+- A dropped or malformed approval reply cancels the whole batch: calls that rules alone had approved in the same batch are denied with `approval cancelled` instead of running.
+- The 256 KiB per-turn tool content bound is a cap. Every result, including denials and errors, is charged; content past the budget is cut and replaced by a fixed notice.
+- One HTTP client per chat session reuses connections across tool rounds and turns; streams are drained after their terminal event so pooled connections stay usable.
+- The chat transcript is laid out incrementally: only changed messages are re-wrapped, and only the visible window is padded per frame. Git status is refreshed once per drained batch of tool returns rather than twice per call.
+- Provider metadata is merged from one catalog read per provider instead of one read per curated model.
+
 - Chat can run builtin, read-only `read_file` and `list_dir` tool calls for configured gateways. Tools are off unless the working directory's `ahi.actions.yaml` (version 1, `action: tool_call`) has an approving rule; without one, requests are unchanged and calls fail with `tool execution is disabled`. Rules match a builtin tool and an optional path prefix, deny first. `ask: true` prompts in chat: `y` once, `s` for the session under the shown directory, `n` deny, `a` approve the rest, `Esc` deny the rest. Tools are confined to the working directory, follow no symbolic links, never read the state directory, and return bounded output (64 KiB per file, 500 entries, 256 KiB and 8 rounds per turn). Every call returns a result, and tool exchanges replay on later turns. Approved file contents are sent to the selected gateway. ahi does not download or define tools from configuration.
 
 ## 0.3.2 (2026-11-04)

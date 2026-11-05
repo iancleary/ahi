@@ -1371,3 +1371,203 @@ fn earlier_tool_exchanges_replay_on_the_next_turn() {
     assert!(body.get("tools").is_none());
     fs::remove_dir_all(state).unwrap();
 }
+
+// ---- Other wire protocols through the same loop ----
+
+fn anthropic_events(events: &[serde_json::Value]) -> String {
+    stream(
+        &events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect::<String>(),
+    )
+}
+
+fn anthropic_text(text: &str) -> String {
+    anthropic_events(&[
+        json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":20,"cache_read_input_tokens":5}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+fn anthropic_tool_use(id: &str, name: &str, input: &str) -> String {
+    anthropic_events(&[
+        json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":20}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+fn write_protocol_models(state: &Path, url: &str, api: &str) {
+    fs::write(
+        state.join("models.json"),
+        json!({"providers": {"local": {
+            "baseUrl": url, "api": api, "apiKey": "gateway",
+            "models": [{"id": "vendor/model", "maxTokens": 2048}]
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_anthropic_gateway_runs_the_same_tool_loop_and_replays_blocks() {
+    let (url, server) = server_sequence(vec![
+        anthropic_tool_use("toolu_01", "read_file", "{\"path\": \"src/a.rs\"}"),
+        anthropic_text("done"),
+    ]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    write_protocol_models(&fixture.state, &url, "anthropic-messages");
+    let events = collect(&mut fixture.backend(), request());
+    assert_eq!(
+        results(&events),
+        vec![("toolu_01".into(), 0, "fn a() {}\n".into())]
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ResponseEvent::Usage {
+            input_tokens: 25,
+            output_tokens: 3,
+            cached_input_tokens: Some(5),
+            ..
+        }
+    )));
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("POST /v1/messages HTTP/1.1"));
+    let lower = requests[0].to_ascii_lowercase();
+    assert!(lower.contains("x-api-key: gateway\r\n"), "{lower}");
+    assert!(lower.contains("anthropic-version: 2023-06-01\r\n"));
+    assert!(!lower.contains("authorization:"));
+    let first = request_body(&requests[0]);
+    assert_eq!(first["max_tokens"], 2048);
+    assert_eq!(first["tools"][0]["name"], "read_file");
+    assert!(first["tools"][0]["input_schema"].is_object());
+    assert!(first.get("system").is_none());
+    assert_eq!(first["messages"][0]["role"], "user");
+    assert_eq!(first["messages"][0]["content"][0]["text"], "first");
+    let second = request_body(&requests[1]);
+    let messages = second["messages"].as_array().unwrap();
+    let assistant = &messages[messages.len() - 2];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"][0]["type"], "tool_use");
+    assert_eq!(assistant["content"][0]["id"], "toolu_01");
+    assert_eq!(assistant["content"][0]["input"]["path"], "src/a.rs");
+    let result = &messages[messages.len() - 1];
+    assert_eq!(result["role"], "user");
+    assert_eq!(
+        result["content"][0],
+        json!({"type": "tool_result", "tool_use_id": "toolu_01", "content": "fn a() {}\n", "is_error": false})
+    );
+}
+
+#[test]
+fn a_responses_gateway_sends_output_limits_and_replays_function_items() {
+    let function = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"src/b.rs\"}"});
+    let first = response_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":function}),
+        json!({"type":"response.output_item.done","output_index":0,"item":function}),
+        completed_response(vec![function.clone()]),
+    ]);
+    let second = response_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_fixture","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_fixture","content_index":0,"delta":"ok"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":response_message("ok")}),
+        completed_response(vec![response_message("ok")]),
+    ]);
+    let (url, server) = server_sequence(vec![stream(&first), stream(&second)]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    write_protocol_models(&fixture.state, &url, "openai-responses");
+    let events = collect(&mut fixture.backend(), request());
+    assert_eq!(
+        results(&events),
+        vec![("call_1".into(), 0, "fn b() {}\n".into())]
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("POST /v1/responses HTTP/1.1"));
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("authorization: bearer gateway\r\n"));
+    let body = request_body(&requests[0]);
+    // A gateway, not a browser token: the output budget is sent.
+    assert_eq!(body["max_output_tokens"], 2048);
+    assert_eq!(body["store"], false);
+    assert_eq!(body["tools"][0]["type"], "function");
+    assert_eq!(body["tools"][0]["name"], "read_file");
+    let input = request_body(&requests[1])["input"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(input[input.len() - 2]["type"], "function_call");
+    assert_eq!(input[input.len() - 2]["call_id"], "call_1");
+    assert_eq!(
+        input[input.len() - 1],
+        json!({"type": "function_call_output", "call_id": "call_1", "output": "fn b() {}\n"})
+    );
+}
+
+#[test]
+fn a_cancelled_approval_runs_no_call_in_a_mixed_batch() {
+    // One call a rule approves outright, one that must ask. Dropping the
+    // reply cancels the whole batch: the approved read must not run either.
+    let (url, _server) = server_sequence(vec![calls_stream(&[
+        ("c1", "read_file", json!({"path": "src/a.rs"})),
+        ("c2", "list_dir", json!({"path": "src"})),
+    ])]);
+    let mixed = "version: 1\nrules:\n\
+        - {id: reads, action: tool_call, match: {tool: read_file, path: src}, effect: approve}\n\
+        - {id: ask-list, action: tool_call, match: {tool: list_dir}, effect: approve, ask: true}\n";
+    let fixture = ToolFixture::new(&url, mixed, json!({"id": "vendor/model"}));
+    let (events, approvals) = collect_answering(&mut fixture.backend(), request(), vec![None]);
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(
+        results(&events),
+        vec![
+            ("c1".into(), 126, "denied: approval cancelled".into()),
+            ("c2".into(), 126, "denied: approval cancelled".into()),
+        ]
+    );
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed(message)) if message.contains("cancelled"))
+    );
+}
+
+#[test]
+fn the_turn_output_bound_is_a_cap_including_diagnostics() {
+    let (url, _server) = server_sequence(vec![
+        calls_stream(&[("c1", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c2", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c3", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c4", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c5", "read_file", json!({"path": "src/big.txt"}))]),
+        text_stream("done"),
+    ]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    fs::write(fixture.workspace.join("src/big.txt"), "y".repeat(64 * 1024)).unwrap();
+    let events = collect(&mut fixture.backend(), request());
+    let results = results(&events);
+    assert_eq!(results.len(), 5);
+    let total: usize = results.iter().map(|(_, _, content)| content.len()).sum();
+    // Content is capped; each call may add one fixed truncation notice.
+    assert!(
+        total <= super::super::tool_loop::MAX_TURN_OUTPUT_BYTES + 5 * 64,
+        "{total}"
+    );
+    assert!(results[3].2.len() <= 64 * 1024 + 64);
+    assert!(results[4].2.contains("budget") && results[4].2.len() <= 64);
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+}

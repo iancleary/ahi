@@ -76,7 +76,7 @@ An absent value means unknown or the documented legacy transport default, not an
 - Continue requesting `GET <origin>/agent/models.json` without credentials, cookies, or redirects.
 - Accept the legacy flat catalog and a `providers` map. Select a unique appropriate provider; ambiguity must be explicit rather than selecting the first map entry. Registered-provider refresh selects by identifier.
 - Validate returned inference `baseUrl` using the same URL policy as Connect. A returned same-origin `/v1` path is authoritative for a new registration and visible in Review. Do not silently accept a different origin or redirect existing registered settings.
-- Continue requiring `openai-completions`, reserving `openai`, and allowing only the `gateway` marker or a valid `$NAME` environment reference. Never evaluate Pi `!command` values, shell interpolation, or literal secrets.
+- Accept `api` as one of `openai-completions`, `openai-responses`, or `anthropic-messages` (see [Providers](PROVIDERS.md)), reserve `openai`, and allow only the `gateway` marker or a valid `$NAME` environment reference. Never evaluate Pi `!command` values, shell interpolation, or literal secrets.
 - Preview is read-only. Registration and curation remain separate explicit operations. Existing snapshot conflict checks, atomic file replacement, last-good-cache behavior, and immediate partial-cache warnings remain intact.
 
 ## Gateway request and shared UI contract

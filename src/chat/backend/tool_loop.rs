@@ -303,22 +303,21 @@ impl ToolRuntime {
     }
 
     /// Charge every result's model-facing content, including denials and
-    /// errors, against the turn budget, truncating what would exceed it so the
-    /// documented bound is a cap and not a threshold.
+    /// errors, against the turn budget. Content past the budget is cut and
+    /// replaced by a fixed notice, so a turn returns at most
+    /// `MAX_TURN_OUTPUT_BYTES` of tool content plus one short notice per call.
     fn account(&mut self, outcome: &mut Outcome) {
+        const NOTICE: &str = "\n[truncated: tool output budget for this turn is exhausted]";
         let remaining = MAX_TURN_OUTPUT_BYTES.saturating_sub(self.output_bytes);
         if outcome.content.len() > remaining {
-            let marker = "\n[truncated: tool output budget for this turn is exhausted]";
-            let keep = remaining.saturating_sub(marker.len());
-            let mut cut = keep.min(outcome.content.len());
+            let mut cut = remaining;
             while cut > 0 && !outcome.content.is_char_boundary(cut) {
                 cut -= 1;
             }
             outcome.content.truncate(cut);
-            outcome.content.push_str(marker);
-            outcome.content.truncate(remaining.max(cut));
+            outcome.content.push_str(NOTICE);
         }
-        self.output_bytes += outcome.content.len();
+        self.output_bytes = self.output_bytes.saturating_add(outcome.content.len());
     }
 }
 

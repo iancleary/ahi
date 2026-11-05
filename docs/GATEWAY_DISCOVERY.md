@@ -35,7 +35,7 @@ The catalog identifies the gateway; ahi does not derive its identifier from the 
 }
 ```
 
-`provider` may replace `id`; if both exist, they must agree. `apiKey` must be the non-secret marker `gateway` or a valid `$NAME` environment reference. Inspect that reference before confirming registration: its value will be resolved from the environment only when you later submit a model request. Literal secrets are rejected. Optional prices are finite nonnegative numbers in USD per million tokens. Supported metadata includes names, context/output/request limits, text/image capability, reasoning, costs, and typed compatibility flags. Unsupported fields are rejected rather than silently treated as implemented features. `openai` is reserved for browser login, not URL discovery.
+`provider` may replace `id`; if both exist, they must agree. `api` may be `openai-completions`, `openai-responses`, or `anthropic-messages`; registration saves the declared value and Review shows it. `apiKey` must be the non-secret marker `gateway` or a valid `$NAME` environment reference. Inspect that reference before confirming registration: its value will be resolved from the environment only when you later submit a model request. Literal secrets are rejected. Optional prices are finite nonnegative numbers in USD per million tokens. Supported metadata includes names, context/output/request limits, text/image capability, reasoning, costs, and typed compatibility flags. Unsupported fields are rejected rather than silently treated as implemented features. `openai` is reserved for browser login, not URL discovery.
 
 The supported Pi representation is also accepted:
 
