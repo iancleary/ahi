@@ -18,6 +18,7 @@ pub(crate) use http::HttpBackend;
 
 use super::thinking::ThinkingLevel;
 use super::transcript::ChatMessage;
+use crate::error::ErrorKind;
 
 /// Gateway and model, already split on the first slash of a selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +87,20 @@ pub(crate) enum ResponseEvent {
         exit_code: i32,
     },
     Completed,
-    /// A completion that could not be produced.
-    Failed(String),
+    /// A completion that could not be produced. `kind` is what the screen
+    /// acts on: a `Transport` failure before any reply offers a resend, the
+    /// others only explain themselves.
+    Failed {
+        message: String,
+        kind: ErrorKind,
+    },
+    /// A gateway could not be reached and another connection attempt follows
+    /// after a short backoff. Only connection failures are retried, never a
+    /// request the server may have received.
+    Reconnecting {
+        attempt: u8,
+        attempts: u8,
+    },
 }
 
 /// Completes one turn without blocking the screen.

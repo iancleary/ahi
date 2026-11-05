@@ -35,7 +35,7 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit the input. An empty or whitespace-only input does nothing. |
+| `Enter` | Submit the input. An empty or whitespace-only input does nothing, except after a connection failure, when it sends the same transcript again (the activity line says `Enter resends the last message`). |
 | `Shift+Enter`, `Alt+Enter` | Insert a newline. Both are accepted because many terminals do not report `Shift+Enter`. |
 | `Ctrl+J` | Insert a newline (fallback for terminals that report neither). |
 | `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete` | Edit within the input. `Up` and `Down` move between visual input rows, including soft-wrapped rows. |
@@ -87,7 +87,8 @@ pub enum ResponseEvent {
     ToolResult { call_id: String, tool: String, output: String, content: String, exit_code: i32 },
     ToolCallReturned,                         // after every result, including failures
     Completed,
-    Failed(String),
+    Failed { message: String, kind: ErrorKind },   // what the screen acts on
+    Reconnecting { attempt: u8, attempts: u8 },    // between connection attempts
 }
 
 pub trait CompletionBackend {
@@ -99,6 +100,8 @@ pub trait CompletionBackend {
 The screen drains the receiver on each frame tick (about 50 ms), so the user interface never blocks on the backend. No async runtime is added.
 
 **Cancellation:** `Esc` calls `cancel` and drops the receiver, so the screen is free at once. The worker checks the flag before each request, before each tool round, and around every read of the response body; bytes that arrive after the cancel are discarded, the stream ends with an error the screen never sees, and dropping the reader closes the connection, which is the only cancellation signal these APIs accept. A read blocked on a silent server returns when its next bytes arrive or the 120-second request deadline passes; closing earlier would not save tokens, since a server that is not writing cannot notice a closed socket until it writes. Rows the screen adds for itself (`Notice`, `Alert`) are never sent to a model.
+
+**Failures:** `Failed` carries the `ErrorKind`. A `Transport` failure that leaves the transcript ending in an operator message or tool results sets a resend affordance: `Enter` on a blank input sends the same transcript again. `Reconnecting` shows in the activity line while the backend waits between connection attempts to an unreachable gateway. Kinds, hints, and the retry rule are in [Providers](PROVIDERS.md#errors).
 
 **Tool-return hook:** the backend emits `ResponseEvent::ToolCallReturned` after every tool call returns (success, error, or denial), right after its `ToolResult` and before resuming the assistant response. Its handler reads the current directory/Git HEAD and worktree counts, compares them with the screen's stored snapshot, and updates changed values for the next redraw. It does not end the response or clear the transcript. Location/status are also refreshed at chat load and on normal message submission, not polled on frame ticks. HEAD is read directly; file counts use local `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z --untracked-files=all`. This reads the worktree without optional index writes or network requests. Parsing uses NUL-delimited bytes so spaces, newlines, non-UTF-8 names, renames, and conflicts are counted correctly. Ahead/behind, stash counts, and in-progress Git actions are not displayed yet. The builtin tools are read-only, so a tool-driven branch change is not yet exercised; that integration test arrives with the first writing tool.
 

@@ -39,6 +39,20 @@ pub(crate) struct CompletionConnection {
     pub(crate) protocol: Protocol,
     pub(crate) transport: CompletionTransport,
     pub(crate) metadata: ModelMetadata,
+    /// Where the credential came from, so an authentication failure can name
+    /// the place to fix. Never the value.
+    pub(crate) credential: Credential,
+}
+
+/// The source of a connection's credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Credential {
+    BrowserLogin,
+    /// `apiKey` or a header read from this environment variable.
+    Environment(String),
+    /// The `gateway` marker as `apiKey` or a header value in models.json.
+    Configured,
+    None,
 }
 
 /// Destination and authentication for one connection.
@@ -102,12 +116,14 @@ pub(crate) fn completion_connection(
             protocol: Protocol::OpenAiResponses,
             transport: CompletionTransport::OpenAiResponses,
             metadata,
+            credential: Credential::BrowserLogin,
         });
     }
     if entry.base_url.contains(['?', '#', '\\']) || entry.base_url.chars().any(char::is_control) {
         return Err(Error::new("inference baseUrl must not contain a query, fragment, backslash, or control characters"));
     }
     let headers = gateway_headers(&entry)?;
+    let credential = credential_source(&entry);
     Ok(CompletionConnection {
         protocol: entry.api,
         transport: CompletionTransport::Gateway {
@@ -119,7 +135,29 @@ pub(crate) fn completion_connection(
             headers,
         },
         metadata,
+        credential,
     })
+}
+
+fn credential_source(entry: &ProviderEntry) -> Credential {
+    if let Some(key) = &entry.api_key {
+        return match key.strip_prefix('$') {
+            Some(name) => Credential::Environment(name.to_string()),
+            None => Credential::Configured,
+        };
+    }
+    if let Some(name) = entry
+        .headers
+        .values()
+        .find_map(|value| value.strip_prefix('$'))
+    {
+        return Credential::Environment(name.to_string());
+    }
+    if entry.headers.is_empty() {
+        Credential::None
+    } else {
+        Credential::Configured
+    }
 }
 
 /// Resolve a gateway's authentication and extra headers. Secrets are read from

@@ -96,17 +96,21 @@ pub(super) fn request_body(protocol: Protocol, context: &RequestContext<'_>) -> 
     let body =
         serde_json::to_vec(&value).map_err(|_| Error::new("cannot serialize model request"))?;
     if body.len() as u64 > REQUEST_CAP {
-        return Err(Error::limit(
-            "model request body exceeds 16 MiB; shorten the conversation",
-        ));
+        return Err(Error::limit(format!(
+            "model request is {} bytes, over the 16 MiB request cap; /clear the conversation or send a shorter message",
+            body.len()
+        )));
     }
-    if context
+    if let Some(limit) = context
         .metadata
         .input_limits
         .max_request_bytes
-        .is_some_and(|limit| body.len() as u64 > limit.get())
+        .filter(|limit| body.len() as u64 > limit.get())
     {
-        return Err(Error::limit("model request exceeds inputLimits.maxRequestBytes; shorten the conversation or select another model"));
+        return Err(Error::limit(format!(
+            "model request is {} bytes, over inputLimits.maxRequestBytes ({limit}); /clear the conversation, send a shorter message, or select another model",
+            body.len()
+        )));
     }
     Ok(body)
 }

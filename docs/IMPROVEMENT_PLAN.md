@@ -113,7 +113,11 @@ What was examined and not done: interrupting a read that is blocked on a silent 
 
 ### D20. `ErrorKind` reaches the screen with the behaviours that need it
 
-Ian's call (2026-11-05): wanted later for reconnection attempts when a gateway cannot be reached (`Transport`), for authentication failures (`Auth`), and for limit failures (`Limit`). Requirements are recorded in `docs/PROVIDERS.md` under Errors so they survive this plan. Not built now: a kind without a behaviour was already tried once (D7) and misdirected gateway users.
+Ian's call (2026-11-05, revised the same day to land in this PR): `Failed { message, kind }` plus `Reconnecting { attempt, attempts }`. Built with three behaviours, all specified in `docs/PROVIDERS.md` under Errors:
+
+- *Transport*: three connection attempts with 250 ms and 750 ms pauses, only for ureq `Dns`, `ConnectionFailed`, and `ProxyConnect` failures, which provably never reached the server. HTTP statuses (including 502/503 from a proxy, a judgment call recorded here as not retried), timeouts, and mid-stream failures are reported once, so "generation is never retried" stays true. The backoff checks the cancel flag every 50 ms (D19). Gateways only; the browser-login path keeps its own single renewal. On the screen, a `Transport` failure that leaves the transcript ending in an operator message or tool results (the shape test, not a per-turn flag) makes blank Enter resend; a partial reply at the tail offers nothing.
+- *Auth*: `CompletionConnection::credential` records the source at resolve time (browser login, `$VARIABLE`, the `gateway` marker in `models.json`, none). The hint is appended in the turn loop for gateway transports and names the variable or the file, never a value. OpenAI messages are untouched.
+- *Limit*: the two request-cap messages name the size and the bound and point at `/clear` or a shorter message; the tool round limit is now a `Limit` as the docs already claimed.
 
 ## Codex review
 

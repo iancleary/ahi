@@ -4,6 +4,7 @@ use crate::chat::backend::sse::FRAME_CAP;
 use crate::chat::backend::{ProposedAction, ToolCall, ToolDecision};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
+use crate::error::ErrorKind;
 use crate::harness::{ModelMetadata, Protocol};
 use serde_json::json;
 use std::fs;
@@ -123,6 +124,13 @@ fn serve_one(listener: &TcpListener, response: &str) -> String {
         }
     }
     request
+}
+
+fn failed(message: impl Into<String>, kind: ErrorKind) -> ResponseEvent {
+    ResponseEvent::Failed {
+        message: message.into(),
+        kind,
+    }
 }
 
 fn request_body(request: &str) -> serde_json::Value {
@@ -587,7 +595,10 @@ fn collect(backend: &mut HttpBackend, request: ChatRequest) -> Vec<ResponseEvent
     let mut events = Vec::new();
     loop {
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        let done = matches!(event, ResponseEvent::Completed | ResponseEvent::Failed(_));
+        let done = matches!(
+            event,
+            ResponseEvent::Completed | ResponseEvent::Failed { .. }
+        );
         events.push(event);
         if done {
             assert!(matches!(
@@ -660,7 +671,7 @@ fn failures_do_not_echo_upstream_secrets_or_claim_completion() {
             "401 Unauthorized",
             "application/json",
             "secret-token",
-            "model request failed (HTTP 401); no automatic retry was attempted",
+            "model request failed (HTTP 401); no automatic retry was attempted; check the provider's apiKey or headers in models.json",
         ),
         (
             "302 Found",
@@ -708,7 +719,10 @@ fn failures_do_not_echo_upstream_secrets_or_claim_completion() {
         let (url, server) = server(status, Some(content_type), body);
         let state = state_for(&url);
         let events = collect(&mut backend(&state), request());
-        assert_eq!(events.last(), Some(&ResponseEvent::Failed(expected.into())));
+        assert!(
+            matches!(events.last(), Some(ResponseEvent::Failed { message, kind }) if message == expected && (*kind == ErrorKind::Auth) == expected.contains("401")),
+            "{events:?}"
+        );
         server.join().unwrap();
         fs::remove_dir_all(state).unwrap();
     }
@@ -756,7 +770,7 @@ fn fragmented_parallel_tool_calls_are_validated_but_never_executed() {
             ],
             native: None,
         },
-        ResponseEvent::Failed("tool execution is disabled: no ahi.actions.yaml rule approves a builtin tool in this working directory".into())
+        failed("tool execution is disabled: no ahi.actions.yaml rule approves a builtin tool in this working directory", ErrorKind::Policy)
     ]);
     let received = server.join().unwrap();
     let (_, body) = received.split_once("\r\n\r\n").unwrap();
@@ -837,15 +851,17 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     // selection, not a missing gateway.
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "selected model is no longer curated in models.json; reopen /model".into()
+        vec![failed(
+            "selected model is no longer curated in models.json; reopen /model",
+            ErrorKind::Other
         )]
     );
     input.selection = parse_selection("missing/gpt-4.1");
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "selected gateway is not registered in models.json".into()
+        vec![failed(
+            "selected gateway is not registered in models.json",
+            ErrorKind::Other
         )]
     );
     input.selection = parse_selection("openai/gpt-4.1");
@@ -853,8 +869,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     fs::write(state.join("models.json"), configured.to_string()).unwrap();
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "OpenAI credential unavailable: run ahi login".into()
+        vec![failed(
+            "OpenAI credential unavailable: run ahi login",
+            ErrorKind::Auth
         )]
     );
     fs::create_dir(state.join("credentials")).unwrap();
@@ -865,8 +882,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     .unwrap();
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "run ahi login to migrate to the current OpenAI flow".into()
+        vec![failed(
+            "run ahi login to migrate to the current OpenAI flow",
+            ErrorKind::Auth
         )]
     );
     for field in ["baseUrl", "apiKey", "headers", "api"] {
@@ -880,7 +898,7 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
         fs::write(state.join("models.json"), conflict.to_string()).unwrap();
         let events = collect(&mut backend, input.clone());
         assert!(
-            matches!(&events[..], [ResponseEvent::Failed(message)] if message.contains("conflict") || message.contains("browser credentials require") || message.contains("api must be openai-completions")),
+            matches!(&events[..], [ResponseEvent::Failed { message, .. }] if message.contains("conflict") || message.contains("browser credentials require") || message.contains("api must be openai-completions")),
             "{events:?}"
         );
     }
@@ -889,8 +907,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     input.selection.model = "removed".into();
     assert_eq!(
         collect(&mut backend, input),
-        vec![ResponseEvent::Failed(
-            "selected model is no longer curated in models.json; reopen /model".into()
+        vec![failed(
+            "selected model is no longer curated in models.json; reopen /model",
+            ErrorKind::Other
         )]
     );
     fs::remove_dir_all(state).unwrap();
@@ -1017,7 +1036,10 @@ fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes(
     loop {
         match receiver.recv_timeout(Duration::from_secs(5)) {
             Ok(event) => {
-                let done = matches!(event, ResponseEvent::Completed | ResponseEvent::Failed(_));
+                let done = matches!(
+                    event,
+                    ResponseEvent::Completed | ResponseEvent::Failed { .. }
+                );
                 events.push(event);
                 if done {
                     break;
@@ -1031,7 +1053,7 @@ fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes(
         .iter()
         .any(|event| matches!(event, ResponseEvent::Completed)));
     assert!(
-        matches!(events.last(), Some(ResponseEvent::Failed(message)) if message == "response cancelled"),
+        matches!(events.last(), Some(ResponseEvent::Failed { message, .. }) if message == "response cancelled"),
         "{events:?}"
     );
     assert!(!events
@@ -1041,6 +1063,169 @@ fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes(
     assert!(closed, "the client kept the connection open after cancel");
     assert!(waited < Duration::from_secs(3), "close took {waited:?}");
     let _ = fs::remove_dir_all(state);
+}
+
+/// A loopback port with nothing listening: bind, read the port, drop.
+fn unused_port_url() -> (String, u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    (format!("http://127.0.0.1:{port}/v1"), port)
+}
+
+#[test]
+fn an_unreachable_gateway_gets_three_connection_attempts_then_a_transport_failure() {
+    let (url, _) = unused_port_url();
+    let state = state_for(&url);
+    let started = std::time::Instant::now();
+    let events = collect(&mut backend(&state), request());
+    let elapsed = started.elapsed();
+    let reconnects: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseEvent::Reconnecting { attempt, attempts } => Some((*attempt, *attempts)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reconnects, [(2, 3), (3, 3)]);
+    assert!(
+        matches!(
+            events.last(),
+            Some(ResponseEvent::Failed { message, kind: ErrorKind::Transport })
+                if message.starts_with("cannot reach the gateway after 3 connection attempts")
+        ),
+        "{events:?}"
+    );
+    // Both pauses were taken (250 ms + 750 ms) and nothing waited on a deadline.
+    assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn a_gateway_that_comes_up_during_the_backoff_serves_the_turn() {
+    let (url, port) = unused_port_url();
+    let state = state_for(&url);
+    // Nothing listens for the first attempt and the first pause; the
+    // listener appears before the last attempt (at about 1 s).
+    let server = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(450));
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        serve_one(&listener, &text_stream("late but here"))
+    });
+    let events = collect(&mut backend(&state), request());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::Reconnecting { .. })));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::TextDelta(text) if text == "late but here")));
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let received = server.join().unwrap();
+    assert!(received.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn cancelling_during_the_backoff_ends_the_turn_without_another_attempt() {
+    let (url, _) = unused_port_url();
+    let state = state_for(&url);
+    let mut backend = backend(&state);
+    let receiver = backend.submit(request());
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ResponseEvent::Reconnecting { attempt: 2, .. } => break,
+            ResponseEvent::ContextWindow(_) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+    let started = std::time::Instant::now();
+    backend.cancel();
+    let last = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(&last, ResponseEvent::Failed { message, .. } if message == "response cancelled"),
+        "{last:?}"
+    );
+    // Well inside the 250 ms pause: the wait polled the flag.
+    assert!(started.elapsed() < Duration::from_millis(200));
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn an_authentication_failure_names_the_credential_source_and_never_its_value() {
+    for (api_key, headers, expected_hint) in [
+        (
+            json!("$AHI_TEST_GATEWAY_KEY"),
+            json!({}),
+            "check the AHI_TEST_GATEWAY_KEY environment variable this gateway's credential is read from",
+        ),
+        // Header values are the `gateway` marker or `$NAME`; models.json never
+        // holds a literal secret.
+        (
+            json!(null),
+            json!({"X-Token": "gateway"}),
+            "check the provider's apiKey or headers in models.json",
+        ),
+        (
+            json!(null),
+            json!({}),
+            "this gateway is configured without a credential; add apiKey or headers in models.json",
+        ),
+    ] {
+        let (url, server) = server("403 Forbidden", Some("application/json"), "secret-body");
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-auth-hint");
+        let mut provider = json!({
+            "baseUrl": url, "api": "openai-completions", "headers": headers,
+            "models": [{"id": "vendor/model"}]
+        });
+        if !api_key.is_null() {
+            provider["apiKey"] = api_key;
+        }
+        fs::write(
+            state.join("models.json"),
+            json!({"providers": {"local": provider}}).to_string(),
+        )
+        .unwrap();
+        // The variable exists only inside the resolver; the hint must carry
+        // its name and nothing of its value.
+        let events = {
+            let _guard = EnvGuard::set("AHI_TEST_GATEWAY_KEY", "gateway-secret-value");
+            collect(&mut backend(&state), request())
+        };
+        match events.last() {
+            Some(ResponseEvent::Failed { message, kind }) => {
+                assert_eq!(*kind, ErrorKind::Auth, "{message}");
+                assert_eq!(
+                    message,
+                    &format!(
+                        "model request failed (HTTP 403); no automatic retry was attempted; {expected_hint}"
+                    )
+                );
+                assert!(!message.contains("secret"));
+            }
+            other => panic!("{other:?}"),
+        }
+        server.join().unwrap();
+        fs::remove_dir_all(state).unwrap();
+    }
+}
+
+/// Set an environment variable for one scope. Tests that read the environment
+/// run in parallel, so the name is unique to this test.
+struct EnvGuard(&'static str);
+
+impl EnvGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        std::env::set_var(name, value);
+        Self(name)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
+    }
 }
 
 fn text_stream(text: &str) -> String {
@@ -1070,7 +1255,10 @@ fn collect_answering(
                 }
             }
             event => {
-                let done = matches!(event, ResponseEvent::Completed | ResponseEvent::Failed(_));
+                let done = matches!(
+                    event,
+                    ResponseEvent::Completed | ResponseEvent::Failed { .. }
+                );
                 events.push(event);
                 if done {
                     assert!(answers.is_empty(), "unused approval answers");
@@ -1371,8 +1559,9 @@ fn a_dropped_approval_denies_the_batch_and_ends_the_turn() {
     assert_eq!(returns(&events), 2);
     assert_eq!(
         events.last(),
-        Some(&ResponseEvent::Failed(
-            "tool approval was cancelled; no further calls ran".into()
+        Some(&failed(
+            "tool approval was cancelled; no further calls ran",
+            ErrorKind::Other
         ))
     );
     assert_eq!(server.join().unwrap().len(), 1);
@@ -1397,9 +1586,10 @@ fn the_round_cap_returns_results_and_stops() {
     assert_eq!(returns(&events), rounds + 1);
     assert_eq!(
         events.last(),
-        Some(&ResponseEvent::Failed(format!(
-            "model exceeded {rounds} tool rounds in one turn; no further calls ran"
-        )))
+        Some(&failed(
+            format!("model exceeded {rounds} tool rounds in one turn; no further calls ran"),
+            ErrorKind::Limit
+        ))
     );
     assert_eq!(server.join().unwrap().len(), rounds + 1);
 }
@@ -1419,9 +1609,14 @@ fn a_resubmission_over_max_request_bytes_fails_before_network() {
     fs::write(fixture.workspace.join("src/big.txt"), "x".repeat(8192)).unwrap();
     let (events, _) = collect_answering(&mut fixture.backend(), request(), vec![]);
     assert_eq!(results(&events)[0].1, 0);
-    assert_eq!(
-        events.last(),
-        Some(&ResponseEvent::Failed("model request exceeds inputLimits.maxRequestBytes; shorten the conversation or select another model".into()))
+    assert!(
+        matches!(
+            events.last(),
+            Some(ResponseEvent::Failed { message, kind: ErrorKind::Limit })
+                if message.starts_with("model request is ")
+                    && message.ends_with(" bytes, over inputLimits.maxRequestBytes (4096); /clear the conversation, send a shorter message, or select another model")
+        ),
+        "{events:?}"
     );
     assert_eq!(server.join().unwrap().len(), 1);
 }
@@ -1666,7 +1861,7 @@ fn a_cancelled_approval_runs_no_call_in_a_mixed_batch() {
         ]
     );
     assert!(
-        matches!(events.last(), Some(ResponseEvent::Failed(message)) if message.contains("cancelled"))
+        matches!(events.last(), Some(ResponseEvent::Failed { message, .. }) if message.contains("cancelled"))
     );
 }
 

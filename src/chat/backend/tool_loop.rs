@@ -167,7 +167,7 @@ impl ToolRuntime {
             messages.push(message);
         }
         if over_limit {
-            return Err(Error::new(format!(
+            return Err(Error::limit(format!(
                 "model exceeded {MAX_ROUNDS} tool rounds in one turn; no further calls ran"
             )));
         }

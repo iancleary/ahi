@@ -1194,7 +1194,7 @@ def main() -> None:
             local_provider["models"][0]["inputLimits"] = {"maxRequestBytes": 1}
             reload_metadata()
             session.send("verify byte rejection\r")
-            session.expect("model request exceeds inputLimits.maxRequestBytes")
+            session.expect("over inputLimits.maxRequestBytes (")
             assert len(gateway_requests) == before
             session.capture("metadata-byte-rejection")
             local_provider["models"][0].pop("inputLimits")
@@ -1285,7 +1285,7 @@ def main() -> None:
             local_path.write_text(json.dumps(local_document))
             before = len(gateway_requests)
             session.send("容量\r")
-            session.expect("model request exceeds inputLimits.maxRequestBytes")
+            session.expect("over inputLimits.maxRequestBytes (")
             assert len(gateway_requests) == before
             session.send("/clear\r")
             local_provider["models"][0]["inputLimits"]["maxRequestBytes"] = exact_bytes

@@ -88,14 +88,10 @@ The notice is informational, not a prompt: the operator chose the provider delib
 
 ## Errors
 
-`ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). Authentication failures on every path are `Auth`; policy denials and the disabled-tools boundary are `Policy`; byte, count, and round limits are `Limit`. The chat screen still shows the message text as a highlighted alert; the kind is not yet carried to it.
+`ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). Authentication failures on every path are `Auth`; policy denials and the disabled-tools boundary are `Policy`; byte, count, and round limits are `Limit`. A failed turn reaches the chat screen as `ResponseEvent::Failed { message, kind }` and is shown as a highlighted alert. Three kinds also change behaviour:
 
-**Planned use of the kind (decided 2026-11-05, not yet built).** The kind reaches the screen together with the first behaviour that needs it, and three are wanted:
-
-| Kind | Screen behaviour |
+| Kind | Behaviour |
 | --- | --- |
-| `Transport` | Reconnection attempts when a gateway cannot be reached: bounded retries with backoff before the request is sent, never after content has streamed, and an `Enter` resubmits the same message without retyping. |
-| `Auth` | A next-step hint that depends on the connection's credential scheme, derived where the connection is resolved (browser login, API key, gateway headers), never from the kind alone. |
-| `Limit` | Say which bound was hit (request bytes, stream bytes, tool budget, tool rounds) and suggest `/clear` or a smaller message when the request cap is the cause. |
-
-Until then `ResponseEvent::Failed` carries only the message text.
+| `Transport` | **Reconnection.** When a gateway cannot be reached (DNS or connection failure, so the request never left the machine), the backend tries three times with 250 ms and 750 ms pauses, emitting `Reconnecting { attempt, attempts }` so the activity line reads `Reconnecting 2/3`; Esc ends the wait. Nothing the server may have received is retried: HTTP statuses, timeouts, and failures mid-stream are reported once. The browser-login OpenAI path keeps its own single credential renewal and is not retried. **Resend.** When the failure leaves the transcript ending in an operator message or tool results, `Enter` on a blank input sends the same transcript again; the activity line says so. A partial reply at the tail offers nothing. |
+| `Auth` | The message names where the credential is configured, never its value: the environment variable an `apiKey` or header is read from (`$NAME`), `models.json` when `apiKey` or a header carries the `gateway` marker, or that the gateway is configured without a credential. Browser-login messages already say `/login`. |
+| `Limit` | The message names the bound: request bytes over the 16 MiB cap or over `inputLimits.maxRequestBytes` (with `/clear` or a shorter message as the way out), stream bytes over 16 MiB, tool arguments, the tool output budget, or the tool round limit. |

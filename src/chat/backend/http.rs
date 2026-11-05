@@ -10,14 +10,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::protocol::{self, RequestContext, StreamOutcome};
 use super::tool_loop::{SessionGrants, ToolRuntime};
 use super::{ChatRequest, CompletionBackend, ResponseEvent};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
-use crate::error::{Error, Result};
-use crate::harness::{CompletionConnection, CompletionTransport, Protocol};
+use crate::error::{Error, ErrorKind, Result};
+use crate::harness::{CompletionConnection, CompletionTransport, Credential, Protocol};
+
+/// Connection attempts per request when a gateway cannot be reached, and the
+/// pauses between them. Only failures to connect are retried: a request the
+/// server may have received is never sent twice.
+const CONNECT_ATTEMPTS: u8 = 3;
+const CONNECT_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
 
 #[cfg(test)]
 mod tests;
@@ -82,10 +88,14 @@ impl CompletionBackend for HttpBackend {
                 Ok(()) => ResponseEvent::Completed,
                 // Any failure after a cancel is the cancel: the dropped
                 // connection or the checkpoint, never a provider fault.
-                Err(_) if cancel.load(Ordering::Relaxed) => {
-                    ResponseEvent::Failed("response cancelled".to_string())
-                }
-                Err(error) => ResponseEvent::Failed(error.to_string()),
+                Err(_) if cancel.load(Ordering::Relaxed) => ResponseEvent::Failed {
+                    message: "response cancelled".to_string(),
+                    kind: ErrorKind::Other,
+                },
+                Err(error) => ResponseEvent::Failed {
+                    message: error.to_string(),
+                    kind: error.kind(),
+                },
             };
             let _ = sender.send(event);
         });
@@ -168,48 +178,76 @@ fn complete(
         thinking,
         mut messages,
     } = request;
-    loop {
-        let context = RequestContext::new(
-            &selection.model,
-            thinking,
-            metadata,
-            &messages,
-            schemas.as_deref(),
-            connection.browser_token(),
-        );
-        let body = protocol::request_body(connection.protocol, &context)?;
-        cancelled(cancel)?;
-        let response = send(agent, state, &connection, &body)?;
-        let outcome = decode(connection.protocol, metadata, response, sender, cancel)?;
-        match outcome {
-            StreamOutcome::Stopped => return Ok(()),
-            StreamOutcome::ToolCalls {
-                text,
-                calls,
-                native,
-            } => {
-                protocol::emit(
-                    sender,
-                    ResponseEvent::ToolCallsRequested {
-                        calls: calls.clone(),
-                        native: native.clone(),
-                    },
-                )?;
-                let Some(tools) = tools.as_mut() else {
-                    return Err(Error::policy(format!(
+    let mut turn = || -> Result<()> {
+        loop {
+            let context = RequestContext::new(
+                &selection.model,
+                thinking,
+                metadata,
+                &messages,
+                schemas.as_deref(),
+                connection.browser_token(),
+            );
+            let body = protocol::request_body(connection.protocol, &context)?;
+            cancelled(cancel)?;
+            let response = send(agent, state, &connection, &body, sender, cancel)?;
+            let outcome = decode(connection.protocol, metadata, response, sender, cancel)?;
+            match outcome {
+                StreamOutcome::Stopped => return Ok(()),
+                StreamOutcome::ToolCalls {
+                    text,
+                    calls,
+                    native,
+                } => {
+                    protocol::emit(
+                        sender,
+                        ResponseEvent::ToolCallsRequested {
+                            calls: calls.clone(),
+                            native: native.clone(),
+                        },
+                    )?;
+                    let Some(tools) = tools.as_mut() else {
+                        return Err(Error::policy(format!(
                         "tool execution is disabled: no {} rule approves a builtin tool in this working directory",
                         crate::actions::FILE_NAME
                     )));
-                };
-                cancelled(cancel)?;
-                let results = tools.run_round(&calls, sender)?;
-                let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
-                assistant.tool = Some(ToolPayload::Calls { calls, native });
-                messages.push(assistant);
-                messages.extend(results);
+                    };
+                    cancelled(cancel)?;
+                    let results = tools.run_round(&calls, sender)?;
+                    let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
+                    assistant.tool = Some(ToolPayload::Calls { calls, native });
+                    messages.push(assistant);
+                    messages.extend(results);
+                }
             }
         }
+    };
+    turn().map_err(|error| with_credential_hint(error, &connection))
+}
+
+/// Name where a gateway credential is configured on an authentication
+/// failure. Browser-login messages already say `/login`; gateway hints name a
+/// variable or the file, never a value.
+fn with_credential_hint(error: Error, connection: &CompletionConnection) -> Error {
+    if error.kind() != ErrorKind::Auth
+        || matches!(connection.transport, CompletionTransport::OpenAiResponses)
+    {
+        return error;
     }
+    let hint = match &connection.credential {
+        Credential::BrowserLogin => return error,
+        Credential::Environment(name) => {
+            format!("check the {name} environment variable this gateway's credential is read from")
+        }
+        Credential::Configured => {
+            "check the provider's apiKey or headers in models.json".to_string()
+        }
+        Credential::None => {
+            "this gateway is configured without a credential; add apiKey or headers in models.json"
+                .to_string()
+        }
+    };
+    Error::auth(format!("{error}; {hint}"))
 }
 
 /// Send one request. The browser credential path pins its own destination and
@@ -219,29 +257,76 @@ fn send(
     state: &Path,
     connection: &CompletionConnection,
     body: &[u8],
+    sender: &Sender<ResponseEvent>,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<ureq::Response> {
     match &connection.transport {
         CompletionTransport::OpenAiResponses => {
             crate::harness::inference_response(state, body, agent)
         }
         CompletionTransport::Gateway { url, headers } => {
-            let mut call = agent
-                .post(url)
-                .set("Content-Type", "application/json")
-                .set("Accept", "text/event-stream");
-            for (name, value) in headers {
-                call = call.set(name, value);
-            }
-            match call.send_bytes(body) {
-                Ok(response) if response.status() == 200 => Ok(response),
-                Ok(response) => Err(http_error(response.status())),
-                Err(ureq::Error::Status(status, _)) => Err(http_error(status)),
-                // Transport errors can contain URLs, credentials, or upstream text.
-                Err(_) => Err(Error::transport(
-                    "model request network, TLS, or timeout error",
-                )),
+            let mut attempt = 1;
+            loop {
+                let mut call = agent
+                    .post(url)
+                    .set("Content-Type", "application/json")
+                    .set("Accept", "text/event-stream");
+                for (name, value) in headers {
+                    call = call.set(name, value);
+                }
+                match call.send_bytes(body) {
+                    Ok(response) if response.status() == 200 => return Ok(response),
+                    Ok(response) => return Err(http_error(response.status())),
+                    Err(ureq::Error::Status(status, _)) => return Err(http_error(status)),
+                    // DNS and connection failures never reached the server, so
+                    // another attempt cannot bill twice. Anything else might
+                    // have, and is not retried.
+                    Err(ureq::Error::Transport(transport)) if unreachable(transport.kind()) => {
+                        if attempt >= CONNECT_ATTEMPTS {
+                            return Err(Error::transport(format!(
+                                "cannot reach the gateway after {CONNECT_ATTEMPTS} connection attempts (DNS or connection failure); check its baseUrl and that it is running"
+                            )));
+                        }
+                        let backoff = CONNECT_BACKOFF[usize::from(attempt - 1)];
+                        attempt += 1;
+                        protocol::emit(
+                            sender,
+                            ResponseEvent::Reconnecting {
+                                attempt,
+                                attempts: CONNECT_ATTEMPTS,
+                            },
+                        )?;
+                        wait(backoff, cancel)?;
+                    }
+                    // Transport errors can contain URLs, credentials, or upstream text.
+                    Err(_) => {
+                        return Err(Error::transport(
+                            "model request network, TLS, or timeout error",
+                        ))
+                    }
+                }
             }
         }
+    }
+}
+
+fn unreachable(kind: ureq::ErrorKind) -> bool {
+    matches!(
+        kind,
+        ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::ProxyConnect
+    )
+}
+
+/// Sleep through a backoff in short steps so a cancel ends it promptly.
+fn wait(backoff: Duration, cancel: &Arc<AtomicBool>) -> Result<()> {
+    let deadline = Instant::now() + backoff;
+    loop {
+        cancelled(cancel)?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
     }
 }
 

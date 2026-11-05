@@ -109,6 +109,11 @@ struct ChatScreen {
     location_dirty: bool,
     /// A Git status probe in flight on its own thread; the UI never waits on it.
     location_receiver: Option<Receiver<(String, Option<location::GitStatus>)>>,
+    /// The backend is between connection attempts: (next attempt, of).
+    reconnecting: Option<(u8, u8)>,
+    /// The last turn failed before the gateway was reached, so Enter on a
+    /// blank input sends the same transcript again.
+    resend_available: bool,
 }
 
 impl ChatScreen {
@@ -144,6 +149,8 @@ impl ChatScreen {
             dirty: transcript::render::Dirty::From(0),
             location_dirty: false,
             location_receiver: None,
+            reconnecting: None,
+            resend_available: false,
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -604,13 +611,19 @@ impl ChatScreen {
             }
         } else if self.response_in_progress {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
+            let verb = match self.reconnecting {
+                Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
+                None => "Working".to_string(),
+            };
             if chunks[1].width < 12 {
                 format!("{spinner} ")
             } else if chunks[1].width < 48 {
-                format!("{spinner} Working ")
+                format!("{spinner} {verb} ")
             } else {
-                format!("{spinner} Working · Esc cancels ")
+                format!("{spinner} {verb} · Esc cancels ")
             }
+        } else if self.resend_available && self.input.is_blank() {
+            "Enter resends the last message ".to_string()
         } else {
             String::new()
         };
@@ -684,6 +697,11 @@ impl ChatScreen {
         }
         let text = self.input.contents();
         if text.trim().is_empty() {
+            // A blank Enter after a connection failure sends the same
+            // transcript again; otherwise it does nothing.
+            if self.resend_available {
+                self.send_transcript(backend);
+            }
             return Ok(ScreenAction::Continue);
         }
         self.input.clear();
@@ -693,6 +711,14 @@ impl ChatScreen {
         }
         self.push_message(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
+        self.send_transcript(backend);
+        Ok(ScreenAction::Continue)
+    }
+
+    /// Start a turn from the transcript as it stands. Screen-only rows stay
+    /// behind.
+    fn send_transcript(&mut self, backend: &mut dyn CompletionBackend) {
+        self.resend_available = false;
         self.refresh_location();
         let request = ChatRequest {
             selection: self.selection.clone(),
@@ -709,7 +735,6 @@ impl ChatScreen {
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.assistant_open = false;
-        Ok(ScreenAction::Continue)
     }
 
     fn dispatch_command(
@@ -738,6 +763,7 @@ impl ChatScreen {
                 self.approval = None;
                 self.response_in_progress = false;
                 self.assistant_open = false;
+                self.resend_available = false;
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::SetMouse(enabled) => {
@@ -778,7 +804,14 @@ impl ChatScreen {
         // that offset with the transcript so the same rows remain visible.
         // Count wrapped rows, not newlines: streamed text can soft-wrap too.
         let previous_rows = (self.scroll_from_bottom > 0).then(|| self.row_count());
+        if !matches!(event, ResponseEvent::Reconnecting { .. }) {
+            self.reconnecting = None;
+        }
         let finished = match event {
+            ResponseEvent::Reconnecting { attempt, attempts } => {
+                self.reconnecting = Some((attempt, attempts));
+                false
+            }
             ResponseEvent::TextDelta(text) => {
                 if !self.assistant_open {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
@@ -859,8 +892,23 @@ impl ChatScreen {
                 self.approval = None;
                 true
             }
-            ResponseEvent::Failed(message) => {
+            ResponseEvent::Failed { message, kind } => {
                 self.approval = None;
+                // A connection failure left the transcript as the operator
+                // sent it (or ending in tool results): the same request can
+                // go again. A partial reply at the tail cannot.
+                self.resend_available = kind == crate::error::ErrorKind::Transport
+                    && self
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| !message.role.is_notice())
+                        .is_some_and(|message| {
+                            matches!(
+                                message.role,
+                                TranscriptRole::Operator | TranscriptRole::Tool { .. }
+                            )
+                        });
                 self.push_alert(message);
                 true
             }
@@ -1132,6 +1180,99 @@ mod tests {
         fn cancel(&mut self) {
             self.cancels += 1;
         }
+    }
+
+    #[test]
+    fn a_connection_failure_offers_a_resend_on_blank_enter_and_shows_reconnects() {
+        use crate::error::ErrorKind;
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-resend");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("explain");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        let sender = backend.sender.clone().unwrap();
+        sender
+            .send(ResponseEvent::Reconnecting {
+                attempt: 2,
+                attempts: 3,
+            })
+            .unwrap();
+        screen.poll_backend();
+        let rows = draw_lines(&mut screen, 100, 12);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Reconnecting 2/3 · Esc cancels")));
+        sender
+            .send(ResponseEvent::Failed {
+                message: "cannot reach the gateway after 3 connection attempts".into(),
+                kind: ErrorKind::Transport,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert!(!screen.response_in_progress());
+        assert!(screen.reconnecting.is_none());
+        assert!(screen.resend_available);
+        assert_eq!(
+            screen.messages().last().unwrap().role,
+            TranscriptRole::Alert
+        );
+        let rows = draw_lines(&mut screen, 100, 12);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Enter resends the last message")));
+        assert!(!rows.iter().any(|row| row.contains("Reconnecting")));
+
+        // Blank Enter sends the same transcript again, without a new row.
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(backend.requests[1].messages, backend.requests[0].messages);
+        assert!(screen.response_in_progress());
+        assert!(!screen.resend_available);
+        let roles: Vec<_> = screen.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, [TranscriptRole::Operator, TranscriptRole::Alert]);
+
+        // Other kinds, and a transport failure after a partial reply, offer
+        // nothing: the tail is not a request the operator sent.
+        let sender = backend.sender.clone().unwrap();
+        sender
+            .send(ResponseEvent::TextDelta("partial".into()))
+            .unwrap();
+        sender
+            .send(ResponseEvent::Failed {
+                message: "model response stream interrupted".into(),
+                kind: ErrorKind::Transport,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert!(!screen.resend_available);
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        screen.set_input_text("again");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Failed {
+                message: "model request failed (HTTP 401)".into(),
+                kind: ErrorKind::Auth,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert!(!screen.resend_available);
+        let _ = fs::remove_dir_all(state);
     }
 
     #[test]
@@ -2354,7 +2495,10 @@ mod tests {
         let mut screen = screen_in(&state);
         let (event, decisions) = approval(&[("src/a.rs", "src")]);
         screen.apply_event(event);
-        assert!(screen.apply_event(ResponseEvent::Failed("ended".into())));
+        assert!(screen.apply_event(ResponseEvent::Failed {
+            message: "ended".into(),
+            kind: crate::error::ErrorKind::Other,
+        }));
         assert!(screen.approval.is_none());
         assert!(matches!(
             decisions.try_recv(),
