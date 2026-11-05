@@ -115,3 +115,11 @@ Verdict was "ship after fixing items 1–6"; all six were fixed on the branch, t
 | 10 | Doc wording: headers cannot override auth headers; 64 KiB is per call; stale `http/responses.rs` link | Fixed |
 
 Codex also confirmed: every validated call gets exactly one result; cancelled batches run nothing; grants carry the destination; raw arguments stay out of diagnostics; no route exists from the browser credential to a gateway; no production mutation of the transcript misses a dirty mark. Still open from both passes: real cancellation of blocked reads, a turn-configuration snapshot and history-disclosure policy on provider switch, `ErrorKind` on the screen, and the roadmap's `AssistantTurn` type.
+
+## Review answers (2026-11-05)
+
+Ian reviewed the finished branch and answered the three questions held for the end.
+
+- **D1 stands; the API-key path stays.** The follow-up is a different mechanism, not an OAuth transport: delegate a Claude provider to the installed `claude` CLI in headless mode (`claude -p`, Claude Code 2.1.318 verified locally). It runs Anthropic's own client under the user's own login, so nothing is impersonated; the model and thinking come from `--model` and `--effort <low|medium|high|xhigh|max>`; token-level streaming from `--output-format stream-json --include-partial-messages`; `--tools ""` plus `--strict-mcp-config` keeps Claude Code's own tools out so ahi's policy-gated tools remain the only tools, exposed to the CLI as an MCP server that ahi hosts, with `--permission-prompt-tool` routing approvals back to the chat screen. This is a new `CompletionTransport` variant with a process adapter, not a protocol, and belongs on its own branch. Whether the subscription terms cover wrapping the CLI is a terms question to check first; the technical path is clean.
+- **Push and open the PR.** Done from this branch.
+- **History disclosure on `/model` switch** was explained (it is a disclosure point, not a cost point: the transcript, including tool output from the working tree, goes to whichever provider is active on the next turn, and native replay items are dropped). Decision deferred until Ian chooses between a one-line notice and a confirmation; the branch sends the history silently, as before.
