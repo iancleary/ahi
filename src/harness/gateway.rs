@@ -93,8 +93,11 @@ impl DiscoveredGateway {
                 format!("{operation}\nGateway: {}\nInference base URL: {base_url}\nAuthentication: {authentication}; {headers} configured header(s) retained", self.provider_id)
             }
             None => format!(
-                "Register new gateway\nGateway: {}\nInference base URL: {}\nAuthentication: {}",
-                self.provider_id, self.base_url, self.catalog.api_key
+                "Register new gateway\nGateway: {}\nInference base URL: {}\nProtocol: {}\nAuthentication: {}",
+                self.provider_id,
+                self.base_url,
+                self.catalog.protocol.as_str(),
+                self.catalog.api_key
             ),
         }
     }
@@ -148,7 +151,7 @@ impl DiscoveredGateway {
                 self.provider_id.clone(),
                 serde_json::json!({
                     "baseUrl": self.base_url,
-                    "api": "openai-completions",
+                    "api": self.catalog.protocol.as_str(),
                     "apiKey": self.catalog.api_key,
                     "models": [],
                 }),

@@ -4,10 +4,11 @@
 //! runtime is involved.
 
 mod http;
+mod protocol;
+mod sse;
 mod tool_call;
 mod tool_loop;
 pub(crate) mod tools;
-mod wire;
 
 pub(crate) use tool_call::ToolCall;
 

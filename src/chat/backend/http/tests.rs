@@ -1,12 +1,34 @@
 use super::*;
 use crate::chat::backend::parse_selection;
-use crate::chat::backend::{ProposedAction, ToolDecision};
+use crate::chat::backend::sse::FRAME_CAP;
+use crate::chat::backend::{ProposedAction, ToolCall, ToolDecision};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
+use crate::harness::{ModelMetadata, Protocol};
+use serde_json::json;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 use std::thread;
+
+/// Chat Completions stream decoding with default metadata.
+fn read_stream(reader: impl Read, sender: &Sender<ResponseEvent>) -> Result<StreamOutcome> {
+    protocol::read_stream(
+        Protocol::OpenAiCompletions,
+        reader,
+        sender,
+        &ModelMetadata::default(),
+    )
+}
+
+/// Browser-token Responses request body for a text-only request.
+fn responses_request_body(request: &ChatRequest, metadata: &ModelMetadata) -> Result<Vec<u8>> {
+    protocol::request_body(
+        Protocol::OpenAiResponses,
+        &RequestContext::new(request, metadata, &request.messages, None, true),
+    )
+}
 
 const RESPONSE_SECRET_MARKER: &str = "synthetic-response-secret-marker";
 
@@ -126,7 +148,7 @@ fn backend(state: &Path) -> HttpBackend {
     HttpBackend::with_workspace(state.to_path_buf(), workspace)
 }
 
-fn responses_fixture(body: &str) -> (Result<()>, Vec<ResponseEvent>, String) {
+fn responses_fixture(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
     responses_fixture_with_refresh(body, false, Some("text/event-stream; charset=utf-8"))
 }
 
@@ -134,7 +156,7 @@ fn responses_fixture_with_refresh(
     body: &str,
     refresh: bool,
     content_type: Option<&str>,
-) -> (Result<()>, Vec<ResponseEvent>, String) {
+) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
     let token_server = refresh.then(|| server("200 OK", Some("application/json"), r#"{"access_token":"disposable-browser-token","refresh_token":"rotated-disposable-token","expires_in":3600,"scope":"chatgpt.tokens.use.direct"}"#));
     let token_url = token_server
         .as_ref()
@@ -151,7 +173,7 @@ fn responses_fixture_with_refresh(
     let mut input = request();
     input.selection = parse_selection("openai/curated-model");
     let metadata = crate::harness::ModelMetadata::default();
-    let body_bytes = responses::request_body(&input, &metadata).unwrap();
+    let body_bytes = responses_request_body(&input, &metadata).unwrap();
     let response = crate::harness::fixture_inference_response(
         &state,
         &body_bytes,
@@ -160,7 +182,7 @@ fn responses_fixture_with_refresh(
     )
     .unwrap();
     let (sender, receiver) = mpsc::channel();
-    let result = responses::consume(response, &sender, &metadata);
+    let result = decode(Protocol::OpenAiResponses, &metadata, response, &sender);
     let events = receiver.try_iter().collect();
     let received = server.join().unwrap();
     if let Some((_, token_server)) = token_server {
@@ -262,14 +284,14 @@ fn verify_responses_http_workflow() {
     )
     .unwrap();
     let body: serde_json::Value =
-        serde_json::from_slice(&responses::request_body(&request(), &metadata).unwrap()).unwrap();
+        serde_json::from_slice(&responses_request_body(&request(), &metadata).unwrap()).unwrap();
     assert_eq!(body["reasoning"], json!({"effort":"medium"}));
     assert!(body.get("max_output_tokens").is_none());
     let metadata = serde_json::from_value::<crate::harness::ModelMetadata>(
         json!({"inputLimits":{"maxRequestBytes":1}}),
     )
     .unwrap();
-    assert!(responses::request_body(&request(), &metadata).is_err());
+    assert!(responses_request_body(&request(), &metadata).is_err());
 }
 
 fn verify_responses_http_failures() {
@@ -438,13 +460,18 @@ fn verify_responses_tool_requests() {
         completed_response(vec![first.clone(), second.clone()]),
     ]);
     let (result, events, _) = responses_fixture(&body);
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("tool execution is disabled"));
+    // The parser yields validated calls; only the turn loop may run them,
+    // and only through the same policy gate as every other protocol.
+    let StreamOutcome::ToolCalls { text, calls } = result.unwrap() else {
+        panic!("expected validated tool calls");
+    };
+    assert!(text.is_empty());
     assert!(
-        matches!(&events[..], [ResponseEvent::Usage {..}, ResponseEvent::ToolCallsRequested(calls)] if calls.len() == 2 && calls[0].id == "call_first" && calls[0].arguments["path"] == "src/世界.rs")
+        calls.len() == 2
+            && calls[0].id == "call_first"
+            && calls[0].arguments["path"] == "src/世界.rs"
     );
+    assert!(matches!(&events[..], [ResponseEvent::Usage { .. }]));
     for (first, second, complete) in [
         (first.clone(), second.clone(), false),
         (
@@ -778,12 +805,22 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     let mut backend = backend(&state);
     let mut input = request();
     input.selection = parse_selection("openai/gpt-4.1");
+    // OpenAI is implicit, so an unconfigured entry is a stale curated
+    // selection, not a missing gateway.
+    assert_eq!(
+        collect(&mut backend, input.clone()),
+        vec![ResponseEvent::Failed(
+            "selected model is no longer curated in models.json; reopen /model".into()
+        )]
+    );
+    input.selection = parse_selection("missing/gpt-4.1");
     assert_eq!(
         collect(&mut backend, input.clone()),
         vec![ResponseEvent::Failed(
             "selected gateway is not registered in models.json".into()
         )]
     );
+    input.selection = parse_selection("openai/gpt-4.1");
     let configured = json!({"providers":{"openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-completions","models":[{"id":"gpt-4.1"}]}}});
     fs::write(state.join("models.json"), configured.to_string()).unwrap();
     assert_eq!(
@@ -809,7 +846,7 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
         conflict["providers"]["openai"][field] = match field {
             "baseUrl" => json!("http://127.0.0.1:1/v1"),
             "headers" => json!({"Authorization":"$UNSET_INFERENCE_FIXTURE"}),
-            "api" => json!("other"),
+            "api" => json!("anthropic-messages"),
             _ => json!("$UNSET_INFERENCE_FIXTURE"),
         };
         fs::write(state.join("models.json"), conflict.to_string()).unwrap();
@@ -1113,12 +1150,32 @@ fn operator_decisions_approve_deny_and_grant_for_the_session() {
 }
 
 #[test]
-fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
-    let (url, _first) = server_sequence(vec![
+fn a_session_grant_carries_across_turns_but_not_to_another_gateway_or_destination() {
+    // One server, one destination, for every turn below: a grant is bound to
+    // the exact destination, so each turn must reach the same URL.
+    let (url, _server) = server_sequence(vec![
         calls_stream(&[("c1", "read_file", json!({"path": "src/a.rs"}))]),
         text_stream("granted"),
+        calls_stream(&[("c2", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("reused"),
+        calls_stream(&[("c3", "read_file", json!({"path": "secret"}))]),
+        text_stream("asked"),
+        calls_stream(&[("c4", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("asked again"),
     ]);
     let fixture = ToolFixture::new(&url, ASK_ALL, json!({"id": "vendor/model"}));
+    let provider = |url: &str| {
+        json!({"baseUrl": url, "api": "openai-completions", "apiKey": "gateway",
+               "models": [{"id": "vendor/model"}]})
+    };
+    let write = |local: &str, other: &str| {
+        fs::write(
+            fixture.state.join("models.json"),
+            json!({"providers": {"local": provider(local), "other": provider(other)}}).to_string(),
+        )
+        .unwrap()
+    };
+    write(&url, &url);
     let mut backend = fixture.backend();
     let (_, approvals) = collect_answering(
         &mut backend,
@@ -1127,23 +1184,8 @@ fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
     );
     assert_eq!(approvals.len(), 1);
 
-    // Same backend, later turn, same gateway: the grant covers src/ silently.
-    let (url, _second) = server_sequence(vec![
-        calls_stream(&[("c2", "read_file", json!({"path": "src/b.rs"}))]),
-        text_stream("reused"),
-    ]);
-    let provider = |url: &str| {
-        json!({"baseUrl": url, "api": "openai-completions", "apiKey": "gateway",
-               "models": [{"id": "vendor/model"}]})
-    };
-    let write = |url: &str| {
-        fs::write(
-            fixture.state.join("models.json"),
-            json!({"providers": {"local": provider(url), "other": provider(url)}}).to_string(),
-        )
-        .unwrap()
-    };
-    write(&url);
+    // Same backend, later turn, same gateway and destination: the grant
+    // covers src/ silently.
     let (events, approvals) = collect_answering(&mut backend, request(), vec![]);
     assert!(approvals.is_empty());
     assert_eq!(
@@ -1152,11 +1194,6 @@ fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
     );
 
     // Outside the granted prefix it still asks.
-    let (url, _third) = server_sequence(vec![
-        calls_stream(&[("c3", "read_file", json!({"path": "secret"}))]),
-        text_stream("asked"),
-    ]);
-    write(&url);
     let (_, approvals) = collect_answering(
         &mut backend,
         request(),
@@ -1165,17 +1202,33 @@ fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
     assert_eq!(approvals.len(), 1);
 
     // Another gateway would receive the file, so the grant does not apply.
-    let (url, _fourth) = server_sequence(vec![
-        calls_stream(&[("c4", "read_file", json!({"path": "src/b.rs"}))]),
-        text_stream("asked again"),
-    ]);
-    write(&url);
     let mut other = request();
     other.selection = parse_selection("other/vendor/model");
     let (events, approvals) =
         collect_answering(&mut backend, other, vec![Some(vec![ToolDecision::Deny])]);
     assert_eq!(approvals.len(), 1);
-    assert_eq!(results(&events)[0].1, 126);
+    assert_eq!(
+        results(&events),
+        vec![("c4".into(), 126, "denied: denied by the operator".into())]
+    );
+
+    // The same gateway id reconfigured to a different URL is a different
+    // destination; the grant does not follow the id there.
+    let (moved, _moved) = server_sequence(vec![
+        calls_stream(&[("c5", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("asked at the new destination"),
+    ]);
+    write(&moved, &url);
+    let (events, approvals) = collect_answering(
+        &mut backend,
+        request(),
+        vec![Some(vec![ToolDecision::Deny])],
+    );
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(
+        results(&events),
+        vec![("c5".into(), 126, "denied: denied by the operator".into())]
+    );
 }
 
 #[test]
