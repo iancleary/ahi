@@ -558,7 +558,7 @@ impl Picker {
                 && provider.auth == "signed-out"
                 && provider.catalog.is_none()
             {
-                "Add your first gateway: press / and choose Add gateway.\nOr sign in with OpenAI from Commands.".to_string()
+                "Add your first gateway: press / and choose Add gateway.\nOr sign in with OpenAI from Commands, or set ANTHROPIC_API_KEY.".to_string()
             } else if provider.catalog.is_none() {
                 "No models selected. Press c to choose models.\nCatalog unavailable: r discovers models; /gateway retries discovery.".to_string()
             } else {

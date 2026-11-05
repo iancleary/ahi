@@ -1381,6 +1381,103 @@ mod tests {
     }
 
     #[test]
+    fn protocols_select_the_inference_path_and_credential_header() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("harness-protocols");
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{
+                "claude":{"baseUrl":"https://anthropic.example/v1","api":"anthropic-messages","apiKey":"gateway","models":[{"id":"claude-x"}]},
+                "proxy":{"baseUrl":"https://proxy.example/v1/","api":"openai-responses","apiKey":"gateway","headers":{"X-Team":"gateway"},"models":[{"id":"gpt-x"}]},
+                "home":{"baseUrl":"http://127.0.0.1:11434/v1","api":"openai-completions","models":[{"id":"qwen"}]}
+            }}"#,
+        )
+        .unwrap();
+        let claude = completion_connection(&dir, "claude", "claude-x").unwrap();
+        assert_eq!(claude.protocol, Protocol::AnthropicMessages);
+        assert!(!claude.browser_token());
+        let CompletionTransport::Gateway { url, headers } = &claude.transport else {
+            panic!("gateway transport");
+        };
+        assert_eq!(url, "https://anthropic.example/v1/messages");
+        assert_eq!(claude.destination(), url);
+        assert_eq!(headers["x-api-key"], "gateway");
+        assert_eq!(headers["anthropic-version"], "2023-06-01");
+        assert!(!headers.contains_key("authorization"));
+
+        let proxy = completion_connection(&dir, "proxy", "gpt-x").unwrap();
+        assert_eq!(proxy.protocol, Protocol::OpenAiResponses);
+        let CompletionTransport::Gateway { url, headers } = &proxy.transport else {
+            panic!("gateway transport");
+        };
+        assert_eq!(url, "https://proxy.example/v1/responses");
+        assert_eq!(headers["authorization"], "Bearer gateway");
+        assert_eq!(headers["x-team"], "gateway");
+
+        let home = completion_connection(&dir, "home", "qwen").unwrap();
+        assert_eq!(home.protocol, Protocol::OpenAiCompletions);
+        assert_eq!(
+            home.destination(),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+
+        // The reserved id keeps its legacy spelling and the browser transport.
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-responses","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        let error = load_registry(&dir).unwrap_err().to_string();
+        assert!(error.contains("api must be openai-completions"), "{error}");
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"lab":{"baseUrl":"https://lab.example/v1","api":"grpc","models":[]}}}"#,
+        )
+        .unwrap();
+        let error = load_registry(&dir).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "api must be one of openai-completions, openai-responses, anthropic-messages"
+            ),
+            "{error}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn standard_models_refresh_keeps_display_names_and_sends_the_configured_key() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("harness-standard");
+        let body = br#"{"data":[{"id":"claude-b","display_name":"Claude B","type":"model"},{"id":"claude-a","display_name":" "}],"has_more":false}"#;
+        let port = serve("200 OK", "", body);
+        fs::write(
+            dir.join("models.json"),
+            format!(
+                r#"{{"providers":{{"claude":{{"baseUrl":"http://127.0.0.1:{port}/v1","api":"anthropic-messages","apiKey":"gateway","models":[{{"id":"claude-a"}}]}}}}}}"#
+            ),
+        )
+        .unwrap();
+        refresh_provider(&dir, "claude").unwrap();
+        let registry = load_registry(&dir).unwrap();
+        let claude = registry
+            .providers
+            .iter()
+            .find(|provider| provider.id == "claude")
+            .unwrap();
+        let catalog = claude.catalog.as_ref().unwrap();
+        assert_eq!(catalog.models, ["claude-b", "claude-a"]);
+        assert_eq!(
+            catalog.source.as_deref(),
+            Some(format!("http://127.0.0.1:{port}/v1/models").as_str())
+        );
+        assert_eq!(
+            catalog.metadata["claude-b"].name.as_deref(),
+            Some("Claude B")
+        );
+        assert_eq!(catalog.metadata["claude-a"].name, None);
+        assert_eq!(claude.models[0].status, CatalogMembership::Listed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_secret_api_key_is_refused() {
         let err = check_marker("apiKey", "sk-live-secret").unwrap_err();
         assert!(err.to_string().contains("$NAME"));
