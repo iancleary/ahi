@@ -181,6 +181,23 @@ impl ChatScreen {
             self.meters.context_tokens = None;
             self.meters.context_window = None;
         }
+        if selection.gateway != self.selection.gateway {
+            // The transcript follows the operator to the new provider; say so
+            // before the next message carries it there.
+            let carried = self
+                .messages
+                .iter()
+                .filter(|message| message.role != TranscriptRole::Notice)
+                .count();
+            if carried > 0 {
+                self.push_notice(format!(
+                    "switched provider from {} to {}: the {carried} messages above \
+                     will be sent to {} with your next message",
+                    self.selection.gateway, selection.gateway, selection.gateway
+                ));
+                self.scroll_from_bottom = 0;
+            }
+        }
         self.selection = selection;
     }
 
@@ -982,6 +999,31 @@ mod tests {
 
     fn screen_in(state: &Path) -> ChatScreen {
         ChatScreen::load(state, "openai/gpt-4.1")
+    }
+
+    #[test]
+    fn switching_provider_with_history_posts_a_disclosure_notice_once() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-switch");
+        let mut screen = screen_in(&state);
+        // An empty transcript has nothing to disclose, at startup or later.
+        screen.set_selection("home/qwen");
+        assert!(screen.messages().is_empty());
+        screen.push_message(ChatMessage::new(TranscriptRole::Operator, "hi".to_string()));
+        screen.push_message(ChatMessage::new(
+            TranscriptRole::Assistant,
+            "hello".to_string(),
+        ));
+        // Same provider, other model: nothing to disclose.
+        screen.set_selection("home/llama");
+        assert_eq!(screen.messages().len(), 2);
+        screen.set_selection("anthropic/claude-sonnet-4-5");
+        let notice = screen.messages().last().unwrap();
+        assert_eq!(notice.role, TranscriptRole::Notice);
+        assert_eq!(
+            notice.text,
+            "switched provider from home to anthropic: the 2 messages above will be sent to anthropic with your next message"
+        );
+        assert_eq!(screen.selection.gateway, "anthropic");
     }
 
     #[test]

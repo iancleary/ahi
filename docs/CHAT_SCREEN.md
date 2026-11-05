@@ -54,7 +54,7 @@ Non-quit command submission during an active response preserves the draft; submi
 
 | Command | Action |
 |---|---|
-| `/model` | Reload local settings and reopen the curated model picker, retaining the last valid registry if an edit is invalid. A new selection is written to `<state>/selection` and takes effect for the next message without clearing the transcript. Cancelling the picker keeps the current selection. |
+| `/model` | Reload local settings and reopen the curated model picker, retaining the last valid registry if an edit is invalid. A new selection is written to `<state>/selection` and takes effect for the next message without clearing the transcript. Choosing a model on a different provider while the transcript has messages posts a notice that those messages will go to the new provider with the next message. Cancelling the picker keeps the current selection. |
 | `/login` | Open the shared [OpenAI login view](OPENAI_LOGIN.md), also available in the model and catalog screens. Return to chat after success, failure, or cancellation without changing the active model or clearing the transcript. Like other commands except quit, wait for any active response to finish before applying. |
 | `/gateway` | Enter an inference base URL, preview its discovered catalog, and confirm registration. Opens the discovered gateway's catalog with an immediate registration/cache result. Space curates; Enter on a checked model explicitly uses it. Registration alone leaves the active model and transcript unchanged. Also available in both model screens; see [Gateway discovery](GATEWAY_DISCOVERY.md). |
 | `/thinking <level>` | Set the thinking level. With no argument, show the current level. |

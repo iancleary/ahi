@@ -76,6 +76,16 @@ Discovery through `/gateway` still fetches `/agent/models.json`; a catalog may n
 }
 ```
 
+## Switching providers mid-conversation
+
+`/model` keeps the transcript. If the new selection is on a different provider and the conversation already has messages, the screen posts a notice before anything is sent:
+
+```
+switched provider from home to anthropic: the 12 messages above will be sent to anthropic with your next message
+```
+
+The notice is informational, not a prompt: the operator chose the provider deliberately, and nothing leaves the machine until the next message. Switching models within one provider posts nothing. Provider-native replay items (Responses reasoning items, Anthropic thinking blocks) are dropped when the history reaches another protocol.
+
 ## Errors
 
 `ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). Authentication failures on every path are `Auth`; policy denials and the disabled-tools boundary are `Policy`; byte, count, and round limits are `Limit`. The chat screen still shows the message text; the kind is for callers that decide what to do next.
