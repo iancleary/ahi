@@ -36,7 +36,7 @@ OpenAI always shows an implicit picker group because its login lives inside ahi.
 
 ### D7. Typed error kinds, minimal
 
-`Error` gained an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). Only the auth paths set a kind today; the chat screen uses it to append a `/login` hint. Full retry policy by kind is future work.
+`Error` gained an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). The auth, transport, protocol, limit, and policy paths in the harness and backend set it. `ResponseEvent::Failed` still carries only the message text, so the chat screen does not yet act on the kind; a first attempt to append a `/login` hint was dropped because it would have misdirected gateway users. Carrying the kind to the screen and deciding retries by kind is future work.
 
 ### D8. Transcript layout is incremental, not cached
 
@@ -46,6 +46,41 @@ OpenAI always shows an implicit picker group because its login lives inside ahi.
 
 "Delete all caches" was read as direction, not as an instruction to remove `<state>/catalogs/*.json`. Those files are what makes `ahi tui` work offline. The defect was reading them once per model per load; they are now read once per provider.
 
+### D10. Browser-token Responses keeps its restricted request profile
+
+Pi omits `max_output_tokens` and sampling fields for Sign in with ChatGPT. That restriction is now a property of the credential (`CompletionConnection::browser_token`), not of the Responses protocol, so a gateway speaking Responses receives the output budget. The two protocol-neutral limits (`REQUEST_CAP`, `inputLimits.maxRequestBytes`) apply to every protocol before any network use.
+
+### D11. Session grants bind to the destination URL
+
+Codex pointed out that a grant keyed on the gateway id survives reconfiguring that id to a new `baseUrl`. Grants now also record the resolved inference URL; a moved gateway asks again. The grant test fixture was rewritten to serve every turn from one loopback destination, with an explicit moved-destination case.
+
 ## Codex review
 
-Filled in after each Codex pass. See below.
+GPT-6-Astra ran twice through the Codex CLI, read-only (`codex exec -m gpt-6-astra -s read-only`), with the same "work to completion, state assumptions instead of asking" guidance the owner gave the implementer. The first prompt briefed it with file paths and three questions, not with conclusions, and asked it to disagree with the docs where warranted.
+
+### Pass 1: the original tree
+
+Adopted, beyond the implementer's own list:
+
+- **Mixed-policy cancellation** (`tool_loop.rs`): a dropped reply left rule-approved calls in the same batch runnable. Now every undecided and approved call in a cancelled batch is denied with `approval cancelled`; `a_cancelled_approval_runs_no_call_in_a_mixed_batch` covers it.
+- **256 KiB was a threshold, not a cap**: only successful content was charged, after the fact. Every outcome is now charged and over-budget content is cut; `the_turn_output_bound_is_a_cap_including_diagnostics` covers it.
+- **Two synchronous `git status` runs per tool call** on the UI thread: `ToolResult` no longer refreshes; `ToolCallReturned` marks the location dirty and `poll_backend` refreshes once per drained batch.
+- **ureq closes connections with unread bytes**, so a retained agent alone would not have restored pooling: the SSE reader drains a bounded remainder after a terminal event.
+- **Grants keyed on the gateway string** (D11).
+- **Protocol extensibility blocked in configuration and discovery, not just dispatch**: `api` is parsed into `Protocol` at load, catalogs carry it, registration saves it, the legacy `openai` spelling is handled once in `check_entry`/`completion_connection`.
+- **Browser-token restrictions are a credential profile, not a Responses property** (D10).
+- **Request ownership**: `submit` moves the request into the worker; the loop appends tool exchanges to that history instead of cloning it again.
+- **Draw wrapped the transcript twice** (`clamp_scroll` then `wrapped_lines`): both now read one synced layout.
+
+Noted, not done in this branch:
+
+- A `CompletionHandle` with real cancellation of blocked HTTP reads. Agreed that an atomic flag checked between reads is insufficient; this needs a socket-level abort and is left as the next item.
+- A full `TurnConfiguration` snapshot and an explicit history-disclosure policy on provider switch. The transcript still follows the operator across `/model`; disclosure of earlier tool results to a different provider is a product decision for the owner.
+- Carrying `ErrorKind` to the screen (D7).
+- Codex's assessment that the `AssistantTurn` proposal in `docs/TOOL_CALLS.md` permits contradictory states (failed termination plus executable requests) and should be a validated completed-turn type. Recorded for the roadmap; the proposal text was not rewritten.
+
+Codex also corrected the brief: configuration and policy load once per turn, not per tool round; replay keeps matched calls rather than dropping whole batches, so the docs' "incomplete exchanges are dropped" was too broad (now reworded); and the roadmap's claim that only an echo backend exists is stale.
+
+### Pass 2: the finished branch
+
+Pending; appended below when it completes.
