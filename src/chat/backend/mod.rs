@@ -93,6 +93,10 @@ pub(crate) enum ResponseEvent {
 /// Completes one turn without blocking the screen.
 pub(crate) trait CompletionBackend {
     fn submit(&mut self, request: ChatRequest) -> Receiver<ResponseEvent>;
+    /// Stop the active turn: no further request, tool round, or stream read
+    /// proceeds, and the connection is dropped at the next read. The screen
+    /// drops the receiver as well, so the turn's final event goes nowhere.
+    fn cancel(&mut self) {}
 }
 
 /// One call awaiting the operator, described by its prepared (normalized)

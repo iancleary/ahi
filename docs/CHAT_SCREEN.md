@@ -43,7 +43,7 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 | `Ctrl+T` | Cycle the thinking level. |
 | `Ctrl+C` | Clear the input if it is not empty. Otherwise exit. |
 | `Ctrl+D` | Exit when the input is empty. |
-| `Esc` | Dismiss Commands while retaining the chat draft, or clear transcript selection. It does not currently cancel an upstream model request. During a tool approval with a blank input, deny the remaining calls. |
+| `Esc` | Dismiss Commands while retaining the chat draft, or clear transcript selection. With neither open, cancel the streaming response: the partial reply stays in the transcript and is sent with the next message, an assistant turn that received no text is removed, and a highlighted notice records the cancellation. During a tool approval with a blank input, deny the remaining calls. |
 | `y`, `s`, `n`, `a` | Only during a tool approval with a blank input: approve once, approve for the session under the shown directory, deny, or approve the remaining calls. Any other key edits the draft as usual, so `/quit` still works. |
 
 ## Commands
@@ -92,10 +92,13 @@ pub enum ResponseEvent {
 
 pub trait CompletionBackend {
     fn submit(&mut self, request: ChatRequest) -> std::sync::mpsc::Receiver<ResponseEvent>;
+    fn cancel(&mut self) {}                   // stop the active turn
 }
 ```
 
 The screen drains the receiver on each frame tick (about 50 ms), so the user interface never blocks on the backend. No async runtime is added.
+
+**Cancellation:** `Esc` calls `cancel` and drops the receiver, so the screen is free at once. The worker checks the flag before each request, before each tool round, and around every read of the response body; bytes that arrive after the cancel are discarded, the stream ends with an error the screen never sees, and dropping the reader closes the connection, which is the only cancellation signal these APIs accept. A read blocked on a silent server returns when its next bytes arrive or the 120-second request deadline passes; closing earlier would not save tokens, since a server that is not writing cannot notice a closed socket until it writes. Rows the screen adds for itself (`Notice`, `Alert`) are never sent to a model.
 
 **Tool-return hook:** the backend emits `ResponseEvent::ToolCallReturned` after every tool call returns (success, error, or denial), right after its `ToolResult` and before resuming the assistant response. Its handler reads the current directory/Git HEAD and worktree counts, compares them with the screen's stored snapshot, and updates changed values for the next redraw. It does not end the response or clear the transcript. Location/status are also refreshed at chat load and on normal message submission, not polled on frame ticks. HEAD is read directly; file counts use local `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z --untracked-files=all`. This reads the worktree without optional index writes or network requests. Parsing uses NUL-delimited bytes so spaces, newlines, non-UTF-8 names, renames, and conflicts are counted correctly. Ahead/behind, stash counts, and in-progress Git actions are not displayed yet. The builtin tools are read-only, so a tool-driven branch change is not yet exercised; that integration test arrives with the first writing tool.
 
@@ -183,7 +186,7 @@ That was the original screen-development baseline, not current production behavi
 
 - OpenAI Responses is implemented and verified with local HTTP fixtures; live browser-token inference acceptance was not checked in this implementation.
 - Token counts are consumed when reported. Capacity and cost remain unknown without authoritative metadata. Without a tokenizer, context capacity is displayed, not an exact preflight token-budget guarantee.
-- Reliable upstream cancellation, per-model reasoning-effort maps, image input, and native Responses reasoning/tool-result history remain future work. Gateway builtin exchanges replay in memory.
+- Cancellation closes the connection at the next read; a provider that keeps generating after a client disconnect is outside ahi's control. Per-model reasoning-effort maps and image input remain future work. Gateway builtin exchanges replay in memory.
 - The transcript, including gateway tool exchanges, is not persisted and is lost on exit. Session grants last for the process only.
 - Gateway tools run in process with software path checks, not an OS sandbox. Other sandbox profiles are refused. OpenAI tool execution remains disabled.
 

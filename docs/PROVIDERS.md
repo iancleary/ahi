@@ -88,4 +88,14 @@ The notice is informational, not a prompt: the operator chose the provider delib
 
 ## Errors
 
-`ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). Authentication failures on every path are `Auth`; policy denials and the disabled-tools boundary are `Policy`; byte, count, and round limits are `Limit`. The chat screen still shows the message text; the kind is for callers that decide what to do next.
+`ahi::Error` carries an `ErrorKind` (`Auth`, `Policy`, `Transport`, `Protocol`, `Limit`, `Other`). Authentication failures on every path are `Auth`; policy denials and the disabled-tools boundary are `Policy`; byte, count, and round limits are `Limit`. The chat screen still shows the message text as a highlighted alert; the kind is not yet carried to it.
+
+**Planned use of the kind (decided 2026-11-05, not yet built).** The kind reaches the screen together with the first behaviour that needs it, and three are wanted:
+
+| Kind | Screen behaviour |
+| --- | --- |
+| `Transport` | Reconnection attempts when a gateway cannot be reached: bounded retries with backoff before the request is sent, never after content has streamed, and an `Enter` resubmits the same message without retyping. |
+| `Auth` | A next-step hint that depends on the connection's credential scheme, derived where the connection is resolved (browser login, API key, gateway headers), never from the kind alone. |
+| `Limit` | Say which bound was hit (request bytes, stream bytes, tool budget, tool rounds) and suggest `/clear` or a smaller message when the request cap is the cause. |
+
+Until then `ResponseEvent::Failed` carries only the message text.

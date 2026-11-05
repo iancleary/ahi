@@ -115,7 +115,7 @@ fn input(messages: &[ChatMessage]) -> Vec<Value> {
                     }));
                 }
             }
-            TranscriptRole::Tool { .. } | TranscriptRole::Notice => {}
+            TranscriptRole::Tool { .. } | TranscriptRole::Notice | TranscriptRole::Alert => {}
         }
     }
     items

@@ -129,7 +129,7 @@ pub(super) fn messages(messages: &[ChatMessage], compat: &CompletionCompatibilit
                     output.push(value);
                 }
             }
-            TranscriptRole::Tool { .. } | TranscriptRole::Notice => {}
+            TranscriptRole::Tool { .. } | TranscriptRole::Notice | TranscriptRole::Alert => {}
         }
     }
     output

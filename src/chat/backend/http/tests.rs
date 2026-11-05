@@ -189,7 +189,14 @@ fn responses_fixture_with_refresh(
     )
     .unwrap();
     let (sender, receiver) = mpsc::channel();
-    let result = decode(Protocol::OpenAiResponses, &metadata, response, &sender);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = decode(
+        Protocol::OpenAiResponses,
+        &metadata,
+        response,
+        &sender,
+        &cancel,
+    );
     let events = receiver.try_iter().collect();
     let received = server.join().unwrap();
     if let Some((_, token_server)) = token_server {
@@ -944,6 +951,96 @@ fn calls_stream(calls: &[(&str, &str, serde_json::Value)]) -> String {
         })
         .collect();
     stream(&tool_stream(&[json!(deltas)], "tool_calls"))
+}
+
+#[test]
+fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let delta = |text: &str| {
+            format!(
+                "data: {}\n\n",
+                json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]})
+            )
+        };
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.write_all(delta("partial").as_bytes()).unwrap();
+        // The client cancels while this read is blocked; the next bytes are
+        // what let it notice, and they must not reach the transcript.
+        thread::sleep(Duration::from_millis(400));
+        let _ = stream.write_all(delta(" more").as_bytes());
+        let started = std::time::Instant::now();
+        let mut byte = [0u8; 1];
+        let closed = matches!(stream.read(&mut byte), Ok(0) | Err(_));
+        (closed, started.elapsed())
+    });
+    let state = state_for(&url);
+    let mut backend = backend(&state);
+    let receiver = backend.submit(request());
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ResponseEvent::TextDelta(text) => {
+                assert_eq!(text, "partial");
+                break;
+            }
+            ResponseEvent::ContextWindow(_) | ResponseEvent::Usage { .. } => {}
+            other => panic!("unexpected event before the first delta: {other:?}"),
+        }
+    }
+    backend.cancel();
+    let mut events = Vec::new();
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(event) => {
+                let done = matches!(event, ResponseEvent::Completed | ResponseEvent::Failed(_));
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("worker did not stop after cancel"),
+        }
+    }
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::Completed)));
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed(message)) if message == "response cancelled"),
+        "{events:?}"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::TextDelta(text) if text == " more")));
+    let (closed, waited) = server.join().unwrap();
+    assert!(closed, "the client kept the connection open after cancel");
+    assert!(waited < Duration::from_secs(3), "close took {waited:?}");
+    let _ = fs::remove_dir_all(state);
 }
 
 fn text_stream(text: &str) -> String {

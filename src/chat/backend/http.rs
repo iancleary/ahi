@@ -5,8 +5,11 @@
 //! decides and executes; `harness` resolves destinations and credentials. No
 //! automatic retry of generation, and no redirect following.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::protocol::{self, RequestContext, StreamOutcome};
@@ -28,6 +31,8 @@ pub(crate) struct HttpBackend {
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
     agent: ureq::Agent,
+    /// The active turn's cancel flag; `submit` replaces it, `cancel` sets it.
+    cancel: Arc<AtomicBool>,
 }
 
 impl HttpBackend {
@@ -40,6 +45,7 @@ impl HttpBackend {
                 .redirects(0)
                 .timeout(Duration::from_secs(120))
                 .build(),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -59,6 +65,8 @@ impl CompletionBackend for HttpBackend {
         let workspace = self.workspace.clone();
         let grants = self.grants.clone();
         let agent = self.agent.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = Arc::clone(&cancel);
         std::thread::spawn(move || {
             let workspace = workspace.or_else(|| std::env::current_dir().ok());
             let result = complete(
@@ -68,14 +76,58 @@ impl CompletionBackend for HttpBackend {
                 &agent,
                 request,
                 &sender,
+                &cancel,
             );
             let event = match result {
                 Ok(()) => ResponseEvent::Completed,
+                // Any failure after a cancel is the cancel: the dropped
+                // connection or the checkpoint, never a provider fault.
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    ResponseEvent::Failed("response cancelled".to_string())
+                }
                 Err(error) => ResponseEvent::Failed(error.to_string()),
             };
             let _ = sender.send(event);
         });
         receiver
+    }
+
+    fn cancel(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The response body, read until the turn is cancelled. A read blocked on a
+/// silent server returns when its next bytes arrive or the request deadline
+/// passes; the error then ends the stream and dropping the reader closes the
+/// connection, which is the only cancellation signal these APIs accept.
+struct CancelReader<R> {
+    inner: R,
+    cancel: Arc<AtomicBool>,
+}
+
+impl<R: Read> Read for CancelReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let aborted =
+            || std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "response cancelled");
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(aborted());
+        }
+        let read = self.inner.read(buf)?;
+        // Bytes that arrive after the cancel are not parsed: nothing from the
+        // abandoned turn reaches the transcript.
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(aborted());
+        }
+        Ok(read)
+    }
+}
+
+fn cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        Err(Error::new("response cancelled"))
+    } else {
+        Ok(())
     }
 }
 
@@ -86,6 +138,7 @@ fn complete(
     agent: &ureq::Agent,
     request: ChatRequest,
     sender: &Sender<ResponseEvent>,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
     let connection = crate::harness::completion_connection(
         state,
@@ -125,8 +178,9 @@ fn complete(
             connection.browser_token(),
         );
         let body = protocol::request_body(connection.protocol, &context)?;
+        cancelled(cancel)?;
         let response = send(agent, state, &connection, &body)?;
-        let outcome = decode(connection.protocol, metadata, response, sender)?;
+        let outcome = decode(connection.protocol, metadata, response, sender, cancel)?;
         match outcome {
             StreamOutcome::Stopped => return Ok(()),
             StreamOutcome::ToolCalls {
@@ -147,6 +201,7 @@ fn complete(
                         crate::actions::FILE_NAME
                     )));
                 };
+                cancelled(cancel)?;
                 let results = tools.run_round(&calls, sender)?;
                 let mut assistant = ChatMessage::new(TranscriptRole::Assistant, text);
                 assistant.tool = Some(ToolPayload::Calls { calls, native });
@@ -204,6 +259,7 @@ fn decode(
     metadata: &crate::harness::ModelMetadata,
     response: ureq::Response,
     sender: &Sender<ResponseEvent>,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<StreamOutcome> {
     let status = response.status();
     let media_type = media_type_category(response.header("Content-Type"));
@@ -215,7 +271,11 @@ fn decode(
     if protocol::requires_event_stream_type(protocol) && media_type != "text/event-stream" {
         return Err(Error::protocol("model response must be text/event-stream"));
     }
-    protocol::read_stream(protocol, response.into_reader(), sender, metadata).map_err(|error| {
+    let reader = CancelReader {
+        inner: response.into_reader(),
+        cancel: Arc::clone(cancel),
+    };
+    protocol::read_stream(protocol, reader, sender, metadata).map_err(|error| {
         // Content-Type is not an acceptance gate for framing-validated
         // protocols, but it is the most useful diagnostic when framing fails.
         if protocol == Protocol::OpenAiCompletions {

@@ -61,5 +61,16 @@ pub(crate) enum TranscriptRole {
     Operator,
     Assistant,
     Notice,
-    Tool { exit_code: i32 },
+    /// A notice about an interrupted or failed operation, drawn highlighted.
+    Alert,
+    Tool {
+        exit_code: i32,
+    },
+}
+
+impl TranscriptRole {
+    /// Screen-only rows: never sent to a model.
+    pub(crate) fn is_notice(self) -> bool {
+        matches!(self, Self::Notice | Self::Alert)
+    }
 }

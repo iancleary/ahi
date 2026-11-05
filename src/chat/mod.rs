@@ -212,7 +212,7 @@ impl ChatScreen {
             let carried = self
                 .messages
                 .iter()
-                .filter(|message| message.role != TranscriptRole::Notice)
+                .filter(|message| !message.role.is_notice())
                 .count();
             if carried > 0 {
                 self.push_notice(format!(
@@ -395,7 +395,7 @@ impl ChatScreen {
                     }
                     self.input.clear();
                     self.settings_menu.reset();
-                    return self.dispatch_command(command);
+                    return self.dispatch_command(command, backend);
                 }
                 _ => {}
             }
@@ -403,8 +403,17 @@ impl ChatScreen {
         match action {
             KeyAction::Ignore => Ok(ScreenAction::Continue),
             KeyAction::Cancel => {
-                self.text_selection.clear();
-                self.copy_status = None;
+                // A selection or a pending approval owns Esc first; with
+                // neither, Esc stops the streaming response.
+                if self.response_in_progress
+                    && self.approval.is_none()
+                    && self.text_selection.is_empty()
+                {
+                    self.cancel_response(backend);
+                } else {
+                    self.text_selection.clear();
+                    self.copy_status = None;
+                }
                 Ok(ScreenAction::Continue)
             }
             KeyAction::CopySelection => {
@@ -597,8 +606,10 @@ impl ChatScreen {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             if chunks[1].width < 12 {
                 format!("{spinner} ")
-            } else {
+            } else if chunks[1].width < 48 {
                 format!("{spinner} Working ")
+            } else {
+                format!("{spinner} Working · Esc cancels ")
             }
         } else {
             String::new()
@@ -678,7 +689,7 @@ impl ChatScreen {
         self.input.clear();
         self.settings_menu.reset();
         if text.trim_start().starts_with('/') {
-            return self.dispatch_command(text.trim());
+            return self.dispatch_command(text.trim(), backend);
         }
         self.push_message(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
@@ -689,7 +700,7 @@ impl ChatScreen {
             messages: self
                 .messages
                 .iter()
-                .filter(|message| message.role != TranscriptRole::Notice)
+                .filter(|message| !message.role.is_notice())
                 .cloned()
                 .collect(),
         };
@@ -701,7 +712,11 @@ impl ChatScreen {
         Ok(ScreenAction::Continue)
     }
 
-    fn dispatch_command(&mut self, text: &str) -> Result<ScreenAction> {
+    fn dispatch_command(
+        &mut self,
+        text: &str,
+        backend: &mut dyn CompletionBackend,
+    ) -> Result<ScreenAction> {
         match command::parse(text) {
             ParsedCommand::ReopenModelPicker => Ok(ScreenAction::ReopenModelPicker),
             ParsedCommand::OpenCatalog => Ok(ScreenAction::OpenCatalog),
@@ -709,6 +724,11 @@ impl ChatScreen {
             ParsedCommand::Gateway => Ok(ScreenAction::Gateway),
             ParsedCommand::Exit => Ok(ScreenAction::Exit),
             ParsedCommand::Clear => {
+                // Enter waits for the turn, so this is defensive: a cleared
+                // transcript must never leave a worker streaming into it.
+                if self.response_in_progress {
+                    backend.cancel();
+                }
                 self.messages.clear();
                 self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
@@ -841,7 +861,7 @@ impl ChatScreen {
             }
             ResponseEvent::Failed(message) => {
                 self.approval = None;
-                self.push_notice(message);
+                self.push_alert(message);
                 true
             }
         };
@@ -864,6 +884,47 @@ impl ChatScreen {
 
     fn push_notice(&mut self, text: String) {
         self.push_message(ChatMessage::new(TranscriptRole::Notice, text));
+    }
+
+    fn push_alert(&mut self, text: String) {
+        self.push_message(ChatMessage::new(TranscriptRole::Alert, text));
+    }
+
+    /// Esc during a response. The partial reply stays in the transcript and
+    /// is sent with the next message, as other harnesses do; an assistant
+    /// message that never received text is removed so no provider sees an
+    /// empty turn. The receiver is dropped at once: the worker stops at its
+    /// next read, request, or tool round and closes the connection.
+    fn cancel_response(&mut self, backend: &mut dyn CompletionBackend) {
+        backend.cancel();
+        self.receiver = None;
+        self.response_in_progress = false;
+        self.approval = None;
+        let partial = self.assistant_open
+            && self
+                .messages
+                .last()
+                .is_some_and(|message| message.role == TranscriptRole::Assistant);
+        let kept = if partial {
+            let empty = self
+                .messages
+                .last()
+                .is_some_and(|message| message.text.is_empty() && message.tool.is_none());
+            if empty {
+                self.messages.pop();
+                self.mark_dirty(self.messages.len());
+            }
+            !empty
+        } else {
+            false
+        };
+        self.assistant_open = false;
+        self.push_alert(if kept {
+            "response cancelled; the partial reply above stays in the transcript".to_string()
+        } else {
+            "response cancelled".to_string()
+        });
+        self.scroll_from_bottom = 0;
     }
 
     fn answer_approval(&mut self, answer: approval::ApprovalKey) {
@@ -1051,6 +1112,157 @@ mod tests {
             let _ = sender.send(ResponseEvent::Completed);
             receiver
         }
+    }
+
+    /// A turn that never finishes on its own; the test feeds its events.
+    struct HangingBackend {
+        requests: Vec<ChatRequest>,
+        sender: Option<mpsc::Sender<ResponseEvent>>,
+        cancels: usize,
+    }
+
+    impl CompletionBackend for HangingBackend {
+        fn submit(&mut self, request: ChatRequest) -> Receiver<ResponseEvent> {
+            self.requests.push(request);
+            let (sender, receiver) = mpsc::channel();
+            self.sender = Some(sender);
+            receiver
+        }
+
+        fn cancel(&mut self) {
+            self.cancels += 1;
+        }
+    }
+
+    #[test]
+    fn esc_cancels_a_streaming_response_and_keeps_the_partial_reply() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-cancel");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("explain");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(screen.response_in_progress());
+        let hint = draw_lines(&mut screen, 100, 12);
+        assert!(hint.iter().any(|row| row.contains("Working · Esc cancels")));
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::TextDelta("partial ans".to_string()))
+            .unwrap();
+        screen.poll_backend();
+        assert_eq!(screen.messages().last().unwrap().text, "partial ans");
+
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        assert!(!screen.response_in_progress());
+        assert!(screen.receiver.is_none());
+        let roles: Vec<_> = screen.messages().iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            [
+                TranscriptRole::Operator,
+                TranscriptRole::Assistant,
+                TranscriptRole::Alert
+            ]
+        );
+        assert_eq!(
+            screen.messages().last().unwrap().text,
+            "response cancelled; the partial reply above stays in the transcript"
+        );
+        // Events from the abandoned turn no longer reach the screen.
+        let _ = backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::TextDelta(" more".to_string()));
+        screen.poll_backend();
+        assert_eq!(screen.messages()[1].text, "partial ans");
+        let finished = draw_lines(&mut screen, 100, 12);
+        assert!(!finished.iter().any(|row| row.contains("Working")));
+
+        // The next message carries the partial reply and not the alert.
+        screen.set_input_text("continue");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        let texts: Vec<_> = backend.requests[1]
+            .messages
+            .iter()
+            .map(|m| (m.role, m.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (TranscriptRole::Operator, "explain"),
+                (TranscriptRole::Assistant, "partial ans"),
+                (TranscriptRole::Operator, "continue"),
+            ]
+        );
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn esc_before_any_reply_leaves_no_empty_assistant_turn_and_yields_to_selection() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-cancel-early");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("explain");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        // An assistant message opened by an empty delta is removed again.
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::TextDelta(String::new()))
+            .unwrap();
+        screen.poll_backend();
+        assert_eq!(screen.messages().len(), 2);
+        // A live selection owns the first Esc; the response keeps running.
+        screen
+            .text_selection
+            .begin(0, 0, Rect::new(0, 0, 80, 10), 0, 10);
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 0);
+        assert!(screen.response_in_progress());
+        assert!(screen.text_selection.is_empty());
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        let roles: Vec<_> = screen.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, [TranscriptRole::Operator, TranscriptRole::Alert]);
+        assert_eq!(screen.messages().last().unwrap().text, "response cancelled");
+        // Enter during a response keeps a command draft and cancels nothing;
+        // Esc is the one key that ends the turn.
+        screen.set_input_text("again");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("/clear");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        assert_eq!(screen.input_text(), "/clear");
+        assert!(screen.response_in_progress());
+        let _ = fs::remove_dir_all(state);
     }
 
     fn screen_in(state: &Path) -> ChatScreen {

@@ -30,6 +30,10 @@ impl Selection {
         *self = Self::default();
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.anchor.is_none()
+    }
+
     pub(super) fn begin(&mut self, column: u16, row: u16, area: Rect, start: usize, count: usize) {
         self.clear();
         if !area.contains((column, row).into()) || start + (row - area.y) as usize >= count {

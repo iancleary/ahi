@@ -130,6 +130,7 @@ fn layout_message(rows: &mut Vec<TranscriptRow>, message: &ChatMessage, width: u
         TranscriptRole::Operator => Color::Rgb(30, 45, 60),
         TranscriptRole::Tool { exit_code: 0 } => Color::Rgb(30, 60, 45),
         TranscriptRole::Tool { .. } => Color::Rgb(60, 30, 30),
+        TranscriptRole::Alert => Color::Rgb(70, 50, 20),
         TranscriptRole::Assistant | TranscriptRole::Notice => Color::Reset,
     };
     let style = Style::default().bg(background);
