@@ -1,6 +1,6 @@
 # OpenAI browser-login inference
 
-ahi sends a curated `openai/<model>` chat turn to the public OpenAI **Responses API**. Gateways continue using Chat Completions. This is implemented transport code, not a plan for a future transport. Tool requests are parsed but **execution remains disabled**; see [Tool calls](TOOL_CALLS.md).
+ahi sends a curated `openai/<model>` chat turn to the public OpenAI **Responses API**. Gateways continue using Chat Completions. This is implemented transport code, not a plan for a future transport. OpenAI tool requests are parsed but **execution remains disabled**. Gateway Chat Completions separately supports policy-gated builtin read-only tools; see [Tool calls](TOOL_CALLS.md).
 
 Related contracts: [browser login](OPENAI_LOGIN.md), [gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md), and [chat screen](CHAT_SCREEN.md).
 
@@ -10,7 +10,7 @@ Related contracts: [browser login](OPENAI_LOGIN.md), [gateway model configuratio
 ChatRequest (selection + text history + thinking level)
   → local curation/configuration validation
   → CompletionConnection { CompletionTransport, ModelMetadata }
-      Gateway { url, headers } → existing Chat Completions adapter
+      Gateway { url, headers } → Chat Completions + policy-gated builtin loop
       OpenAiResponses         → pinned Responses adapter
   → request serialization and byte-limit validation
   → credential validation / bounded refresh
@@ -122,4 +122,4 @@ The PTY workflow uses a disposable state directory and tests missing/legacy Open
 - **Interrupted or truncated output:** partial text can remain visible; the turn is failed, not completed. Retry only by an explicit user decision because a network failure may have followed generation.
 - **Unexpected response format:** diagnostics include HTTP status and an allowlisted Content-Type category, never arbitrary header values or raw body text. A non-SSE JSON-like or HTML/markup body is identified from a bounded prefix, not interpreted as a model answer or an upstream error message. Share only this diagnostic when investigating; do not attach credentials or complete responses. The original `OpenAI response must be text/event-stream` gate was reproduced locally with valid SSE labeled `application/json` and removed. This establishes a local false rejection, not the body/header returned by any particular live request.
 
-**Verification boundary:** no live OpenAI call or real credential access was performed for this implementation. Pi source establishes the matching protocol for this OAuth flow; disposable fixtures establish local request/stream/auth behavior. They do not prove that a particular live grant, subscription, model ID, reasoning effort, quota, or account policy currently permits a successful OpenAI conversation. Text history is replayed, but native reasoning signatures and tool-call/result history are not persisted or continued; those are deliberately gated future work described in [Tool calls](TOOL_CALLS.md).
+**Verification boundary:** no live OpenAI call or real credential access was performed for this implementation. Pi source establishes the matching protocol for this OAuth flow; disposable fixtures establish local request/stream/auth behavior. They do not prove that a particular live grant, subscription, model ID, reasoning effort, quota, or account policy currently permits a successful OpenAI conversation. Responses text history is replayed, but native reasoning signatures and Responses tool-call/result history are not persisted or continued; those are deliberately gated future work described in [Tool calls](TOOL_CALLS.md). Gateway builtin exchanges do continue and replay in memory; no transport persists conversations.

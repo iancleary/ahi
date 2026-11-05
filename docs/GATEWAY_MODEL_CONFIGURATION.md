@@ -87,7 +87,7 @@ An absent value means unknown or the documented legacy transport default, not an
 - Enforce a declared `maxRequestBytes` against the actual serialized UTF-8 request before network submission.
 - Apply reasoning effort only when both model reasoning and compatibility support explicitly permit it. Do not send the literal `off` as an OpenAI effort value. Preserve store/developer/tool/thinking-message compatibility flags without inventing workflows that do not exist. If store is sent, it must be false and only when supported.
 - Use reported token usage and complete pricing information for cost calculations; keep unknown costs unknown. Cached input must not be double-counted. Prices use USD per million tokens, following Pi's documented units.
-- Show model names and useful capability/limit metadata in selection/catalog UI. Known context capacity reaches chat's existing context meter. Image metadata does not enable image attachment; tools remain disabled.
+- Show model names and useful capability/limit metadata in selection/catalog UI. Known context capacity reaches chat's existing context meter. Image metadata does not enable image attachment. Tool metadata does not grant execution: gateway builtin tools require local `ahi.actions.yaml` approval, and OpenAI Responses tools remain disabled.
 
 The separately implemented [OpenAI browser-login transport](OPENAI_INFERENCE.md) uses Responses rather than these Chat Completions wire fields. It retains shared metadata/byte limits/accounting but omits browser-token-unsupported output-limit fields, following the inspected Pi adapter.
 
@@ -103,7 +103,7 @@ No live inference requests, credential changes, installations, commits, pushes, 
 
 The cache retains ordered `models` for membership and a `metadata` map for lookup. This is an index plus attached details, not a second model-selection list. An unavailable or old catalog does not populate curated models. Explicit local values overlay cached values field by field, including individual compatibility and price components.
 
-Compatibility fields related to developer messages, tool-result names, assistant insertion, or thinking-block conversion are retained but dormant because those message workflows are not implemented. Assistant text replay can supply an explicitly required empty `reasoning_content`; no reasoning text/signature is invented. Off omits effort rather than promising the provider disables its own default reasoning.
+Developer/thinking-block workflows remain dormant. Gateway builtin replay honors `requiresToolResultName` and `requiresAssistantAfterToolResult` when serializing complete assistant-call/result exchanges; metadata alone never enables the tools. Assistant text replay can supply an explicitly required empty `reasoning_content`; no reasoning text/signature is invented. Off omits effort rather than promising the provider disables its own default reasoning.
 
 For cost, cached input is subtracted from ordinary input before applying its rate. Missing cached counts leave cost unknown unless input and cache-read rates are equal; missing necessary prices or inconsistent cached counts also leave it unknown. The displayed Commands figure is cumulative reported-usage cost, not a billing total. Cache-write pricing is retained but no cache-write usage is fabricated.
 
@@ -122,4 +122,4 @@ Optional captures beneath the chosen directory include `metadata-supplied-review
 - **Changed registered URL:** review local configuration explicitly; rediscovery never silently redirects an existing provider.
 - **Body exceeds `maxRequestBytes`:** shorten/clear history or choose a model with a suitable limit. The rejected body is not submitted.
 - **Unknown capacity/cost:** inspect supplied metadata and reported usage. ahi does not derive a context window from a model name or invent cache counts.
-- **Image/tool flags:** metadata is descriptive; image submission and tool execution remain disabled. See [Tool calls](TOOL_CALLS.md) for the separately gated roadmap.
+- **Image/tool flags:** metadata is descriptive; image submission remains disabled. Gateway builtin tool execution requires explicit local policy, not catalog capabilities; OpenAI execution remains disabled. See [Tool calls](TOOL_CALLS.md) for the implemented subset and future roadmap.
