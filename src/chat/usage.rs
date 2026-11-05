@@ -26,13 +26,18 @@ impl SessionMeters {
         cached_input_tokens: Option<u64>,
         cost_usd: Option<f64>,
     ) {
+        self.cost_usd = match (self.input_tokens, self.cost_usd, cost_usd) {
+            (None, _, cost) => cost,
+            (Some(_), Some(total), Some(cost)) => {
+                let total = total + cost;
+                total.is_finite().then_some(total)
+            }
+            _ => None,
+        };
         add_count(&mut self.input_tokens, input_tokens);
         add_count(&mut self.output_tokens, output_tokens);
         if let Some(cached) = cached_input_tokens {
             add_count(&mut self.cached_input_tokens, cached);
-        }
-        if let Some(cost) = cost_usd {
-            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
         }
         self.context_tokens = Some(input_tokens);
     }

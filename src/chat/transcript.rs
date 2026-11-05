@@ -2,11 +2,39 @@
 
 pub(crate) mod render;
 
+use super::backend::ToolCall;
+
 /// One transcript entry sent to a backend, or a local notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatMessage {
     pub(crate) role: TranscriptRole,
+    /// What the screen shows. For a tool result this is a bounded preview.
     pub(crate) text: String,
+    /// Structured tool exchange replayed to the model on later requests.
+    pub(crate) tool: Option<ToolPayload>,
+}
+
+/// The model-facing half of a tool exchange.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolPayload {
+    /// Calls the assistant requested at the end of this assistant message.
+    Calls(Vec<ToolCall>),
+    /// The `role: "tool"` reply to one call.
+    Result {
+        call_id: String,
+        name: String,
+        content: String,
+    },
+}
+
+impl ChatMessage {
+    pub(crate) fn new(role: TranscriptRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            text: text.into(),
+            tool: None,
+        }
+    }
 }
 
 /// Who produced a transcript line.
@@ -16,31 +44,4 @@ pub(crate) enum TranscriptRole {
     Assistant,
     Notice,
     Tool { exit_code: i32 },
-}
-
-pub(crate) const STAND_IN_NOTE: &str =
-    "stand-in backend: replies and token counts are not from a model";
-
-/// Attach the stand-in note to the only assistant message, when it is a stand-in reply.
-pub(crate) fn attach_stand_in_note(messages: &mut [ChatMessage]) {
-    let assistants = messages
-        .iter()
-        .filter(|message| message.role == TranscriptRole::Assistant)
-        .count();
-    if assistants != 1 {
-        return;
-    }
-    let Some(message) = messages
-        .iter_mut()
-        .rev()
-        .find(|message| message.role == TranscriptRole::Assistant)
-    else {
-        return;
-    };
-    if message.text.starts_with("[stand-in]") && !message.text.contains(STAND_IN_NOTE) {
-        if !message.text.ends_with('\n') {
-            message.text.push('\n');
-        }
-        message.text.push_str(STAND_IN_NOTE);
-    }
 }

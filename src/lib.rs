@@ -4,16 +4,21 @@
 
 #![forbid(unsafe_code)]
 
+mod actions;
 pub mod audit;
 pub mod chat;
 pub mod check;
+mod clipboard;
+mod commands;
 pub mod config;
 pub mod error;
 pub mod filter;
+mod gateway;
 pub mod git;
 pub mod harness;
 pub mod identify;
 mod local_hook;
+mod login;
 pub mod migrate;
 pub mod output;
 mod paths;

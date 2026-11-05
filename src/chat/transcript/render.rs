@@ -1,17 +1,33 @@
-//! Terminal styling, wrapping, and scroll windows for transcript blocks.
+//! Terminal styling, cell-width wrapping, and scroll windows for transcript blocks.
 
 use super::{ChatMessage, TranscriptRole};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(crate) fn wrapped_lines(messages: &[ChatMessage], width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+pub(crate) struct TranscriptRow {
+    /// Original content, without terminal padding.
+    pub(crate) text: String,
+    /// False for a soft wrap, true for an original newline/message boundary.
+    pub(crate) break_after: bool,
+    style: Style,
+}
+
+pub(crate) fn rows(messages: &[ChatMessage], width: usize) -> Vec<TranscriptRow> {
+    let mut rows = Vec::new();
     for message in messages {
-        if !lines.is_empty() {
-            lines.push(Line::default());
+        // A tool-only assistant turn has nothing to show; its results do.
+        if message.text.is_empty() && message.tool.is_some() {
+            continue;
         }
-        // One shared intensity for each tint; terminals cannot alpha-blend.
+        if !rows.is_empty() {
+            rows.push(TranscriptRow {
+                text: String::new(),
+                break_after: true,
+                style: Style::default(),
+            });
+        }
         let background = match message.role {
             TranscriptRole::Operator => Color::Rgb(30, 45, 60),
             TranscriptRole::Tool { exit_code: 0 } => Color::Rgb(30, 60, 45),
@@ -19,18 +35,43 @@ pub(crate) fn wrapped_lines(messages: &[ChatMessage], width: usize) -> Vec<Line<
             TranscriptRole::Assistant | TranscriptRole::Notice => Color::Reset,
         };
         let style = Style::default().bg(background);
-        lines.extend(
-            wrap_plain(&message.text, width)
-                .into_iter()
-                .map(|mut text| {
-                    // Paint the row through its right edge without indenting content.
-                    let padding = width.saturating_sub(text.width());
-                    text.extend(std::iter::repeat_n(' ', padding));
-                    Line::styled(text, style)
-                }),
-        );
+        for paragraph in message.text.split('\n') {
+            let mut text = String::new();
+            let mut cells = 0;
+            for grapheme in paragraph.graphemes(true) {
+                let size = grapheme.width();
+                if cells + size > width.max(1) && !text.is_empty() {
+                    rows.push(TranscriptRow {
+                        text,
+                        break_after: false,
+                        style,
+                    });
+                    text = String::new();
+                    cells = 0;
+                }
+                text.push_str(grapheme);
+                cells += size;
+            }
+            rows.push(TranscriptRow {
+                text,
+                break_after: true,
+                style,
+            });
+        }
     }
-    lines
+    rows
+}
+
+pub(crate) fn wrapped_lines(messages: &[ChatMessage], width: usize) -> Vec<Line<'static>> {
+    rows(messages, width)
+        .into_iter()
+        .map(|row| {
+            let padding = width.saturating_sub(row.text.width());
+            let mut text = row.text;
+            text.extend(std::iter::repeat_n(' ', padding));
+            Line::styled(text, row.style)
+        })
+        .collect()
 }
 
 pub(crate) fn visible_text(
@@ -48,46 +89,4 @@ pub(crate) fn clamp_scroll(scroll_from_bottom: &mut usize, line_count: usize, he
     if *scroll_from_bottom > max_scroll {
         *scroll_from_bottom = max_scroll;
     }
-}
-
-fn wrap_plain(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        if paragraph.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-        lines.extend(wrap_paragraph("", paragraph, width));
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn wrap_paragraph(prefix: &str, paragraph: &str, width: usize) -> Vec<String> {
-    let prefix_len = prefix.chars().count();
-    if width <= prefix_len {
-        return vec![format!("{prefix}{paragraph}")];
-    }
-    let room = width - prefix_len;
-    if paragraph.chars().count() <= room {
-        return vec![format!("{prefix}{paragraph}")];
-    }
-    let mut lines = Vec::new();
-    let chars: Vec<char> = paragraph.chars().collect();
-    let mut offset = 0;
-    let mut first = true;
-    while offset < chars.len() {
-        let end = (offset + room).min(chars.len());
-        let piece: String = chars[offset..end].iter().collect();
-        if first {
-            lines.push(format!("{prefix}{piece}"));
-            first = false;
-        } else {
-            lines.push(format!("{}{piece}", " ".repeat(prefix_len)));
-        }
-        offset = end;
-    }
-    lines
 }

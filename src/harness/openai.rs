@@ -47,6 +47,67 @@ pub(super) fn refresh(state: &Path, base_url: &str) -> Result<Vec<String>> {
 }
 
 fn refresh_at(state: &Path, catalog_url: &str, token_url: &str) -> Result<Vec<String>> {
+    authenticated(state, token_url, |token| fetch_models(catalog_url, token))
+}
+
+pub(crate) fn inference_response(state: &Path, body: &[u8]) -> Result<ureq::Response> {
+    inference_response_at(
+        state,
+        body,
+        "https://api.openai.com/v1/responses",
+        OPENAI_TOKEN,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_inference_response(
+    state: &Path,
+    body: &[u8],
+    inference_url: &str,
+    token_url: &str,
+) -> Result<ureq::Response> {
+    inference_response_at(state, body, inference_url, token_url)
+}
+
+fn inference_response_at(
+    state: &Path,
+    body: &[u8],
+    inference_url: &str,
+    token_url: &str,
+) -> Result<ureq::Response> {
+    let client = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(120))
+        .build();
+    authenticated(state, token_url, |token| {
+        match client
+            .post(inference_url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "text/event-stream")
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_bytes(body)
+        {
+            Ok(response) if response.status() == 200 => Ok(response),
+            Ok(response) => Err(FetchError::Other(status_error(
+                "inference",
+                response.status(),
+            ))),
+            Err(ureq::Error::Status(401, _)) => Err(FetchError::Unauthorized),
+            Err(ureq::Error::Status(status, _)) => {
+                Err(FetchError::Other(status_error("inference", status)))
+            }
+            Err(_) => Err(FetchError::Other(Error::new(
+                "OpenAI inference network, TLS, or timeout error; generation was not retried",
+            ))),
+        }
+    })
+}
+
+fn authenticated<T>(
+    state: &Path,
+    token_url: &str,
+    mut operation: impl FnMut(&str) -> std::result::Result<T, FetchError>,
+) -> Result<T> {
     let mut credential = read_credential(state)?;
     let mut renewed = false;
     if credential.expires_at <= now() {
@@ -54,12 +115,12 @@ fn refresh_at(state: &Path, catalog_url: &str, token_url: &str) -> Result<Vec<St
         write_credential(state, &credential)?;
         renewed = true;
     }
-    match fetch_models(catalog_url, &credential.access_token) {
+    match operation(&credential.access_token) {
         Ok(models) => Ok(models),
         Err(FetchError::Unauthorized) if !renewed => {
             credential = renew_token(token_url, &credential)?;
             write_credential(state, &credential)?;
-            fetch_models(catalog_url, &credential.access_token).map_err(FetchError::into_error)
+            operation(&credential.access_token).map_err(FetchError::into_error)
         }
         Err(error) => Err(error.into_error()),
     }
@@ -435,6 +496,15 @@ fn authorization_from_callback(text: &str, expected_state: &str) -> Result<Autho
     Ok(Authorization { code, client_id })
 }
 
+fn authorization_from_paste(text: &str, expected_state: &str) -> Result<Authorization> {
+    if !text.trim().starts_with(&format!("{OPENAI_REDIRECT}?")) {
+        return Err(Error::new(
+            "paste the full OpenAI callback URL, not a bare code",
+        ));
+    }
+    authorization_from_callback(text, expected_state)
+}
+
 fn bind_callback(port: u16) -> Result<TcpListener> {
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|_| Error::new(format!("OpenAI callback port {port} unavailable; cancel other pending logins or the Codex CLI and retry")))?;
     listener
@@ -529,58 +599,120 @@ fn reply_callback(stream: &mut std::net::TcpStream, status: &str, body: &str) {
     let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n{body}", body.len());
 }
 
+pub(crate) struct OpenAiLogin {
+    state_dir: PathBuf,
+    url: String,
+    oauth_state: String,
+    verifier: String,
+    cancelled: Arc<AtomicBool>,
+    callback: Option<std::thread::JoinHandle<()>>,
+    sender: std::sync::mpsc::Sender<Result<Authorization>>,
+    receiver: std::sync::mpsc::Receiver<Result<Authorization>>,
+}
+
+impl OpenAiLogin {
+    pub(crate) fn start(state: &Path) -> Result<Self> {
+        // Bind before exposing the URL so another session cannot receive this callback.
+        let listener = bind_callback(1455)?;
+        let device = device_id(state)?;
+        let verifier = random_token(32)?;
+        let oauth_state = random_token(32)?;
+        let nonce = random_token(32)?;
+        let url = authorization_url(&verifier, &oauth_state, &nonce, &device);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let callback_cancelled = cancelled.clone();
+        let callback_state = oauth_state.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let callback_sender = sender.clone();
+        let callback = std::thread::spawn(move || {
+            let _ = callback_sender.send(receive_callback(
+                listener,
+                &callback_state,
+                &callback_cancelled,
+            ));
+        });
+        Ok(Self {
+            state_dir: state.to_path_buf(),
+            url,
+            oauth_state,
+            verifier,
+            cancelled,
+            callback: Some(callback),
+            sender,
+            receiver,
+        })
+    }
+
+    pub(crate) fn authorization_url(&self) -> &str {
+        &self.url
+    }
+
+    pub(crate) fn open_browser(&self) {
+        try_open_browser(&self.url);
+    }
+
+    pub(crate) fn submit_callback(&self, text: &str) -> Result<()> {
+        let authorization = authorization_from_paste(text, &self.oauth_state)?;
+        self.sender
+            .send(Ok(authorization))
+            .map_err(|_| Error::new("OpenAI login ended before callback"))
+    }
+
+    pub(crate) fn poll(&mut self) -> Option<Result<()>> {
+        match self.receiver.try_recv() {
+            Ok(authorization) => Some(self.complete(authorization)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err(Error::new("OpenAI login ended before callback")))
+            }
+        }
+    }
+
+    fn stop_callback(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(callback) = self.callback.take() {
+            let _ = callback.join();
+        }
+    }
+
+    fn complete(&mut self, authorization: Result<Authorization>) -> Result<()> {
+        self.stop_callback();
+        let credential = exchange_code(OPENAI_TOKEN, &authorization?, &self.verifier)?;
+        write_credential(&self.state_dir, &credential)
+    }
+}
+
+impl Drop for OpenAiLogin {
+    fn drop(&mut self) {
+        self.stop_callback();
+    }
+}
+
 pub(super) fn login(state: &Path) -> Result<()> {
-    // Bind before presenting/opening the browser. A port conflict must not send
-    // this login's callback to a different session holding port 1455.
-    let listener = bind_callback(1455)?;
-    let device = device_id(state)?;
-    let verifier = random_token(32)?;
-    let oauth_state = random_token(32)?;
-    let nonce = random_token(32)?;
-    let url = authorization_url(&verifier, &oauth_state, &nonce, &device);
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let callback_cancelled = cancelled.clone();
-    let callback_state = oauth_state.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let callback_tx = tx.clone();
-    let callback = std::thread::spawn(move || {
-        let _ = callback_tx.send(receive_callback(
-            listener,
-            &callback_state,
-            &callback_cancelled,
-        ));
-    });
-    eprintln!("{url}");
-    try_open_browser(&url);
+    let mut login = OpenAiLogin::start(state)?;
+    eprintln!("{}", login.authorization_url());
+    login.open_browser();
     eprintln!("Complete browser login, or paste the full final callback URL and press enter.");
+    let sender = login.sender.clone();
+    let oauth_state = login.oauth_state.clone();
     std::thread::spawn(move || {
         let mut line = String::new();
         match std::io::stdin().read_line(&mut line) {
             // A closed stdin (or an empty line) must not cancel browser login.
             Ok(_) if line.trim().is_empty() => {}
             Ok(_) => {
-                let result = if line.trim().starts_with(&format!("{OPENAI_REDIRECT}?")) {
-                    authorization_from_callback(&line, &oauth_state)
-                } else {
-                    Err(Error::new(
-                        "paste the full OpenAI callback URL, not a bare code",
-                    ))
-                };
-                let _ = tx.send(result);
+                let _ = sender.send(authorization_from_paste(&line, &oauth_state));
             }
             Err(_) => {
-                let _ = tx.send(Err(Error::new("cannot read OpenAI login paste")));
+                let _ = sender.send(Err(Error::new("cannot read OpenAI login paste")));
             }
         }
     });
-    let authorization = rx
+    let authorization = login
+        .receiver
         .recv()
-        .map_err(|_| Error::new("OpenAI login ended before callback"));
-    cancelled.store(true, Ordering::Relaxed);
-    let _ = callback.join();
-    let authorization = authorization??;
-    let credential = exchange_code(OPENAI_TOKEN, &authorization, &verifier)?;
-    write_credential(state, &credential)
+        .map_err(|_| Error::new("OpenAI login ended before callback"))?;
+    login.complete(authorization)
 }
 
 fn exchange_code(url: &str, authorization: &Authorization, verifier: &str) -> Result<Credential> {
@@ -983,6 +1115,7 @@ mod tests {
 
     #[test]
     fn unauthorized_refreshes_once_rotates_and_retries_using_dynamic_client() {
+        verify_inference_authentication();
         let dir = credential_dir();
         let (url, requests) = server(vec![
             ("401 Unauthorized", "private response".into()),
@@ -1011,6 +1144,95 @@ mod tests {
             "rotated-secret"
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn verify_inference_authentication() {
+        for expired in [false, true] {
+            for final_status in ["200 OK", "401 Unauthorized"] {
+                let dir = credential_dir();
+                if expired {
+                    let mut credential = read_credential(&dir).unwrap();
+                    credential.expires_at = now() - 1;
+                    write_credential(&dir, &credential).unwrap();
+                }
+                let mut replies = vec![];
+                if !expired {
+                    replies.push(("401 Unauthorized", "private upstream text".into()));
+                }
+                replies.extend([
+                    ("200 OK", TOKEN.into()),
+                    (final_status, "fixture body".into()),
+                ]);
+                let (url, requests) = server(replies);
+                let result = inference_response_at(
+                    &dir,
+                    b"{\"store\":false}",
+                    &format!("{url}/responses"),
+                    &format!("{url}/token"),
+                );
+                if final_status == "200 OK" {
+                    assert_eq!(result.unwrap().status(), 200);
+                } else {
+                    assert_eq!(result.err().unwrap().to_string(), EXPIRED);
+                }
+                let requests = requests.join().unwrap();
+                assert_eq!(requests.len(), if expired { 2 } else { 3 });
+                let token_index = usize::from(!expired);
+                assert!(requests[token_index].starts_with("POST /token"));
+                assert!(requests[token_index].contains("client_id=issued-fixture-client"));
+                assert!(
+                    requests[token_index].contains("resource=https%3A%2F%2Fapi.openai.com%2Fv1")
+                );
+                let inference = &requests[token_index + 1];
+                assert!(inference.starts_with("POST /responses"));
+                assert!(inference.contains("Authorization: Bearer new-secret"));
+                assert!(inference.ends_with("{\"store\":false}"));
+                assert_eq!(
+                    read_credential(&dir).unwrap().refresh_token,
+                    "rotated-secret"
+                );
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
+        for status in ["400 Bad Request", "302 Found", "500 Internal Server Error"] {
+            let dir = credential_dir();
+            let path = dir.join("credentials/openai.json");
+            let before = fs::read(&path).unwrap();
+            let (url, requests) = server(vec![
+                ("401 Unauthorized", "private upstream text".into()),
+                (status, "private upstream text".into()),
+            ]);
+            let error = inference_response_at(
+                &dir,
+                b"{}",
+                &format!("{url}/responses"),
+                &format!("{url}/token"),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(!error.contains("private upstream text"));
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(requests.join().unwrap().len(), 2);
+            fs::remove_dir_all(dir).unwrap();
+        }
+        for status in ["302 Found", "403 Forbidden", "500 Internal Server Error"] {
+            let dir = credential_dir();
+            let before = fs::read(dir.join("credentials/openai.json")).unwrap();
+            let (url, requests) = server(vec![(status, "private upstream text".into())]);
+            let error = inference_response_at(&dir, b"{}", &url, "http://127.0.0.1:1/token")
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(!error.contains("private upstream text"));
+            assert!(error.contains(&status[..3]));
+            assert_eq!(requests.join().unwrap().len(), 1);
+            assert_eq!(
+                fs::read(dir.join("credentials/openai.json")).unwrap(),
+                before
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Line editor for the chat input.
+//! Line editor for chat input and gateway URL entry.
 //!
 //! `key_binding` translates a terminal key into `KeyAction::Edit`. This module
 //! does not read the terminal.

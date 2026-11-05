@@ -1,18 +1,18 @@
 //! Conversation screen shown after the model picker.
 //!
-//! Part 1 draws the screen and answers through `EchoBackend`. That backend
-//! echoes the operator's text and reports synthetic token counts. It does not
-//! call a model and it does not use the network.
+//! Registered gateways stream real model responses through `HttpBackend`.
 //!
 //! Terminal drawing stays in this module. Key codes are translated by
 //! `key_binding` before the screen applies them.
 
+mod approval;
 mod backend;
 mod command;
-mod input;
+pub(crate) mod input;
 mod key_binding;
 mod location;
 mod scroll_navigation;
+mod selection;
 mod status;
 mod thinking;
 mod transcript;
@@ -20,13 +20,14 @@ mod usage;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::commands::{CommandContext, CommandMenu, PickerOutcome};
 use crate::error::{Error, Result};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    MouseEventKind,
+    MouseButton, MouseEventKind,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -34,13 +35,13 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use backend::{
-    parse_selection, ChatRequest, CompletionBackend, EchoBackend, ResponseEvent, Selection,
+    parse_selection, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent, Selection,
 };
 use command::ParsedCommand;
 use input::InputEditor;
 use key_binding::KeyAction;
 use thinking::ThinkingLevel;
-use transcript::{ChatMessage, TranscriptRole};
+use transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use usage::SessionMeters;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
@@ -53,6 +54,15 @@ enum ScreenAction {
     Continue,
     Exit,
     ReopenModelPicker,
+    OpenCatalog,
+    Login,
+    Gateway,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PickerView {
+    Models,
+    Catalog,
 }
 
 /// Why the chat terminal loop returned.
@@ -60,6 +70,9 @@ enum ScreenAction {
 enum SessionEnd {
     Exit,
     ReopenModelPicker,
+    OpenCatalog,
+    Login,
+    Gateway,
 }
 
 /// Screen state, independent of the terminal.
@@ -76,7 +89,14 @@ struct ChatScreen {
     response_in_progress: bool,
     receiver: Option<Receiver<ResponseEvent>>,
     assistant_open: bool,
+    approval: Option<approval::PendingApproval>,
     scroll_navigation: scroll_navigation::ScrollNavigation,
+    mouse_capture: bool,
+    settings_menu: CommandMenu,
+    text_selection: selection::Selection,
+    copy_receiver: Option<Receiver<bool>>,
+    pending_copy: Option<String>,
+    copy_status: Option<(&'static str, Instant)>,
     scroll_from_bottom: usize,
     transcript_area: Rect,
     transcript_width: usize,
@@ -100,7 +120,14 @@ impl ChatScreen {
             response_in_progress: false,
             receiver: None,
             assistant_open: false,
+            approval: None,
             scroll_navigation: scroll_navigation::ScrollNavigation::default(),
+            mouse_capture: true,
+            settings_menu: CommandMenu::default(),
+            text_selection: selection::Selection::default(),
+            copy_receiver: None,
+            pending_copy: None,
+            copy_status: None,
             scroll_from_bottom: 0,
             transcript_area: Rect::default(),
             transcript_width: 80,
@@ -120,7 +147,12 @@ impl ChatScreen {
     }
 
     fn set_selection(&mut self, selection: &str) {
-        self.selection = parse_selection(selection);
+        let selection = parse_selection(selection);
+        if selection != self.selection {
+            self.meters.context_tokens = None;
+            self.meters.context_window = None;
+        }
+        self.selection = selection;
     }
 
     #[cfg(test)]
@@ -158,12 +190,62 @@ impl ChatScreen {
         event: Event,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
+        // In mouse-off mode, native selection belongs to the terminal.
+        // Ignore stale queued mouse reports after switching modes.
+        if !self.mouse_capture && matches!(event, Event::Mouse(_)) {
+            return Ok(ScreenAction::Continue);
+        }
         if let Event::Mouse(mouse) = event {
+            if !self.settings_menu.dismissed
+                && !CommandMenu::matching(&self.input.contents(), CommandContext::Chat).is_empty()
+            {
+                return Ok(ScreenAction::Continue);
+            }
             if let Some(action) = self.scroll_navigation.mouse(mouse) {
+                self.text_selection.clear();
                 return self.apply_action(action, backend);
+            }
+            let rows = transcript::render::rows(&self.messages, self.transcript_width);
+            let start = rows
+                .len()
+                .saturating_sub(self.scroll_from_bottom)
+                .saturating_sub(self.transcript_height);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.text_selection.begin(
+                        mouse.column,
+                        mouse.row,
+                        self.transcript_area,
+                        start,
+                        rows.len(),
+                    );
+                    self.copy_status = None;
+                }
+                MouseEventKind::Drag(MouseButton::Left) => self.text_selection.drag(
+                    mouse.column,
+                    mouse.row,
+                    self.transcript_area,
+                    start,
+                    rows.len(),
+                ),
+                MouseEventKind::Up(MouseButton::Left) if self.text_selection.release() => {
+                    self.copy_selection();
+                }
+                _ => {}
             }
         }
         match event {
+            // Approval keys apply only while the input is blank, so a draft or
+            // `/quit` can still be typed; submission waits for the turn anyway.
+            Event::Key(key) if self.approval.is_some() && self.input.is_blank() => {
+                match key_binding::translate_approval(key) {
+                    Some(answer) => {
+                        self.answer_approval(answer);
+                        Ok(ScreenAction::Continue)
+                    }
+                    None => self.apply_action(key_binding::translate(key), backend),
+                }
+            }
             Event::Key(key) => self.apply_action(key_binding::translate(key), backend),
             Event::Mouse(mouse)
                 if self
@@ -183,6 +265,7 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             Event::Paste(text) => {
+                self.settings_menu.reset();
                 self.input.insert_paste(&text);
                 Ok(ScreenAction::Continue)
             }
@@ -195,8 +278,69 @@ impl ChatScreen {
         action: KeyAction,
         backend: &mut dyn CompletionBackend,
     ) -> Result<ScreenAction> {
+        let text = self.input.contents();
+        if action == KeyAction::Submit
+            && !text.contains('\n')
+            && matches!(command::parse(&text), ParsedCommand::Exit)
+        {
+            self.input.clear();
+            self.settings_menu.reset();
+            return Ok(ScreenAction::Exit);
+        }
+        if !self.settings_menu.dismissed
+            && !CommandMenu::matching(&text, CommandContext::Chat).is_empty()
+        {
+            match action {
+                KeyAction::Edit(input::EditorKey::Up) => {
+                    self.settings_menu.navigate(&text, CommandContext::Chat, -1);
+                    return Ok(ScreenAction::Continue);
+                }
+                KeyAction::Edit(input::EditorKey::Down) => {
+                    self.settings_menu.navigate(&text, CommandContext::Chat, 1);
+                    return Ok(ScreenAction::Continue);
+                }
+                KeyAction::Cancel => {
+                    self.settings_menu.dismissed = true;
+                    return Ok(ScreenAction::Continue);
+                }
+                KeyAction::Submit
+                    if self
+                        .settings_menu
+                        .chosen(&text, CommandContext::Chat)
+                        .is_some()
+                        && (self.settings_menu.navigated
+                            || text == "/"
+                            || matches!(command::parse(&text), ParsedCommand::Unknown { .. })) =>
+                {
+                    // Preserve the draft and active turn, just like typed
+                    // slash commands, until the current response finishes.
+                    let command = self
+                        .settings_menu
+                        .chosen(&text, CommandContext::Chat)
+                        .expect("matched command");
+                    if self.response_in_progress
+                        && !matches!(command::parse(command), ParsedCommand::Exit)
+                    {
+                        return Ok(ScreenAction::Continue);
+                    }
+                    self.input.clear();
+                    self.settings_menu.reset();
+                    return self.dispatch_command(command);
+                }
+                _ => {}
+            }
+        }
         match action {
-            KeyAction::Ignore | KeyAction::Cancel => Ok(ScreenAction::Continue),
+            KeyAction::Ignore => Ok(ScreenAction::Continue),
+            KeyAction::Cancel => {
+                self.text_selection.clear();
+                self.copy_status = None;
+                Ok(ScreenAction::Continue)
+            }
+            KeyAction::CopySelection => {
+                self.copy_selection();
+                Ok(ScreenAction::Continue)
+            }
             KeyAction::Submit => self.submit_input(backend),
             KeyAction::ClearInputOrExit => {
                 if self.input.is_blank() {
@@ -239,9 +383,40 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             KeyAction::Edit(key) => {
+                self.settings_menu.reset();
                 self.input.apply(key, self.transcript_width);
                 Ok(ScreenAction::Continue)
             }
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        let rows = transcript::render::rows(&self.messages, self.transcript_width);
+        if let Some(text) = self.text_selection.text(&rows) {
+            self.pending_copy = Some(text);
+            self.poll_clipboard();
+        }
+    }
+
+    fn poll_clipboard(&mut self) {
+        if let Some(receiver) = &self.copy_receiver {
+            match receiver.try_recv() {
+                Ok(true) => self.copy_status = Some(("Selection copied", Instant::now())),
+                Ok(false) | Err(TryRecvError::Disconnected) => {
+                    self.copy_status =
+                        Some(("Clipboard unavailable; Ctrl+Y retries", Instant::now()))
+                }
+                Err(TryRecvError::Empty) => return,
+            }
+            self.copy_receiver = None;
+        }
+        if let Some(text) = self.pending_copy.take() {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            self.copy_receiver = Some(receiver);
+            self.copy_status = Some(("Copying selection…", Instant::now()));
+            std::thread::spawn(move || {
+                let _ = sender.send(crate::clipboard::copy(&text));
+            });
         }
     }
 
@@ -290,25 +465,49 @@ impl ChatScreen {
             ])
             .split(frame.area());
         self.transcript_area = chunks[0];
+        if self.transcript_width != chunks[0].width as usize {
+            self.text_selection.clear();
+        }
         self.transcript_width = chunks[0].width as usize;
         self.transcript_height = chunks[0].height as usize;
         self.clamp_scroll();
         let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width);
-        let visible = transcript::render::visible_text(
+        let mut visible = transcript::render::visible_text(
             &lines,
             self.transcript_height,
             self.scroll_from_bottom,
         );
+        let visible_start = lines
+            .len()
+            .saturating_sub(self.scroll_from_bottom)
+            .saturating_sub(self.transcript_height);
+        self.text_selection
+            .highlight(&mut visible.lines, visible_start);
         frame.render_widget(Paragraph::new(visible), chunks[0]);
         let max_scroll = lines.len().saturating_sub(self.transcript_height);
-        self.scroll_navigation.draw(
-            frame,
-            chunks[0],
-            self.scroll_from_bottom < max_scroll,
-            self.scroll_from_bottom > 0,
-        );
+        if self.mouse_capture {
+            self.scroll_navigation.draw(
+                frame,
+                chunks[0],
+                self.scroll_from_bottom < max_scroll,
+                self.scroll_from_bottom > 0,
+            );
+        }
 
-        let activity = if self.response_in_progress {
+        let activity = if let Some((status, _)) = self
+            .copy_status
+            .filter(|(_, when)| when.elapsed() < Duration::from_secs(4))
+        {
+            format!("{status} ")
+        } else if let Some(pending) = &self.approval {
+            // Approval keys apply only to a blank input; say so instead of
+            // advertising keys that would edit the draft.
+            if self.input.is_blank() {
+                pending.hint()
+            } else {
+                "Tool approval waiting: clear the draft (Ctrl+C) to answer ".to_string()
+            }
+        } else if self.response_in_progress {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             if chunks[1].width < 12 {
                 format!("{spinner} ")
@@ -359,21 +558,44 @@ impl ChatScreen {
         );
         frame.render_widget(Paragraph::new(location), top[0]);
         frame.render_widget(Paragraph::new(model).alignment(Alignment::Right), top[1]);
+        let usage_cost = self
+            .meters
+            .cost_usd
+            .map(|cost| format!("reported usage ${cost:.6} · "))
+            .unwrap_or_default();
+        let settings_status = format!(
+            " {usage_cost}{}/{} · thinking {} · mouse {} ",
+            self.selection.gateway,
+            self.selection.model,
+            self.thinking.as_str(),
+            if self.mouse_capture { "on" } else { "off" },
+        );
+        self.settings_menu.draw(
+            frame,
+            chunks[0],
+            &self.input.contents(),
+            CommandContext::Chat,
+            &settings_status,
+        );
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
+        // Keep the draft intact until the active turn ends; never launch a second
+        // billed request while discarding the first turn's receiver.
+        if self.response_in_progress {
+            return Ok(ScreenAction::Continue);
+        }
         let text = self.input.contents();
         if text.trim().is_empty() {
             return Ok(ScreenAction::Continue);
         }
         self.input.clear();
-        if !text.contains('\n') && text.trim_start().starts_with('/') {
+        self.settings_menu.reset();
+        if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim());
         }
-        self.messages.push(ChatMessage {
-            role: TranscriptRole::Operator,
-            text,
-        });
+        self.messages
+            .push(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
         self.refresh_location();
         let request = ChatRequest {
@@ -386,6 +608,8 @@ impl ChatScreen {
                 .cloned()
                 .collect(),
         };
+        self.meters.context_tokens = None;
+        self.meters.context_window = None;
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.assistant_open = false;
@@ -395,14 +619,31 @@ impl ChatScreen {
     fn dispatch_command(&mut self, text: &str) -> Result<ScreenAction> {
         match command::parse(text) {
             ParsedCommand::ReopenModelPicker => Ok(ScreenAction::ReopenModelPicker),
+            ParsedCommand::OpenCatalog => Ok(ScreenAction::OpenCatalog),
+            ParsedCommand::Login => Ok(ScreenAction::Login),
+            ParsedCommand::Gateway => Ok(ScreenAction::Gateway),
             ParsedCommand::Exit => Ok(ScreenAction::Exit),
             ParsedCommand::Clear => {
                 self.messages.clear();
+                self.text_selection.clear();
                 self.meters.clear_counts();
                 self.scroll_from_bottom = 0;
                 self.receiver = None;
+                self.approval = None;
                 self.response_in_progress = false;
                 self.assistant_open = false;
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::SetMouse(enabled) => {
+                self.mouse_capture = enabled;
+                self.text_selection.clear();
+                // Clear old pointer coordinates and hit targets across modes.
+                self.scroll_navigation = scroll_navigation::ScrollNavigation::default();
+                self.show_mouse_mode();
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::ShowMouse => {
+                self.show_mouse_mode();
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::ShowThinking => {
@@ -436,15 +677,35 @@ impl ChatScreen {
         let finished = match event {
             ResponseEvent::TextDelta(text) => {
                 if !self.assistant_open {
-                    self.messages.push(ChatMessage {
-                        role: TranscriptRole::Assistant,
-                        text: String::new(),
-                    });
+                    self.messages
+                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
                 }
                 if let Some(message) = self.messages.last_mut() {
                     message.text.push_str(&text);
                 }
+                false
+            }
+            ResponseEvent::ToolCallsRequested(calls) => {
+                // The calls end the assistant message that requested them and
+                // are replayed with their results on later requests.
+                if !self.assistant_open {
+                    self.messages
+                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
+                }
+                if let Some(message) = self.messages.last_mut() {
+                    message.tool = Some(ToolPayload::Calls(calls));
+                }
+                self.assistant_open = false;
+                false
+            }
+            ResponseEvent::ToolApprovalRequested(request) => {
+                self.push_notice(String::new());
+                let pending = approval::PendingApproval::new(request, self.messages.len() - 1);
+                self.messages[pending.notice_index].text = pending.prompt();
+                // Replacing an unanswered approval drops its reply: a denial.
+                self.approval = Some(pending);
+                self.assistant_open = false;
                 false
             }
             ResponseEvent::Usage {
@@ -471,20 +732,30 @@ impl ChatScreen {
                 self.refresh_location();
                 false
             }
-            ResponseEvent::ToolResult { output, exit_code } => {
-                self.messages.push(ChatMessage {
-                    role: TranscriptRole::Tool { exit_code },
-                    text: output,
+            ResponseEvent::ToolResult {
+                call_id,
+                tool,
+                output,
+                content,
+                exit_code,
+            } => {
+                let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
+                message.tool = Some(ToolPayload::Result {
+                    call_id,
+                    name: tool,
+                    content,
                 });
+                self.messages.push(message);
                 self.assistant_open = false;
                 self.refresh_location();
                 false
             }
             ResponseEvent::Completed => {
-                transcript::attach_stand_in_note(&mut self.messages);
+                self.approval = None;
                 true
             }
             ResponseEvent::Failed(message) => {
+                self.approval = None;
                 self.push_notice(message);
                 true
             }
@@ -500,11 +771,34 @@ impl ChatScreen {
         finished
     }
 
-    fn push_notice(&mut self, text: String) {
-        self.messages.push(ChatMessage {
-            role: TranscriptRole::Notice,
-            text,
+    fn show_mouse_mode(&mut self) {
+        self.push_notice(if self.mouse_capture {
+            "mouse on: wheel and jump controls enabled; drag to select/copy, Ctrl+Y copies again".to_string()
+        } else {
+            "mouse off: select/copy text with your terminal; use Page Up/Page Down to scroll, /mouse on for mouse controls".to_string()
         });
+    }
+
+    fn push_notice(&mut self, text: String) {
+        self.messages
+            .push(ChatMessage::new(TranscriptRole::Notice, text));
+    }
+
+    fn answer_approval(&mut self, answer: approval::ApprovalKey) {
+        let Some(pending) = self.approval.as_mut() else {
+            return;
+        };
+        let complete = pending.apply(answer);
+        let prompt = pending.prompt();
+        if let Some(message) = self.messages.get_mut(pending.notice_index) {
+            message.text = prompt;
+        }
+        if complete {
+            if let Some(pending) = self.approval.take() {
+                pending.finish();
+            }
+        }
+        self.scroll_from_bottom = 0;
     }
 
     fn refresh_location(&mut self) {
@@ -526,22 +820,31 @@ impl ChatScreen {
 }
 
 fn rule_line(width: usize) -> String {
-    "─".repeat(width)
+    let hint = "/ commands ";
+    format!(
+        "{}{}",
+        hint.chars().take(width).collect::<String>(),
+        "─".repeat(width.saturating_sub(hint.len()))
+    )
 }
 
 /// Run the chat screen until the operator exits or asks for the model picker.
 pub(crate) fn interact(
     state_dir: &Path,
     selection: &str,
-    mut reopen_picker: impl FnMut() -> Result<Option<String>>,
+    mut reopen_picker: impl FnMut(
+        PickerView,
+        &str,
+        Option<crate::harness::GatewayRegistration>,
+    ) -> Result<PickerOutcome>,
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
-    let mut backend = EchoBackend::new();
+    let mut backend = HttpBackend::new(state_dir.to_path_buf());
     loop {
         let mut terminal =
             ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
         let outcome =
-            crossterm::execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)
+            crossterm::execute!(std::io::stdout(), EnableBracketedPaste, DisableMouseCapture)
                 .map_err(|err| Error::new(format!("enable paste: {err}")))
                 .and_then(|()| session_loop(&mut terminal, &mut screen, &mut backend));
         let cleanup = crossterm::execute!(
@@ -551,11 +854,38 @@ pub(crate) fn interact(
         );
         ratatui::restore();
         cleanup.map_err(|err| Error::new(format!("disable paste: {err}")))?;
-        match outcome? {
+        let outcome = outcome?;
+        match outcome {
             SessionEnd::Exit => return Ok(()),
-            SessionEnd::ReopenModelPicker => {
-                if let Some(next) = reopen_picker()? {
-                    screen.set_selection(&next);
+            SessionEnd::Login => {
+                let notice = match crate::login::run(state_dir) {
+                    Ok(()) => "OpenAI login completed; model selection unchanged".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                screen.push_notice(notice);
+            }
+            SessionEnd::Gateway => match crate::gateway::run(state_dir) {
+                Ok(Some(registration)) => {
+                    screen.push_notice(registration.notice.clone());
+                    let provider = registration.provider_id.clone();
+                    match reopen_picker(PickerView::Catalog, &provider, Some(registration))? {
+                        PickerOutcome::Selected(next) => screen.set_selection(&next),
+                        PickerOutcome::Back => {}
+                        PickerOutcome::Exit => return Ok(()),
+                    }
+                }
+                Ok(None) => screen.push_notice("Gateway discovery cancelled".to_string()),
+                Err(error) => screen.push_notice(error.to_string()),
+            },
+            SessionEnd::ReopenModelPicker | SessionEnd::OpenCatalog => {
+                let view = match outcome {
+                    SessionEnd::OpenCatalog => PickerView::Catalog,
+                    _ => PickerView::Models,
+                };
+                match reopen_picker(view, &screen.selection.gateway, None)? {
+                    PickerOutcome::Selected(next) => screen.set_selection(&next),
+                    PickerOutcome::Back => {}
+                    PickerOutcome::Exit => return Ok(()),
                 }
             }
         }
@@ -565,9 +895,20 @@ pub(crate) fn interact(
 fn session_loop(
     terminal: &mut ratatui::DefaultTerminal,
     screen: &mut ChatScreen,
-    backend: &mut EchoBackend,
+    backend: &mut dyn CompletionBackend,
 ) -> Result<SessionEnd> {
+    // Each terminal entry starts with capture disabled, including picker return.
+    let mut mouse_capture = false;
     loop {
+        if screen.mouse_capture != mouse_capture {
+            if screen.mouse_capture {
+                crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+            } else {
+                crossterm::execute!(std::io::stdout(), DisableMouseCapture)
+            }
+            .map_err(|err| Error::new(format!("mouse mode: {err}")))?;
+            mouse_capture = screen.mouse_capture;
+        }
         terminal
             .draw(|frame| screen.draw(frame))
             .map_err(|err| Error::new(format!("terminal draw: {err}")))?;
@@ -579,8 +920,12 @@ fn session_loop(
                 ScreenAction::ReopenModelPicker => {
                     return Ok(SessionEnd::ReopenModelPicker);
                 }
+                ScreenAction::OpenCatalog => return Ok(SessionEnd::OpenCatalog),
+                ScreenAction::Login => return Ok(SessionEnd::Login),
+                ScreenAction::Gateway => return Ok(SessionEnd::Gateway),
             }
         }
+        screen.poll_clipboard();
         screen.poll_backend();
     }
 }
@@ -588,13 +933,10 @@ fn session_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::transcript::STAND_IN_NOTE;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::fs;
     use std::sync::mpsc::{self, Receiver};
-    use std::thread;
-    use std::time::Duration;
 
     struct RecordingBackend {
         requests: Vec<ChatRequest>,
@@ -717,6 +1059,7 @@ mod tests {
             screen.messages.push(ChatMessage {
                 role: TranscriptRole::Notice,
                 text: text.to_string(),
+                tool: None,
             });
         }
         screen
@@ -738,6 +1081,39 @@ mod tests {
             "high"
         );
         let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn picker_aliases_and_quit_are_local_actions() {
+        let state =
+            crate::fixture_directory::create_unique_fixture_directory("chat-picker-aliases");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        for (command, expected) in [
+            ("/models", ScreenAction::ReopenModelPicker),
+            ("/model", ScreenAction::ReopenModelPicker),
+            ("/catalog", ScreenAction::OpenCatalog),
+        ] {
+            screen.set_input_text(command);
+            assert_eq!(
+                screen
+                    .apply_action(KeyAction::Submit, &mut backend)
+                    .unwrap(),
+                expected
+            );
+        }
+        screen.response_in_progress = true;
+        screen.set_input_text("/quit");
+        assert_eq!(
+            screen
+                .apply_action(KeyAction::Submit, &mut backend)
+                .unwrap(),
+            ScreenAction::Exit
+        );
+        assert!(backend.requests.is_empty());
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
@@ -771,6 +1147,7 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: "kept".to_string(),
+            tool: None,
         });
         screen.meters.input_tokens = Some(12);
         screen.set_input_text("/clear");
@@ -832,10 +1209,12 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: "explain the hook runner".to_string(),
+            tool: None,
         });
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
-        assert!(idle[idle.len() - 2]
+        assert!(idle[idle.len() - 2].starts_with("/ commands "));
+        assert!(idle[idle.len() - 2]["/ commands ".len()..]
             .chars()
             .all(|character| character == '─'));
         assert!(!idle[idle.len() - 3].starts_with('>'));
@@ -951,15 +1330,22 @@ mod tests {
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: "question".into(),
+            tool: None,
         });
         assert!(!screen.apply_event(ResponseEvent::TextDelta("before".into())));
         assert!(!screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "call".into(),
+            tool: "read_file".into(),
+            content: String::new(),
             output: "ok".into(),
             exit_code: 0,
         }));
         assert!(!screen.apply_event(ResponseEvent::TextDelta("after".into())));
         assert!(!screen.apply_event(ResponseEvent::TextDelta(" more".into())));
         assert!(!screen.apply_event(ResponseEvent::ToolResult {
+            call_id: "call".into(),
+            tool: "read_file".into(),
+            content: String::new(),
             output: "failed (exit 2)".into(),
             exit_code: 2,
         }));
@@ -1016,6 +1402,9 @@ mod tests {
             ResponseEvent::TextDelta("new line\n".into()),
             ResponseEvent::TextDelta("x".repeat(125)),
             ResponseEvent::ToolResult {
+                call_id: "call".into(),
+                tool: "read_file".into(),
+                content: String::new(),
                 output: "tool output\nmore output".into(),
                 exit_code: 0,
             },
@@ -1042,10 +1431,196 @@ mod tests {
     }
 
     #[test]
+    fn slash_settings_filter_navigate_and_apply_without_a_model_call() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-settings");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen
+            .apply_action(
+                KeyAction::Edit(input::EditorKey::Character('/')),
+                &mut backend,
+            )
+            .unwrap();
+        let menu = draw_lines(&mut screen, 80, 16).join("\n");
+        assert!(menu.contains("Commands · ↑/↓ select · Enter apply · Esc dismiss"));
+        assert!(menu.contains("Choose model"));
+        assert!(menu.contains("thinking medium · mouse on"));
+        screen.set_input_text("/mouse ");
+        let menu = draw_lines(&mut screen, 80, 16).join("\n");
+        assert!(menu.contains("Native text selection"));
+        assert!(!menu.contains("Choose model"));
+        screen
+            .apply_action(KeyAction::Edit(input::EditorKey::Down), &mut backend)
+            .unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(screen.input_text(), "");
+        assert!(!screen.mouse_capture);
+        assert_eq!(screen.messages.last().unwrap().text,
+            "mouse off: select/copy text with your terminal; use Page Up/Page Down to scroll, /mouse on for mouse controls");
+        assert!(backend.requests.is_empty());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn settings_escape_preserves_input_and_dollar_does_not_open_settings() {
+        let state =
+            crate::fixture_directory::create_unique_fixture_directory("chat-settings-dismiss");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("/");
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(screen.input_text(), "/");
+        assert!(!draw_lines(&mut screen, 80, 16)
+            .join("\n")
+            .contains("Commands ·"));
+        screen
+            .apply_action(
+                KeyAction::Edit(input::EditorKey::Character('m')),
+                &mut backend,
+            )
+            .unwrap();
+        assert!(draw_lines(&mut screen, 80, 16)
+            .join("\n")
+            .contains("Commands ·"));
+        screen.set_input_text("$skill");
+        assert!(!draw_lines(&mut screen, 80, 16)
+            .join("\n")
+            .contains("Commands ·"));
+        assert_eq!(screen.input_text(), "$skill");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn transcript_drag_highlights_text_and_wheel_keeps_the_selection() {
+        use crossterm::event::{KeyModifiers, MouseEvent};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-drag");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage {
+            role: TranscriptRole::Assistant,
+            text: (0..30)
+                .map(|n| format!("line{n:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            tool: None,
+        });
+        screen.set_input_text("keep draft");
+        draw_lines(&mut screen, 40, 12);
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+                &mut backend,
+            )
+            .unwrap();
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Drag(MouseButton::Left), 5, 0),
+                &mut backend,
+            )
+            .unwrap();
+        let rows = transcript::render::rows(&screen.messages, 40);
+        assert_eq!(screen.text_selection.text(&rows).as_deref(), Some("line22"));
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| screen.draw(frame)).unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 0)].bg,
+            Color::Rgb(55, 85, 120)
+        );
+        screen
+            .apply_terminal_event(mouse(MouseEventKind::ScrollUp, 0, 0), &mut backend)
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 3);
+        assert_eq!(screen.text_selection.text(&rows).as_deref(), Some("line22"));
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(screen.text_selection.text(&rows), None);
+        assert_eq!(screen.input_text(), "keep draft");
+        assert!(backend.requests.is_empty());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn mouse_commands_restore_native_selection_and_reenable_controls() {
+        use crossterm::event::{KeyModifiers, MouseEvent};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-mouse-mode");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage {
+            role: TranscriptRole::Operator,
+            text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
+            tool: None,
+        });
+        assert!(draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
+        screen.set_input_text("/mouse off");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(!draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
+        screen.set_input_text("/mouse on");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "mouse on: wheel and jump controls enabled; drag to select/copy, Ctrl+Y copies again"
+        );
+        screen.set_input_text("/mouse off");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(!draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
+        assert_eq!(screen.messages.last().unwrap().text,
+            "mouse off: select/copy text with your terminal; use Page Up/Page Down to scroll, /mouse on for mouse controls");
+        screen.set_input_text("keep draft");
+        screen
+            .apply_terminal_event(
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: 1,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, 0);
+        screen
+            .apply_action(KeyAction::JumpToTop, &mut backend)
+            .unwrap();
+        assert!(draw_lines(&mut screen, 80, 12)[0].starts_with("line 00"));
+        assert_eq!(screen.input_text(), "keep draft");
+        assert!(backend.requests.is_empty());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn jump_controls_hover_click_and_keep_the_draft() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-jumps");
         let mut screen = screen_in(&state);
+        screen.mouse_capture = true;
         let mut backend = RecordingBackend {
             requests: Vec::new(),
         };
@@ -1114,12 +1689,14 @@ mod tests {
 
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-wheel");
         let mut screen = screen_in(&state);
+        screen.mouse_capture = true;
         let mut backend = RecordingBackend {
             requests: Vec::new(),
         };
         screen.messages.push(ChatMessage {
             role: TranscriptRole::Operator,
             text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
+            tool: None,
         });
         screen.set_input_text("my draft");
         let bottom = draw_lines(&mut screen, 60, 12);
@@ -1232,45 +1809,210 @@ mod tests {
     }
 
     #[test]
-    fn echo_backend_streams_usage_then_completion_and_notes_the_first_reply() {
-        let state = crate::fixture_directory::create_unique_fixture_directory("chat-echo");
+    fn tool_requests_attach_to_the_assistant_turn_without_argument_disclosure() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-tool-request");
         let mut screen = screen_in(&state);
-        screen.set_input_text("hello!!!!");
-        let mut live = EchoBackend::new();
-        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while screen.response_in_progress() && std::time::Instant::now() < deadline {
-            screen.poll_backend();
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert!(!screen.response_in_progress());
-        let assistant = screen
-            .messages()
-            .iter()
-            .find(|message| message.role == TranscriptRole::Assistant)
-            .unwrap();
-        assert!(assistant.text.starts_with("[stand-in] hello!!!!"));
-        assert!(assistant.text.contains(STAND_IN_NOTE));
-        assert_eq!(screen.meters().input_tokens, Some(2));
-        assert_eq!(screen.meters().cached_input_tokens, None);
-        assert_eq!(screen.meters().cost_usd, None);
-        assert_eq!(screen.meters().context_window, Some(128_000));
+        let call = backend::ToolCall {
+            id: "call_a".into(),
+            name: "read_file".into(),
+            arguments: serde_json::from_value(serde_json::json!({"path": "private-path"})).unwrap(),
+        };
+        assert!(!screen.apply_event(ResponseEvent::TextDelta("looking".into())));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call.clone()])));
+        assert_eq!(
+            screen.messages,
+            vec![ChatMessage {
+                role: TranscriptRole::Assistant,
+                text: "looking".into(),
+                tool: Some(ToolPayload::Calls(vec![call.clone()])),
+            }]
+        );
+        // A tool-only assistant turn renders nothing; raw arguments never render.
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call])));
+        assert_eq!(screen.messages.len(), 2);
+        let rendered = draw_lines(&mut screen, 40, 12).join("\n");
+        assert!(rendered.contains("looking"));
+        assert!(!rendered.contains("private-path"), "{rendered}");
+        fs::remove_dir_all(state).unwrap();
+    }
 
-        screen.set_input_text("/clear");
-        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
-        screen.set_input_text("again!!!");
-        screen.apply_action(KeyAction::Submit, &mut live).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while screen.response_in_progress() && std::time::Instant::now() < deadline {
-            screen.poll_backend();
-            thread::sleep(Duration::from_millis(5));
-        }
-        let assistant = screen
-            .messages()
+    fn approval(
+        calls: &[(&str, &str)],
+    ) -> (
+        ResponseEvent,
+        std::sync::mpsc::Receiver<Vec<backend::ToolDecision>>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let calls = calls
             .iter()
-            .find(|message| message.role == TranscriptRole::Assistant)
+            .enumerate()
+            .map(|(index, (target, prefix))| backend::ProposedAction {
+                call_id: format!("c{index}"),
+                tool: "read_file".into(),
+                target: target.to_string(),
+                grant_prefix: prefix.to_string(),
+            })
+            .collect();
+        let event = ResponseEvent::ToolApprovalRequested(backend::ApprovalRequest {
+            batch: 7,
+            calls,
+            reply: backend::ApprovalReply::new(7, sender),
+        });
+        (event, receiver)
+    }
+
+    fn press(
+        screen: &mut ChatScreen,
+        backend: &mut RecordingBackend,
+        code: crossterm::event::KeyCode,
+    ) -> ScreenAction {
+        screen
+            .apply_terminal_event(
+                Event::Key(crossterm::event::KeyEvent::new(
+                    code,
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                backend,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn approval_keys_decide_each_call_then_send_once() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-approval");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.response_in_progress = true;
+        let (event, decisions) = approval(&[("src/a.rs", "src"), ("top.rs", ""), ("b", "")]);
+        assert!(!screen.apply_event(event));
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "Tool approval · 3 calls\n› 1. read_file src/a.rs\n  2. read_file top.rs\n  3. read_file b"
+        );
+        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        assert!(
+            hint.contains("Approve read_file? y once · s session under src/"),
+            "{hint}"
+        );
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('s'),
+        );
+        // No whole-workspace session grant: `s` is ignored at the root.
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('s'),
+        );
+        assert!(decisions.try_recv().is_err());
+        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        assert!(!hint.contains("s session"), "{hint}");
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('n'),
+        );
+        assert!(decisions.try_recv().is_err());
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('a'),
+        );
+        assert_eq!(
+            decisions.try_recv().unwrap(),
+            vec![
+                backend::ToolDecision::ApproveForSession,
+                backend::ToolDecision::Deny,
+                backend::ToolDecision::Approve,
+            ]
+        );
+        assert!(screen.approval.is_none());
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "Tool approval · 3 calls\n✓ 1. read_file src/a.rs · approved for session under src/\n✗ 2. read_file top.rs · denied\n✓ 3. read_file b · approved once"
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_draft_bypasses_approval_keys_and_quit_drops_the_reply() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-approval-quit");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.response_in_progress = true;
+        let (event, decisions) = approval(&[("src/a.rs", "src")]);
+        screen.apply_event(event);
+        press(
+            &mut screen,
+            &mut backend,
+            crossterm::event::KeyCode::Char('/'),
+        );
+        for key in "quit".chars() {
+            press(
+                &mut screen,
+                &mut backend,
+                crossterm::event::KeyCode::Char(key),
+            );
+        }
+        assert_eq!(screen.input.contents(), "/quit");
+        assert!(decisions.try_recv().is_err());
+        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        assert!(
+            hint.contains("clear the draft (Ctrl+C) to answer"),
+            "{hint}"
+        );
+        assert_eq!(
+            press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter),
+            ScreenAction::Exit
+        );
+        drop(screen);
+        // The reply was never sent; dropping the screen closes the channel.
+        assert!(matches!(
+            decisions.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_finished_turn_discards_an_unanswered_approval() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-approval-end");
+        let mut screen = screen_in(&state);
+        let (event, decisions) = approval(&[("src/a.rs", "src")]);
+        screen.apply_event(event);
+        assert!(screen.apply_event(ResponseEvent::Failed("ended".into())));
+        assert!(screen.approval.is_none());
+        assert!(matches!(
+            decisions.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn submitting_during_a_turn_preserves_the_draft_and_active_request() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-busy");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("first");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
             .unwrap();
-        assert!(assistant.text.contains(STAND_IN_NOTE));
-        let _ = fs::remove_dir_all(state);
+        screen.set_input_text("next");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(backend.requests[0].messages[0].text, "first");
+        assert_eq!(screen.input.contents(), "next");
+        assert!(screen.response_in_progress());
+        fs::remove_dir_all(state).unwrap();
     }
 }

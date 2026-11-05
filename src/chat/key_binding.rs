@@ -5,6 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::approval::ApprovalKey;
 use super::input::EditorKey;
 
 /// What one key press asks the screen to do.
@@ -24,8 +25,29 @@ pub(crate) enum KeyAction {
     JumpToTop,
     JumpToBottom,
     CycleThinkingLevel,
+    CopySelection,
     Edit(EditorKey),
     Ignore,
+}
+
+/// Keys that answer a pending tool approval. Other keys fall back to
+/// [`translate`], and the screen admits only exit and scrolling actions.
+pub(crate) fn translate_approval(key: KeyEvent) -> Option<ApprovalKey> {
+    if key.kind != KeyEventKind::Press
+        || key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('y' | 'Y') => Some(ApprovalKey::Approve),
+        KeyCode::Char('s' | 'S') => Some(ApprovalKey::ApproveForSession),
+        KeyCode::Char('n' | 'N') => Some(ApprovalKey::Deny),
+        KeyCode::Char('a' | 'A') => Some(ApprovalKey::ApproveRest),
+        KeyCode::Esc => Some(ApprovalKey::DenyRest),
+        _ => None,
+    }
 }
 
 pub(crate) fn translate(key: KeyEvent) -> KeyAction {
@@ -51,6 +73,9 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::CycleThinkingLevel
+        }
+        KeyCode::Char('y' | 'Y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::CopySelection
         }
         KeyCode::Esc => KeyAction::Cancel,
         KeyCode::PageUp => KeyAction::ScrollTowardOlder,

@@ -1,5 +1,6 @@
 //! Explicit models.json edits with optimistic conflict detection and atomic replacement.
 use super::*;
+use std::collections::BTreeSet;
 
 /// Save only this provider's curated IDs/order. The caller replaces its registry
 /// only on success; browsing, refresh, and editor reload never call this writer.
@@ -14,15 +15,7 @@ pub fn save_curated_models(
     if !registry.providers.iter().any(|entry| entry.id == provider) {
         return Err(Error::new(format!("unknown provider `{provider}`")));
     }
-    let check_snapshot = || -> Result<()> {
-        if read_models_bytes(state)? != registry.models_bytes {
-            return Err(Error::new(
-                "models.json changed outside this view; press e to review/reload it before saving",
-            ));
-        }
-        Ok(())
-    };
-    check_snapshot()?;
+    check_snapshot(state, registry)?;
     let mut document: Value = match &registry.models_bytes {
         Some(bytes) => serde_json::from_slice(bytes).map_err(|err| Error::new(err.to_string()))?,
         None => serde_json::json!({"providers": {}}),
@@ -50,12 +43,39 @@ pub fn save_curated_models(
             "unknown provider `{provider}` in models.json"
         )));
     }
+    if provider == OPENAI_ID && !providers.contains_key(provider) {
+        // Materializing the implicit built-in must not move it behind gateways.
+        let mut ordered = serde_json::Map::new();
+        ordered.insert(
+            OPENAI_ID.to_string(),
+            serde_json::json!({
+                "baseUrl": OPENAI_ORIGIN, "api": "openai-completions"
+            }),
+        );
+        ordered.extend(std::mem::take(providers));
+        *providers = ordered;
+    }
     let entry = providers.entry(provider).or_insert_with(|| {
         serde_json::json!({
             "baseUrl": OPENAI_ORIGIN,
             "api": "openai-completions",
         })
     });
+    let retained = entry
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let models = ids
+        .iter()
+        .map(|id| {
+            retained
+                .iter()
+                .find(|model| model.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"id": id}))
+        })
+        .collect();
     entry
         .as_object_mut()
         .ok_or_else(|| {
@@ -66,8 +86,73 @@ pub fn save_curated_models(
         })?
         .insert(
             "models".to_string(),
-            Value::Array(ids.iter().map(|id| serde_json::json!({"id": id})).collect()),
+            Value::Array(models),
         );
+    save_document(state, registry, document)
+}
+
+pub(super) fn check_snapshot(state: &Path, registry: &Registry) -> Result<()> {
+    if read_models_bytes(state)? != registry.models_bytes {
+        return Err(Error::new(
+            "models.json changed outside this view; press e to review/reload it before saving",
+        ));
+    }
+    Ok(())
+}
+
+/// Save provider object order without changing credentials, model lists, or settings.
+pub fn save_provider_order(
+    state: &Path,
+    registry: &Registry,
+    order: &[String],
+) -> Result<Registry> {
+    check_snapshot(state, registry)?;
+    let expected = registry
+        .providers
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let requested = order.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if expected != requested || order.len() != expected.len() {
+        return Err(Error::new(
+            "gateway order must contain each provider exactly once",
+        ));
+    }
+    let mut document: Value = match &registry.models_bytes {
+        Some(bytes) => {
+            serde_json::from_slice(bytes).map_err(|_| Error::new("invalid models.json"))?
+        }
+        None => serde_json::json!({"providers": {}}),
+    };
+    let root = document
+        .as_object_mut()
+        .ok_or_else(|| Error::new("models.json root must be an object to reorder gateways"))?;
+    let providers = root
+        .entry("providers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| Error::new("models.json providers must be an object to reorder gateways"))?;
+    let mut reordered = serde_json::Map::new();
+    for id in order {
+        let entry = match providers.remove(id) {
+            Some(entry) => entry,
+            None if id == OPENAI_ID => serde_json::json!({
+                "baseUrl": OPENAI_ORIGIN, "api": "openai-completions", "models": []
+            }),
+            None => return Err(Error::new("gateway to reorder is missing from models.json")),
+        };
+        reordered.insert(id.clone(), entry);
+    }
+    *providers = reordered;
+    save_document(state, registry, document)
+}
+
+pub(super) fn save_document(
+    state: &Path,
+    registry: &Registry,
+    document: Value,
+) -> Result<Registry> {
+    let path = state.join("models.json");
     let mut bytes = serde_json::to_vec_pretty(&document)
         .map_err(|err| Error::new(format!("models.json serialization: {err}")))?;
     bytes.push(b'\n');
@@ -99,7 +184,7 @@ pub fn save_curated_models(
         drop(output);
         // Check again immediately before replacing, including edits made while
         // preparing the save. External editors do not participate in our lock.
-        check_snapshot()?;
+        check_snapshot(state, registry)?;
         fs::rename(&temp, &path)
             .map_err(|err| Error::new(format!("cannot replace {}: {err}", path.display())))
     })();
@@ -226,9 +311,17 @@ mod tests {
         )
         .unwrap();
         let reloaded = load_registry(&dir).unwrap();
-        assert_eq!(ids(&reloaded, 0), ["new/id"]);
-        assert_eq!(ids(&reloaded, 1), ["vendor/reordered", "vendor/kept"]);
-        assert_eq!(reloaded.providers[1].base_url, "https://gateway.example/v1");
+        assert_eq!(
+            reloaded
+                .providers
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-gateway", "openai"]
+        );
+        assert_eq!(ids(&reloaded, 1), ["new/id"]);
+        assert_eq!(ids(&reloaded, 0), ["vendor/reordered", "vendor/kept"]);
+        assert_eq!(reloaded.providers[0].base_url, "https://gateway.example/v1");
         fs::remove_dir_all(dir).unwrap();
     }
 
