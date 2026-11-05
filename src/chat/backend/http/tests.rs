@@ -591,7 +591,10 @@ fn request() -> ChatRequest {
 }
 
 fn collect(backend: &mut HttpBackend, request: ChatRequest) -> Vec<ResponseEvent> {
-    let receiver = backend.submit(request);
+    collect_events(backend.submit(request))
+}
+
+fn collect_events(receiver: Receiver<ResponseEvent>) -> Vec<ResponseEvent> {
     let mut events = Vec::new();
     loop {
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1096,9 +1099,8 @@ fn an_unreachable_gateway_gets_three_connection_attempts_then_a_transport_failur
         ),
         "{events:?}"
     );
-    // Both pauses were taken (250 ms + 750 ms) and nothing waited on a deadline.
     assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
-    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
     fs::remove_dir_all(state).unwrap();
 }
 
@@ -1106,18 +1108,19 @@ fn an_unreachable_gateway_gets_three_connection_attempts_then_a_transport_failur
 fn a_gateway_that_comes_up_during_the_backoff_serves_the_turn() {
     let (url, port) = unused_port_url();
     let state = state_for(&url);
-    // Nothing listens for the first attempt and the first pause; the
-    // listener appears before the last attempt (at about 1 s).
-    let server = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(450));
-        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        serve_one(&listener, &text_stream("late but here"))
-    });
-    let events = collect(&mut backend(&state), request());
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, ResponseEvent::Reconnecting { .. })));
+    let mut backend = backend(&state);
+    let receiver = backend.submit(request());
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ResponseEvent::Reconnecting {
+            attempt: 2,
+            attempts: 3,
+        }
+    );
+    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || serve_one(&listener, &text_stream("late but here")));
+    let events = collect_events(receiver);
     assert!(events
         .iter()
         .any(|event| matches!(event, ResponseEvent::TextDelta(text) if text == "late but here")));

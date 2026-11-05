@@ -47,6 +47,20 @@ Release notes default to GitHub-generated notes. To use curated notes:
 just cut-release --version 0.1.1 --notes-file path/to/notes.md
 ```
 
+## Gateway retry validation
+
+Before publishing, require successful Linux and Windows CI as well as the local release checks. The real-HTTP retry cases in [`src/chat/backend/http/tests.rs`](../src/chat/backend/http/tests.rs) can be rerun locally with:
+
+```bash
+cargo test --all-features chat::backend::http::tests::an_unreachable_gateway
+cargo test --all-features chat::backend::http::tests::a_gateway_that_comes_up
+cargo test --all-features chat::backend::http::tests::cancelling_during_the_backoff
+```
+
+A connection attempt includes the operating system's TCP failure detection, not just ahi's 250 ms and 750 ms backoff pauses. Windows CI took about seven seconds for three refused connections and both pauses; five seconds is not a portable upper bound for the entire turn. The unreachable-gateway case still requires both reconnect notices, a terminal transport failure, at least 900 ms elapsed, and completion within 15 seconds, well below the client's 120-second request timeout. This is a fixture bound, not a user-facing latency guarantee.
+
+The recovery case waits for `Reconnecting 2/3` before binding its loopback listener, then checks the streamed text and successful completion. Starting the listener after a fixed sleep can let Windows' first TCP attempt succeed without ever exercising recovery. If these cases fail on a hosted runner, inspect its failed test output before publishing; a local POSIX pass does not establish Windows behavior, and rerunning a timing race is not a repair.
+
 ## Binary assets
 
 `.github/workflows/release_binary_assets.yml` builds the tag that was published, or the tag named by `workflow_dispatch` input `release_tag`. It checks out `refs/tags/<tag>` and refuses any other ref. The root `Cargo.toml` version must equal the tag with the leading `v` removed.
