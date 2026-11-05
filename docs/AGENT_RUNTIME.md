@@ -357,7 +357,45 @@ rules:
     effect: deny
 ```
 
-This YAML is a sketch of the contract, not a parser implemented in this change. Names of files and fields are proposals. The examples will be adapted with the contract as the engine is built. The pre-commit rule calls the existing runner. It does not invent a second pre-commit implementation.
+This YAML is a sketch of the contract. The `tool_call` subset is implemented for chat; see [Implemented subset](#implemented-subset-tool_call). Other names and fields are proposals and will be adapted with the contract as the engine is built. The pre-commit rule calls the existing runner. It does not invent a second pre-commit implementation.
+
+### Builtin actions only
+
+ahi is not a package manager, for actions as for hooks. Every tool an agent can call is compiled into the ahi binary, in the same way the checks behind `repo: builtin` are. A rule selects and bounds a builtin action. It cannot name a program to download, an MCP server, a remote tool definition, or a repository to clone. A repository that ships `ahi.actions.yaml` can therefore enable only builtin actions for its own working directory, within the limits each builtin enforces. New tools arrive with new ahi releases.
+
+### Implemented subset (`tool_call`)
+
+Gateway Chat Completions implements `action: tool_call` for the builtin, read-only tools `read_file` and `list_dir`. [Chat screen](CHAT_SCREEN.md#tool-calls) documents the behavior. The schema:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | `1`. Other versions are errors. |
+| `default` | Optional. Only `deny`. |
+| `rules[].id` | 1-64 ASCII letters, digits, `-`, `_`, or `.`; unique. Named in denials. |
+| `rules[].action` | `tool_call`. The other kinds in the table below are errors (`not implemented yet`) until implemented, so a rule never silently does nothing. |
+| `rules[].match.tool` | A builtin tool name. |
+| `rules[].match.path` | Optional workspace-relative prefix, matched by path component. Omitted means the whole working directory. |
+| `rules[].effect` | `approve` or `deny`. |
+| `rules[].ask` | Optional, only with `approve`: prompt the operator. |
+| `rules[].sandbox` | Optional. Only `default` (in process, read-only tools) today. |
+
+The file uses the hardening shared by ahi's YAML configuration: one document, no anchors or aliases, no duplicate keys, unknown fields rejected, errors naming the file. Evaluation order: deny (case-insensitive path match), approve, session grant, ask, then default deny. A session grant is the operator's `s` answer to an `ask` prompt: tool plus a non-empty directory prefix, held in memory for that working directory and gateway. It is not yet a stored record in a conversation store; there is no store. Grants with `bound: once`, `batch`, or `until`, and receipts, arrive with the store.
+
+### Repository configuration
+
+A repository now has up to three ahi-related files, each with one job:
+
+| File | Governs | Read by |
+| --- | --- | --- |
+| `.pre-commit-config.yaml` | Which hooks run on which files | `ahi run`, upstream pre-commit |
+| `ahi.policy.yaml` | Which local `system`/`script` hook programs may run (pinned id and `entry`) | `ahi run` |
+| `ahi.actions.yaml` | Which agent actions may run, and where | `ahi tui` chat today; the coordinator later |
+
+They stay separate files with separate parsers so that a repository that only runs hooks never needs agent policy, and agent policy never changes what `ahi run` executes. Open question for the next phase: whether `pre_commit` actions and the other kinds are best expressed in `ahi.actions.yaml` beside `tool_call`, or the per-repository `ahi.*.yaml` files are consolidated into one versioned document. Either way, rules keep the current shape (`id`, `action`, `match`, `effect`, `ask`, `sandbox`), so existing `tool_call` rules carry over.
+
+### Sandbox direction
+
+`sandbox` is part of the rule now so repository policy can name its containment before stronger profiles exist. The intended progression is the [Sandbox execution](#sandbox-execution) plan: a container or OpenShell-style outer sandbox that contains effect processes, with a rule naming the widened profile it needs (extra paths, network). Until a profile is implemented, naming it is an error, never a silent fallback to in-process execution. The current read-only builtins run in process with software path checks, not OS isolation. They do not establish protection against filesystem races or a compromised process. Stronger containment must precede the first writing or command-running action.
 
 Evaluation:
 

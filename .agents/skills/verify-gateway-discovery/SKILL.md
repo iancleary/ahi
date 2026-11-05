@@ -23,6 +23,8 @@ uv run scripts/smoke-model-picker.py \
   --capture-directory target/terminal-experience-captures
 ```
 
+For sequential integration with OpenAI Responses, keep the builtin loop behind `CompletionTransport::Gateway`; do not transplant gateway tool execution or request fields into Responses. Preserve the Responses real-HTTP fixtures, including incorrect/missing Content-Type, and use the isolated `backend()` workspace helper. Apply `tool: None` to new text-only transcript literals. Run the same commands offline with a dedicated `target/tool-call-integration-verification` directory and retain the full PTY runner, including exact UTF-8 limits and tool approval/denial. Also run rustdoc with `RUSTDOCFLAGS='-D warnings'` and `git diff --check`. See [Tool calls](../../../docs/TOOL_CALLS.md) for the boundary and limits. Replay only the authorized commit range; verify the base and commit count locally, and request explicit approval before any force push. Do not poll CI as a substitute for local verification.
+
 Use the explicit executable path so a stale default build or packaged artifact cannot substitute for the checkout under review. Reuse the maintained runner rather than reconstructing PTY handling or a separate gateway simulator.
 
 Confirm these observable outcomes:
@@ -39,6 +41,7 @@ Confirm these observable outcomes:
 - Invalid metadata, unsupported protocols, redirects, conflicting gateway URLs, and stale configuration do not replace existing state. Paid decimal price metadata is accepted; do not restore the old integer-zero restriction.
 - Actual HTTP requests reflect provider/model overrides, conditional usage/store/reasoning fields, both output-token parameter names, and capped output budgets. Finish inference only occurs at `[DONE]` when explicitly declared; truncation and malformed tool calls still fail.
 - Exact serialized UTF-8 byte boundaries are exercised, and rejected bodies produce no server request. Reported pricing does not double-count cached input; unknown cached counts/prices remain unknown. No paid external inference is involved.
+- Gateway builtin approval reads the disposable file and resumes the model with the correlated result; denial sends a denied result without returning file contents. Session policy and cross-turn replay remain covered by real HTTP fixtures. OpenAI Responses still executes no tools.
 - Same-URL rediscovery preserves configuration bytes and curated IDs.
 - Cancelling a pending fetch cannot cause delayed registration.
 - Catalog persistence failure after configuration registration is reported immediately inside the destination Catalog, including entry from chat; refresh recovery becomes visible there. Do not treat it as an unchanged-state failure.

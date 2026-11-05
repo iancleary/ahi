@@ -728,10 +728,11 @@ def main() -> None:
                 if request["messages"][-1]["content"] == "verify retained context":
                     response_received.set()
                     release_response.wait(timeout=10)
-                response = gateway_response.get("stream", (
+                queued = gateway_response.get("streams")
+                response = (queued.pop(0) if queued else gateway_response.get("stream", (
                     'data: {"choices":[{"index":0,"delta":{"content":"gateway workflow confirmed"},"finish_reason":"stop"}]}\n\n'
                     'data: [DONE]\n\n'
-                )).encode()
+                ))).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(response)))
@@ -1313,10 +1314,87 @@ def main() -> None:
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=5)
+
+        # Tool calls: enabled only by ahi.actions.yaml in the working directory
+        # (never the state directory), approved or denied by the operator.
+        tool_workspace = state / "tool-workspace"
+        (tool_workspace / "src").mkdir(parents=True)
+        (tool_workspace / "src" / "lib.rs").write_text("pub fn tool_fixture() {}\n")
+        (tool_workspace / "ahi.actions.yaml").write_text(
+            "version: 1\ndefault: deny\nrules:\n"
+            "  - id: read-sources\n    action: tool_call\n"
+            "    match: {tool: read_file, path: src}\n"
+            "    effect: approve\n    ask: true\n    sandbox: default\n"
+        )
+
+        def tool_call_stream(call_id: str, path: str) -> str:
+            call = {"index": 0, "id": call_id, "type": "function",
+                    "function": {"name": "read_file", "arguments": json.dumps({"path": path})}}
+            chunk = {"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}]}
+            return "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
+
+        def text_stream(text: str) -> str:
+            chunk = {"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]}
+            return "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        local_provider["baseUrl"] = f"http://127.0.0.1:{server.server_port}/v1"
+        local_provider["models"][0].pop("inputLimits", None)
+        local_path.write_text(json.dumps(local_document))
+        gateway_requests.clear()
+        gateway_response["streams"] = [
+            tool_call_stream("call_1", "src/lib.rs"), text_stream("tool result received"),
+            tool_call_stream("call_2", "src/lib.rs"), text_stream("tool denial received"),
+        ]
+        session = Session(metadata_state, cwd=tool_workspace)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        try:
+            session.expect("Models · Enter use model")
+            session.send("jjj\r")
+            session.expect("(home) GLM-5.3-Flash-EXL3")
+            session.send("verify tool approval\r")
+            session.expect("Tool approval · 1 call")
+            session.expect("› 1. read_file src/lib.rs")
+            session.expect("y once · s session under src/")
+            session.capture("tool-approval-prompt")
+            assert [tool["function"]["name"] for tool in gateway_requests[-1][2]["tools"]] == ["read_file"]
+            assert len(gateway_requests) == 1
+            session.send("y")
+            session.expect("approved once")
+            session.expect("pub fn tool_fixture() {}")
+            session.expect("tool result received")
+            session.absent("Working")
+            followup = gateway_requests[-1][2]["messages"]
+            assert followup[-2]["tool_calls"][0]["id"] == "call_1", followup
+            assert followup[-1] == {"role": "tool", "tool_call_id": "call_1",
+                                    "content": "pub fn tool_fixture() {}\n"}, followup
+            session.capture("tool-approved-result")
+            session.send("verify tool denial\r")
+            session.expect("› 1. read_file src/lib.rs")
+            session.send("n")
+            session.expect("denied by the operator")
+            session.expect("tool denial received")
+            session.absent("Working")
+            replay = gateway_requests[-1][2]["messages"]
+            # The earlier exchange is replayed on the later turn.
+            assert any(message.get("tool_call_id") == "call_1" for message in replay), replay
+            assert replay[-1] == {"role": "tool", "tool_call_id": "call_2",
+                                  "content": "denied: denied by the operator"}, replay
+            assert len(gateway_requests) == 4
+            session.capture("tool-denied-result")
+            session.send("/quit\r")
+            session.finish()
+        finally:
+            session.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
     print(
         "PASS: Pi-shaped catalog onboarding, authoritative /v1 Review and inference, metadata cache/restart/curation, "
         "provider/model overrides, capped output fields, reported paid usage without cached-input double counting, "
         "usage omission, reasoning Off and assistant replay, finish-reason fallback with truncation/tool safety, "
+        "ahi.actions.yaml-gated read_file with operator approve/deny, tool resubmission and cross-turn replay, "
         "exact UTF-8 byte boundaries without rejected HTTP requests, model names/limits/context, "
         "ambiguous/exact/registered provider selection, cross-origin/invalid metadata retention, legacy caches/flat catalogs; "
         "/gateway URL entry/edit/validation, preview/cancel/register, catalog curation, real gateway streaming, "
