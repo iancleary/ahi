@@ -31,7 +31,7 @@ use crossterm::event::{
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
 
 use backend::{
@@ -102,6 +102,11 @@ struct ChatScreen {
     transcript_width: usize,
     transcript_height: usize,
     spinner_frame: usize,
+    /// Wrapped rows, re-laid from `dirty_from` on demand, never per frame.
+    layout: transcript::render::TranscriptLayout,
+    dirty_from: usize,
+    /// A tool returned since the last drain; refresh Git status once per drain.
+    location_dirty: bool,
 }
 
 impl ChatScreen {
@@ -133,6 +138,9 @@ impl ChatScreen {
             transcript_width: 80,
             transcript_height: 1,
             spinner_frame: 0,
+            layout: transcript::render::TranscriptLayout::new(),
+            dirty_from: 0,
+            location_dirty: false,
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -144,6 +152,27 @@ impl ChatScreen {
     #[cfg(test)]
     fn thinking(&self) -> ThinkingLevel {
         self.thinking
+    }
+
+    /// Mark the message at `index` (and everything after it) for re-layout.
+    fn mark_dirty(&mut self, index: usize) {
+        self.dirty_from = self.dirty_from.min(index);
+    }
+
+    fn push_message(&mut self, message: ChatMessage) {
+        self.mark_dirty(self.messages.len());
+        self.messages.push(message);
+    }
+
+    /// Bring the row layout up to date with the transcript and width.
+    fn sync_layout(&mut self) {
+        self.layout
+            .sync(&self.messages, self.transcript_width, &mut self.dirty_from);
+    }
+
+    fn row_count(&mut self) -> usize {
+        self.sync_layout();
+        self.layout.len()
     }
 
     fn set_selection(&mut self, selection: &str) {
@@ -205,9 +234,8 @@ impl ChatScreen {
                 self.text_selection.clear();
                 return self.apply_action(action, backend);
             }
-            let rows = transcript::render::rows(&self.messages, self.transcript_width);
-            let start = rows
-                .len()
+            let count = self.row_count();
+            let start = count
                 .saturating_sub(self.scroll_from_bottom)
                 .saturating_sub(self.transcript_height);
             match mouse.kind {
@@ -217,7 +245,7 @@ impl ChatScreen {
                         mouse.row,
                         self.transcript_area,
                         start,
-                        rows.len(),
+                        count,
                     );
                     self.copy_status = None;
                 }
@@ -226,7 +254,7 @@ impl ChatScreen {
                     mouse.row,
                     self.transcript_area,
                     start,
-                    rows.len(),
+                    count,
                 ),
                 MouseEventKind::Up(MouseButton::Left) if self.text_selection.release() => {
                     self.copy_selection();
@@ -391,8 +419,8 @@ impl ChatScreen {
     }
 
     fn copy_selection(&mut self) {
-        let rows = transcript::render::rows(&self.messages, self.transcript_width);
-        if let Some(text) = self.text_selection.text(&rows) {
+        self.sync_layout();
+        if let Some(text) = self.text_selection.text(self.layout.rows()) {
             self.pending_copy = Some(text);
             self.poll_clipboard();
         }
@@ -421,29 +449,35 @@ impl ChatScreen {
     }
 
     fn poll_backend(&mut self) {
-        let Some(receiver) = self.receiver.take() else {
-            return;
-        };
-        loop {
-            match receiver.try_recv() {
-                Ok(event) => {
-                    let finished = self.apply_event(event);
-                    if finished {
+        if let Some(receiver) = self.receiver.take() {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = self.apply_event(event);
+                        if finished {
+                            self.response_in_progress = false;
+                            self.assistant_open = false;
+                            break;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => {
+                        self.receiver = Some(receiver);
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
                         self.response_in_progress = false;
                         self.assistant_open = false;
-                        return;
+                        break;
                     }
                 }
-                Err(TryRecvError::Empty) => {
-                    self.receiver = Some(receiver);
-                    return;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.response_in_progress = false;
-                    self.assistant_open = false;
-                    return;
-                }
             }
+        }
+        // One Git status per drained batch of tool returns, not one per
+        // call: a 32-call batch would otherwise run 32 synchronous processes
+        // before the next frame.
+        if self.location_dirty {
+            self.location_dirty = false;
+            self.refresh_location();
         }
     }
 
@@ -471,20 +505,16 @@ impl ChatScreen {
         self.transcript_width = chunks[0].width as usize;
         self.transcript_height = chunks[0].height as usize;
         self.clamp_scroll();
-        let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width);
-        let mut visible = transcript::render::visible_text(
-            &lines,
+        let row_count = self.layout.len();
+        let (mut visible, visible_start) = transcript::render::visible_lines(
+            self.layout.rows(),
+            self.transcript_width,
             self.transcript_height,
             self.scroll_from_bottom,
         );
-        let visible_start = lines
-            .len()
-            .saturating_sub(self.scroll_from_bottom)
-            .saturating_sub(self.transcript_height);
-        self.text_selection
-            .highlight(&mut visible.lines, visible_start);
-        frame.render_widget(Paragraph::new(visible), chunks[0]);
-        let max_scroll = lines.len().saturating_sub(self.transcript_height);
+        self.text_selection.highlight(&mut visible, visible_start);
+        frame.render_widget(Paragraph::new(Text::from(visible)), chunks[0]);
+        let max_scroll = row_count.saturating_sub(self.transcript_height);
         if self.mouse_capture {
             self.scroll_navigation.draw(
                 frame,
@@ -594,8 +624,7 @@ impl ChatScreen {
         if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim());
         }
-        self.messages
-            .push(ChatMessage::new(TranscriptRole::Operator, text));
+        self.push_message(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
         self.refresh_location();
         let request = ChatRequest {
@@ -625,6 +654,7 @@ impl ChatScreen {
             ParsedCommand::Exit => Ok(ScreenAction::Exit),
             ParsedCommand::Clear => {
                 self.messages.clear();
+                self.dirty_from = 0;
                 self.text_selection.clear();
                 self.meters.clear_counts();
                 self.scroll_from_bottom = 0;
@@ -671,31 +701,31 @@ impl ChatScreen {
         // A nonzero offset means the reader has left live-follow mode. Grow
         // that offset with the transcript so the same rows remain visible.
         // Count wrapped rows, not newlines: streamed text can soft-wrap too.
-        let previous_rows = (self.scroll_from_bottom > 0).then(|| {
-            transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1)).len()
-        });
+        let previous_rows = (self.scroll_from_bottom > 0).then(|| self.row_count());
         let finished = match event {
             ResponseEvent::TextDelta(text) => {
                 if !self.assistant_open {
-                    self.messages
-                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
+                    self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
                 }
+                let last = self.messages.len().saturating_sub(1);
                 if let Some(message) = self.messages.last_mut() {
                     message.text.push_str(&text);
                 }
+                self.mark_dirty(last);
                 false
             }
             ResponseEvent::ToolCallsRequested(calls) => {
                 // The calls end the assistant message that requested them and
                 // are replayed with their results on later requests.
                 if !self.assistant_open {
-                    self.messages
-                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
+                    self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                 }
+                let last = self.messages.len().saturating_sub(1);
                 if let Some(message) = self.messages.last_mut() {
                     message.tool = Some(ToolPayload::Calls(calls));
                 }
+                self.mark_dirty(last);
                 self.assistant_open = false;
                 false
             }
@@ -703,6 +733,7 @@ impl ChatScreen {
                 self.push_notice(String::new());
                 let pending = approval::PendingApproval::new(request, self.messages.len() - 1);
                 self.messages[pending.notice_index].text = pending.prompt();
+                self.mark_dirty(pending.notice_index);
                 // Replacing an unanswered approval drops its reply: a denial.
                 self.approval = Some(pending);
                 self.assistant_open = false;
@@ -728,8 +759,8 @@ impl ChatScreen {
             }
             ResponseEvent::ToolCallReturned => {
                 // A tool may change HEAD even when it reports an error.
-                // Refresh once per return, never on the rendering timer.
-                self.refresh_location();
+                // Refresh once per drained batch, never on the rendering timer.
+                self.location_dirty = true;
                 false
             }
             ResponseEvent::ToolResult {
@@ -745,9 +776,8 @@ impl ChatScreen {
                     name: tool,
                     content,
                 });
-                self.messages.push(message);
+                self.push_message(message);
                 self.assistant_open = false;
-                self.refresh_location();
                 false
             }
             ResponseEvent::Completed => {
@@ -761,9 +791,7 @@ impl ChatScreen {
             }
         };
         if let Some(previous_rows) = previous_rows {
-            let current_rows =
-                transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1))
-                    .len();
+            let current_rows = self.row_count();
             self.scroll_from_bottom = self
                 .scroll_from_bottom
                 .saturating_add(current_rows.saturating_sub(previous_rows));
@@ -780,8 +808,7 @@ impl ChatScreen {
     }
 
     fn push_notice(&mut self, text: String) {
-        self.messages
-            .push(ChatMessage::new(TranscriptRole::Notice, text));
+        self.push_message(ChatMessage::new(TranscriptRole::Notice, text));
     }
 
     fn answer_approval(&mut self, answer: approval::ApprovalKey) {
@@ -790,9 +817,11 @@ impl ChatScreen {
         };
         let complete = pending.apply(answer);
         let prompt = pending.prompt();
-        if let Some(message) = self.messages.get_mut(pending.notice_index) {
+        let notice_index = pending.notice_index;
+        if let Some(message) = self.messages.get_mut(notice_index) {
             message.text = prompt;
         }
+        self.mark_dirty(notice_index);
         if complete {
             if let Some(pending) = self.approval.take() {
                 pending.finish();
@@ -810,10 +839,10 @@ impl ChatScreen {
     }
 
     fn clamp_scroll(&mut self) {
-        let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1));
+        let count = self.row_count();
         transcript::render::clamp_scroll(
             &mut self.scroll_from_bottom,
-            lines.len(),
+            count,
             self.transcript_height,
         );
     }
