@@ -61,6 +61,21 @@ pub fn save_curated_models(
             "api": "openai-completions",
         })
     });
+    let retained = entry
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let models = ids
+        .iter()
+        .map(|id| {
+            retained
+                .iter()
+                .find(|model| model.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"id": id}))
+        })
+        .collect();
     entry
         .as_object_mut()
         .ok_or_else(|| {
@@ -71,12 +86,12 @@ pub fn save_curated_models(
         })?
         .insert(
             "models".to_string(),
-            Value::Array(ids.iter().map(|id| serde_json::json!({"id": id})).collect()),
+            Value::Array(models),
         );
     save_document(state, registry, document)
 }
 
-fn check_snapshot(state: &Path, registry: &Registry) -> Result<()> {
+pub(super) fn check_snapshot(state: &Path, registry: &Registry) -> Result<()> {
     if read_models_bytes(state)? != registry.models_bytes {
         return Err(Error::new(
             "models.json changed outside this view; press e to review/reload it before saving",
@@ -132,7 +147,11 @@ pub fn save_provider_order(
     save_document(state, registry, document)
 }
 
-fn save_document(state: &Path, registry: &Registry, document: Value) -> Result<Registry> {
+pub(super) fn save_document(
+    state: &Path,
+    registry: &Registry,
+    document: Value,
+) -> Result<Registry> {
     let path = state.join("models.json");
     let mut bytes = serde_json::to_vec_pretty(&document)
         .map_err(|err| Error::new(format!("models.json serialization: {err}")))?;

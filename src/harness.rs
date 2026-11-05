@@ -18,22 +18,37 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 
 mod curation;
+mod gateway;
+mod metadata;
 mod openai;
+pub use metadata::{
+    CompletionCompatibility, InputLimits, InputModality, ModelCost, ModelMetadata, TokenParameter,
+    TokenPrice,
+};
 
 /// Resolved only when submitting a turn. Never log or debug-print credentials.
 pub(crate) struct CompletionConnection {
-    pub(crate) url: String,
-    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) transport: CompletionTransport,
+    pub(crate) metadata: ModelMetadata,
 }
+
+pub(crate) enum CompletionTransport {
+    Gateway {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
+    OpenAiResponses,
+}
+
+#[cfg(test)]
+pub(crate) use openai::fixture_inference_response;
+pub(crate) use openai::inference_response;
 
 pub(crate) fn completion_connection(
     state: &Path,
     provider: &str,
     model: &str,
 ) -> Result<CompletionConnection> {
-    if provider == OPENAI_ID {
-        return Err(Error::new("OpenAI browser-login inference is not implemented yet; select a configured OpenAI-compatible gateway"));
-    }
     let bytes = read_models_bytes(state)?;
     let file = parse_models(state, bytes.as_deref())?;
     let entry = file
@@ -44,6 +59,17 @@ pub(crate) fn completion_connection(
         return Err(Error::new(
             "selected model is no longer curated in models.json; reopen /model",
         ));
+    }
+    if provider == OPENAI_ID {
+        openai::catalog_source(&entry.base_url)?;
+        if entry.api != "openai-completions" || entry.api_key.is_some() || !entry.headers.is_empty()
+        {
+            return Err(Error::new("OpenAI browser login conflicts with configured api, apiKey, or headers; use a separate gateway id for proxies"));
+        }
+        return Ok(CompletionConnection {
+            transport: CompletionTransport::OpenAiResponses,
+            metadata: effective_metadata(state, provider, entry, model),
+        });
     }
     if entry.base_url.contains(['?', '#', '\\']) || entry.base_url.chars().any(char::is_control) {
         return Err(Error::new("inference baseUrl must not contain a query, fragment, backslash, or control characters"));
@@ -78,8 +104,11 @@ pub(crate) fn completion_connection(
         }
     }
     Ok(CompletionConnection {
-        url: format!("{}/chat/completions", entry.base_url.trim_end_matches('/')),
-        headers,
+        transport: CompletionTransport::Gateway {
+            url: format!("{}/chat/completions", entry.base_url.trim_end_matches('/')),
+            headers,
+        },
+        metadata: effective_metadata(state, provider, entry, model),
     })
 }
 
@@ -100,6 +129,9 @@ fn resolve_marker(value: &str) -> Result<String> {
 }
 
 pub use curation::{save_curated_models, save_provider_order};
+pub(crate) use gateway::{
+    discover_gateway, CatalogPersistence, DiscoveredGateway, GatewayRegistration,
+};
 
 pub const OPENAI_ID: &str = "openai";
 pub const OPENAI_ORIGIN: &str = "https://api.openai.com/v1";
@@ -128,6 +160,7 @@ pub struct LoadedProvider {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
     pub id: String,
+    pub metadata: ModelMetadata,
     pub status: CatalogMembership,
 }
 
@@ -155,6 +188,8 @@ pub struct CatalogSnapshot {
     pub source: Option<String>,
     pub retrieved_at: Option<String>,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, ModelMetadata>,
 }
 
 impl LoadedProvider {
@@ -268,6 +303,13 @@ fn registry_from_models(state: &Path, file: ModelsFile, models_bytes: Option<Vec
             auth,
         ));
     }
+    for provider in &mut providers {
+        if let Some(entry) = file.providers.get(&provider.id) {
+            for model in &mut provider.models {
+                model.metadata = effective_metadata(state, &provider.id, entry, &model.id);
+            }
+        }
+    }
     // Provider object order is the picker order. An unconfigured built-in
     // OpenAI stays first until an explicit reorder materializes its entry.
     if let Some(document) = models_bytes
@@ -311,7 +353,12 @@ pub fn render_text(registry: &Registry) -> String {
             provider.catalog_age()
         ));
         for model in &provider.models {
-            lines.push(format!("  model {} status {}", model.id, model.status));
+            lines.push(format!(
+                "  model {} status {} {}",
+                model.id,
+                model.status,
+                model.metadata.summary()
+            ));
         }
         if let Some(reason) = &provider.empty_reason {
             lines.push(format!("  {reason}"));
@@ -352,6 +399,7 @@ fn read_models_bytes(state: &Path) -> Result<Option<Vec<u8>>> {
 fn parse_models(state: &Path, bytes: Option<&[u8]>) -> Result<ModelsFile> {
     match bytes {
         None => Ok(ModelsFile {
+            _schema: None,
             providers: BTreeMap::new(),
         }),
         Some(bytes) => serde_json::from_slice(bytes)
@@ -374,6 +422,12 @@ fn load_provider(
         .iter()
         .map(|model| ModelChoice {
             id: model.id.clone(),
+            metadata: catalog
+                .as_ref()
+                .and_then(|catalog| catalog.metadata.get(&model.id))
+                .cloned()
+                .unwrap_or_default()
+                .overlay(&model.metadata),
             status: match &catalog {
                 None => CatalogMembership::Unavailable,
                 Some(catalog) if catalog.models.contains(&model.id) => CatalogMembership::Listed,
@@ -398,7 +452,7 @@ fn load_provider(
 pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
     check_id(id)?;
     let file = read_models(state)?;
-    let (source, models) = if id == OPENAI_ID {
+    let (source, models, metadata) = if id == OPENAI_ID {
         let base_url = file
             .providers
             .get(id)
@@ -407,15 +461,23 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
         (
             openai::catalog_source(base_url)?,
             openai::refresh(state, base_url)?,
+            BTreeMap::new(),
         )
     } else {
         let entry = file
             .providers
             .get(id)
             .ok_or_else(|| Error::new(format!("unknown provider `{id}`")))?;
+        let catalog = fetch_gateway_catalog(&entry.base_url, Some(id))?;
+        if catalog.provider_id != id {
+            return Err(Error::new(
+                "catalog provider id does not match registered gateway",
+            ));
+        }
         (
             catalog_url(&entry.base_url)?,
-            fetch_catalog(&entry.base_url, id)?,
+            catalog.models,
+            catalog.metadata,
         )
     };
     write_last_good(
@@ -429,6 +491,7 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
                     .map_err(|err| Error::new(format!("catalog timestamp: {err}")))?,
             ),
             models,
+            metadata,
         },
     )
 }
@@ -451,63 +514,109 @@ fn catalog_url(base_url: &str) -> Result<String> {
     Ok(format!("{origin}{CATALOG_PATH}"))
 }
 
-fn fetch_catalog(base_url: &str, gateway_id: &str) -> Result<Vec<String>> {
-    let url = catalog_url(base_url)?;
-    let bytes = http_get(&url)?;
-    let catalog: Catalog = serde_json::from_slice(&bytes)
-        .map_err(|err| Error::new(format!("catalog from {url}: {err}")))?;
-    if catalog.api != "openai-completions" {
-        return Err(Error::new(format!(
-            "catalog from {url} uses api `{}`",
-            catalog.api
-        )));
+struct GatewayCatalog {
+    provider_id: String,
+    api_key: String,
+    base_url: String,
+    models: Vec<String>,
+    metadata: BTreeMap<String, ModelMetadata>,
+}
+
+fn fetch_gateway_catalog(base_url: &str, registered: Option<&str>) -> Result<GatewayCatalog> {
+    let bytes = http_get(&catalog_url(base_url)?)?;
+    let mut document: Value =
+        serde_json::from_slice(&bytes).map_err(|_| Error::new("invalid gateway catalog JSON"))?;
+    if let Some(providers) = document.get("providers") {
+        let providers = providers
+            .as_object()
+            .ok_or_else(|| Error::new("catalog providers must be an object"))?;
+        let mut candidates = providers
+            .iter()
+            .filter(|(id, entry)| match registered {
+                Some(registered) => id.as_str() == registered,
+                None => entry.get("api").and_then(Value::as_str) == Some("openai-completions"),
+            })
+            .collect::<Vec<_>>();
+        if registered.is_none() && candidates.len() > 1 {
+            candidates.retain(|(_, entry)| {
+                entry
+                    .get("baseUrl")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url.trim_end_matches('/') == base_url.trim_end_matches('/'))
+            });
+        }
+        if candidates.len() != 1 {
+            return Err(Error::new("catalog provider selection is ambiguous or missing; enter the exact inference base URL, or refresh a registered provider identifier"));
+        }
+        let (id, entry) = candidates[0];
+        let mut entry = entry
+            .as_object()
+            .cloned()
+            .ok_or_else(|| Error::new("catalog provider must be an object"))?;
+        entry.insert("id".into(), Value::String(id.clone()));
+        document = Value::Object(entry);
     }
-    check_marker("catalog apiKey", &catalog.api_key)?;
+    if let Some(models) = document.get("models").and_then(Value::as_array) {
+        for model in models {
+            metadata::parse_metadata(model).map_err(|error| {
+                Error::new(format!(
+                    "invalid gateway catalog schema or model metadata: {error}"
+                ))
+            })?;
+        }
+    }
+    let catalog: Catalog = serde_json::from_value(document).map_err(|_| Error::new("invalid gateway catalog schema or provider compat (expected openai-completions, apiKey, model objects and supported compatibility fields)"))?;
+    let inference_url = catalog.base_url.as_deref().unwrap_or(base_url);
+    validate_inference_url(inference_url)?;
+    let input_url = ureq::get(base_url)
+        .request_url()
+        .map_err(|_| Error::new("invalid gateway URL"))?;
+    let returned_url = ureq::get(inference_url)
+        .request_url()
+        .map_err(|_| Error::new("invalid catalog baseUrl"))?;
+    if input_url.as_url().origin() != returned_url.as_url().origin() {
+        return Err(Error::new(
+            "catalog baseUrl must have the same origin as the entered gateway URL",
+        ));
+    }
+    if catalog.api != "openai-completions" {
+        return Err(Error::new("catalog API must be openai-completions"));
+    }
+    check_marker("catalog apiKey", &catalog.api_key)
+        .map_err(|_| Error::new("catalog apiKey must be gateway or a valid $NAME reference"))?;
     let provider_id = match (&catalog.id, &catalog.provider) {
         (Some(id), Some(provider)) if id == provider => id.clone(),
         (Some(id), None) => id.clone(),
         (None, Some(provider)) => provider.clone(),
-        (Some(id), Some(provider)) => {
-            return Err(Error::new(format!(
-                "catalog provider id `{id}` does not match `{provider}`"
-            )));
+        (Some(_), Some(_)) => {
+            return Err(Error::new("catalog id does not match provider"));
         }
         (None, None) => {
             return Err(Error::new("catalog is missing a provider id"));
         }
     };
-    if provider_id != gateway_id {
-        return Err(Error::new(format!(
-            "catalog provider id `{provider_id}` does not match gateway `{gateway_id}`"
-        )));
-    }
+    check_id(&provider_id).map_err(|_| Error::new("invalid catalog provider identifier"))?;
     let mut models = Vec::new();
+    let mut metadata = BTreeMap::new();
     for model in catalog.models {
         if !valid_model_id(&model.id) {
-            return Err(Error::new("catalog model id is empty"));
+            return Err(Error::new("invalid catalog model id"));
         }
-        if let Some(cost) = model.cost {
-            if cost.input != 0 || cost.output != 0 || cost.cache_read != 0 || cost.cache_write != 0
-            {
-                return Err(Error::new(format!(
-                    "catalog model `{}` has a non-zero cost",
-                    model.id
-                )));
-            }
+        if metadata.contains_key(&model.id) {
+            return Err(Error::new("duplicate catalog model id"));
         }
-        if let Some(input) = &model.input {
-            for flag in input {
-                if flag != "text" && flag != "image" {
-                    return Err(Error::new(format!(
-                        "catalog model `{}` has capability `{flag}`",
-                        model.id
-                    )));
-                }
-            }
-        }
+        let mut effective = model.metadata;
+        effective.compat = catalog.compat.overlay(&effective.compat);
+        metadata.insert(model.id.clone(), effective);
         models.push(model.id);
     }
-    Ok(models)
+    Ok(GatewayCatalog {
+        provider_id,
+        api_key: catalog.api_key,
+        base_url: inference_url.trim_end_matches('/').to_string(),
+        models,
+        metadata,
+    })
 }
 
 fn http_get(url: &str) -> Result<Vec<u8>> {
@@ -605,22 +714,37 @@ fn read_last_good(state: &Path, id: &str) -> Result<Option<CatalogSnapshot>> {
         Current(CatalogSnapshot),
         Legacy(Vec<String>),
     }
-    let catalog = match serde_json::from_slice(&bytes)
-        .map_err(|err| Error::new(format!("{}: {err}", path.display())))?
-    {
+    let catalog = match serde_json::from_slice(&bytes).map_err(|_| {
+        Error::new(format!(
+            "{}: invalid catalog cache schema or metadata",
+            path.display()
+        ))
+    })? {
         Stored::Current(catalog) => catalog,
         Stored::Legacy(models) => CatalogSnapshot {
             provider: id.to_string(),
             source: None,
             retrieved_at: None,
             models,
+            metadata: BTreeMap::new(),
         },
     };
-    if catalog.provider != id || catalog.models.iter().any(|id| !valid_model_id(id)) {
+    if catalog.provider != id
+        || catalog.models.iter().any(|id| !valid_model_id(id))
+        || catalog
+            .metadata
+            .keys()
+            .any(|id| !catalog.models.contains(id))
+    {
         return Err(Error::new(format!(
             "{}: invalid provider or model id",
             path.display()
         )));
+    }
+    for metadata in catalog.metadata.values() {
+        metadata::parse_metadata(
+            &serde_json::to_value(metadata).map_err(|_| Error::new("invalid catalog metadata"))?,
+        )?;
     }
     if let Some(stamp) = &catalog.retrieved_at {
         time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
@@ -656,11 +780,10 @@ fn check_id(id: &str) -> Result<()> {
 fn check_entry(id: &str, entry: &ProviderEntry) -> Result<()> {
     if entry.api != "openai-completions" {
         return Err(Error::new(format!(
-            "gateway `{id}` api `{}` is not openai-completions",
-            entry.api
+            "gateway `{id}` api must be openai-completions"
         )));
     }
-    origin_of(&entry.base_url).map_err(|err| Error::new(format!("gateway `{id}`: {err}")))?;
+    validate_inference_url(&entry.base_url)?;
     if let Some(key) = &entry.api_key {
         check_marker(&format!("gateway `{id}` apiKey"), key)?;
     }
@@ -693,10 +816,50 @@ fn check_marker(label: &str, value: &str) -> Result<()> {
         || name.as_bytes()[0].is_ascii_digit()
     {
         return Err(Error::new(format!(
-            "{label} environment reference `{value}` is not `$NAME`"
+            "{label} environment reference must be `$NAME`"
         )));
     }
     Ok(())
+}
+
+fn effective_metadata(
+    state: &Path,
+    provider: &str,
+    entry: &ProviderEntry,
+    model: &str,
+) -> ModelMetadata {
+    let cached = read_last_good(state, provider)
+        .ok()
+        .flatten()
+        .and_then(|catalog| catalog.metadata.get(model).cloned())
+        .unwrap_or_default();
+    let mut local = entry
+        .models
+        .iter()
+        .find(|choice| choice.id == model)
+        .map(|choice| choice.metadata.clone())
+        .unwrap_or_default();
+    local.compat = entry.compat.overlay(&local.compat);
+    cached.overlay(&local)
+}
+
+fn validate_inference_url(url: &str) -> Result<()> {
+    if url.len() > 8192
+        || url.contains(['?', '#', '\\', '@'])
+        || url
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(Error::new(
+            "baseUrl must be an HTTP(S) URL without credentials, whitespace, query or fragment",
+        ));
+    }
+    ureq::get(url)
+        .request_url()
+        .map_err(|_| Error::new("invalid inference baseUrl"))?;
+    origin_of(url)
+        .map(|_| ())
+        .map_err(|_| Error::new("baseUrl requires HTTPS or loopback HTTP"))
 }
 
 fn origin_of(base_url: &str) -> Result<String> {
@@ -736,6 +899,8 @@ fn origin_of(base_url: &str) -> Result<String> {
     };
     Ok(format!("{scheme}://{authority}"))
 }
+
+pub(crate) use openai::OpenAiLogin;
 
 pub fn login(state: &Path) -> Result<()> {
     openai::login(state)
@@ -838,6 +1003,8 @@ fn form_unescape(value: &str) -> String {
 struct ModelsFile {
     #[serde(default, deserialize_with = "deserialize_providers")]
     providers: BTreeMap<String, ProviderEntry>,
+    #[serde(default, rename = "$schema")]
+    _schema: Option<String>,
 }
 
 // Validate while serde still has the input position, so validation errors carry
@@ -885,12 +1052,36 @@ struct ProviderEntry {
     models: Vec<ModelId>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_compatibility")]
+    compat: CompletionCompatibility,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+fn deserialize_compatibility<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<CompletionCompatibility, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    serde_json::from_value(value).map_err(|_| serde::de::Error::custom("invalid provider compat: expected supported boolean flags and maxTokensField max_tokens or max_completion_tokens"))
+}
+
+#[derive(Debug)]
 struct ModelId {
     id: String,
+    metadata: ModelMetadata,
+}
+
+impl<'de> Deserialize<'de> for ModelId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("model id must be text"))?
+            .to_string();
+        let metadata = metadata::parse_metadata(&value).map_err(serde::de::Error::custom)?;
+        Ok(Self { id, metadata })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -903,30 +1094,11 @@ struct Catalog {
     api: String,
     #[serde(rename = "apiKey")]
     api_key: String,
-    models: Vec<CatalogModel>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogModel {
-    id: String,
+    models: Vec<ModelId>,
+    #[serde(default, rename = "baseUrl")]
+    base_url: Option<String>,
     #[serde(default)]
-    cost: Option<Cost>,
-    #[serde(default, rename = "reasoning")]
-    _reasoning: Option<bool>,
-    #[serde(default)]
-    input: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Cost {
-    input: u64,
-    output: u64,
-    #[serde(default, rename = "cacheRead")]
-    cache_read: u64,
-    #[serde(default, rename = "cacheWrite")]
-    cache_write: u64,
+    compat: CompletionCompatibility,
 }
 
 #[cfg(test)]
@@ -1036,6 +1208,7 @@ mod tests {
             lab.models,
             vec![ModelChoice {
                 id: "kept".to_string(),
+                metadata: ModelMetadata::default(),
                 status: CatalogMembership::Unavailable
             }]
         );
@@ -1137,14 +1310,17 @@ mod tests {
             vec![
                 ModelChoice {
                     id: "second".to_string(),
+                    metadata: ModelMetadata::default(),
                     status: CatalogMembership::Listed
                 },
                 ModelChoice {
                     id: "first".to_string(),
+                    metadata: ModelMetadata::default(),
                     status: CatalogMembership::Listed
                 },
                 ModelChoice {
                     id: "orphan".to_string(),
+                    metadata: ModelMetadata::default(),
                     status: CatalogMembership::Absent
                 },
             ]
@@ -1158,6 +1334,7 @@ mod tests {
             registry.providers[1].models,
             vec![ModelChoice {
                 id: "local-only".to_string(),
+                metadata: ModelMetadata::default(),
                 status: CatalogMembership::Unavailable
             }]
         );
@@ -1175,6 +1352,7 @@ mod tests {
             source: None,
             retrieved_at: None,
             models: vec!["new".to_string()],
+            metadata: BTreeMap::new(),
         };
         assert!(write_last_good(&dir, &catalog).is_err());
         assert_eq!(

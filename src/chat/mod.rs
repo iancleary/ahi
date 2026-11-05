@@ -1,19 +1,17 @@
 //! Conversation screen shown after the model picker.
 //!
 //! Registered gateways stream real model responses through `HttpBackend`.
-//! OpenAI browser-login inference and tool execution are not implemented yet.
 //!
 //! Terminal drawing stays in this module. Key codes are translated by
 //! `key_binding` before the screen applies them.
 
 mod backend;
 mod command;
-mod input;
+pub(crate) mod input;
 mod key_binding;
 mod location;
 mod scroll_navigation;
 mod selection;
-mod settings;
 mod status;
 mod thinking;
 mod transcript;
@@ -23,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use crate::commands::{CommandContext, CommandMenu, PickerOutcome};
 use crate::error::{Error, Result};
 
 use crossterm::event::{
@@ -55,6 +54,8 @@ enum ScreenAction {
     Exit,
     ReopenModelPicker,
     OpenCatalog,
+    Login,
+    Gateway,
 }
 
 #[derive(Clone, Copy)]
@@ -69,6 +70,8 @@ enum SessionEnd {
     Exit,
     ReopenModelPicker,
     OpenCatalog,
+    Login,
+    Gateway,
 }
 
 /// Screen state, independent of the terminal.
@@ -87,7 +90,7 @@ struct ChatScreen {
     assistant_open: bool,
     scroll_navigation: scroll_navigation::ScrollNavigation,
     mouse_capture: bool,
-    settings_menu: settings::SettingsMenu,
+    settings_menu: CommandMenu,
     text_selection: selection::Selection,
     copy_receiver: Option<Receiver<bool>>,
     pending_copy: Option<String>,
@@ -117,7 +120,7 @@ impl ChatScreen {
             assistant_open: false,
             scroll_navigation: scroll_navigation::ScrollNavigation::default(),
             mouse_capture: true,
-            settings_menu: settings::SettingsMenu::default(),
+            settings_menu: CommandMenu::default(),
             text_selection: selection::Selection::default(),
             copy_receiver: None,
             pending_copy: None,
@@ -141,7 +144,12 @@ impl ChatScreen {
     }
 
     fn set_selection(&mut self, selection: &str) {
-        self.selection = parse_selection(selection);
+        let selection = parse_selection(selection);
+        if selection != self.selection {
+            self.meters.context_tokens = None;
+            self.meters.context_window = None;
+        }
+        self.selection = selection;
     }
 
     #[cfg(test)]
@@ -185,10 +193,8 @@ impl ChatScreen {
             return Ok(ScreenAction::Continue);
         }
         if let Event::Mouse(mouse) = event {
-            // The settings popup currently uses keyboard navigation; do not
-            // select transcript text hidden underneath it.
             if !self.settings_menu.dismissed
-                && !settings::matching(&self.input.contents()).is_empty()
+                && !CommandMenu::matching(&self.input.contents(), CommandContext::Chat).is_empty()
             {
                 return Ok(ScreenAction::Continue);
             }
@@ -267,18 +273,16 @@ impl ChatScreen {
             self.settings_menu.reset();
             return Ok(ScreenAction::Exit);
         }
-        let settings = settings::matching(&text);
-        if !self.settings_menu.dismissed && !settings.is_empty() {
-            let count = settings.len();
+        if !self.settings_menu.dismissed
+            && !CommandMenu::matching(&text, CommandContext::Chat).is_empty()
+        {
             match action {
                 KeyAction::Edit(input::EditorKey::Up) => {
-                    self.settings_menu.selected = (self.settings_menu.selected + count - 1) % count;
-                    self.settings_menu.navigated = true;
+                    self.settings_menu.navigate(&text, CommandContext::Chat, -1);
                     return Ok(ScreenAction::Continue);
                 }
                 KeyAction::Edit(input::EditorKey::Down) => {
-                    self.settings_menu.selected = (self.settings_menu.selected + 1) % count;
-                    self.settings_menu.navigated = true;
+                    self.settings_menu.navigate(&text, CommandContext::Chat, 1);
                     return Ok(ScreenAction::Continue);
                 }
                 KeyAction::Cancel => {
@@ -286,13 +290,20 @@ impl ChatScreen {
                     return Ok(ScreenAction::Continue);
                 }
                 KeyAction::Submit
-                    if self.settings_menu.navigated
-                        || text == "/"
-                        || matches!(command::parse(&text), ParsedCommand::Unknown { .. }) =>
+                    if self
+                        .settings_menu
+                        .chosen(&text, CommandContext::Chat)
+                        .is_some()
+                        && (self.settings_menu.navigated
+                            || text == "/"
+                            || matches!(command::parse(&text), ParsedCommand::Unknown { .. })) =>
                 {
                     // Preserve the draft and active turn, just like typed
                     // slash commands, until the current response finishes.
-                    let command = settings[self.settings_menu.selected.min(count - 1)].command;
+                    let command = self
+                        .settings_menu
+                        .chosen(&text, CommandContext::Chat)
+                        .expect("matched command");
                     if self.response_in_progress
                         && !matches!(command::parse(command), ParsedCommand::Exit)
                     {
@@ -525,15 +536,25 @@ impl ChatScreen {
         );
         frame.render_widget(Paragraph::new(location), top[0]);
         frame.render_widget(Paragraph::new(model).alignment(Alignment::Right), top[1]);
+        let usage_cost = self
+            .meters
+            .cost_usd
+            .map(|cost| format!("reported usage ${cost:.6} · "))
+            .unwrap_or_default();
         let settings_status = format!(
-            " {}/{} · thinking {} · mouse {} ",
+            " {usage_cost}{}/{} · thinking {} · mouse {} ",
             self.selection.gateway,
             self.selection.model,
             self.thinking.as_str(),
             if self.mouse_capture { "on" } else { "off" },
         );
-        self.settings_menu
-            .draw(frame, chunks[0], &self.input.contents(), &settings_status);
+        self.settings_menu.draw(
+            frame,
+            chunks[0],
+            &self.input.contents(),
+            CommandContext::Chat,
+            &settings_status,
+        );
     }
 
     fn submit_input(&mut self, backend: &mut dyn CompletionBackend) -> Result<ScreenAction> {
@@ -548,7 +569,7 @@ impl ChatScreen {
         }
         self.input.clear();
         self.settings_menu.reset();
-        if !text.contains('\n') && text.trim_start().starts_with('/') {
+        if text.trim_start().starts_with('/') {
             return self.dispatch_command(text.trim());
         }
         self.messages.push(ChatMessage {
@@ -567,6 +588,8 @@ impl ChatScreen {
                 .cloned()
                 .collect(),
         };
+        self.meters.context_tokens = None;
+        self.meters.context_window = None;
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.assistant_open = false;
@@ -577,6 +600,8 @@ impl ChatScreen {
         match command::parse(text) {
             ParsedCommand::ReopenModelPicker => Ok(ScreenAction::ReopenModelPicker),
             ParsedCommand::OpenCatalog => Ok(ScreenAction::OpenCatalog),
+            ParsedCommand::Login => Ok(ScreenAction::Login),
+            ParsedCommand::Gateway => Ok(ScreenAction::Gateway),
             ParsedCommand::Exit => Ok(ScreenAction::Exit),
             ParsedCommand::Clear => {
                 self.messages.clear();
@@ -737,14 +762,23 @@ impl ChatScreen {
 }
 
 fn rule_line(width: usize) -> String {
-    "─".repeat(width)
+    let hint = "/ commands ";
+    format!(
+        "{}{}",
+        hint.chars().take(width).collect::<String>(),
+        "─".repeat(width.saturating_sub(hint.len()))
+    )
 }
 
 /// Run the chat screen until the operator exits or asks for the model picker.
 pub(crate) fn interact(
     state_dir: &Path,
     selection: &str,
-    mut reopen_picker: impl FnMut(PickerView, &str) -> Result<Option<String>>,
+    mut reopen_picker: impl FnMut(
+        PickerView,
+        &str,
+        Option<crate::harness::GatewayRegistration>,
+    ) -> Result<PickerOutcome>,
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
     let mut backend = HttpBackend::new(state_dir.to_path_buf());
@@ -765,13 +799,35 @@ pub(crate) fn interact(
         let outcome = outcome?;
         match outcome {
             SessionEnd::Exit => return Ok(()),
+            SessionEnd::Login => {
+                let notice = match crate::login::run(state_dir) {
+                    Ok(()) => "OpenAI login completed; model selection unchanged".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                screen.push_notice(notice);
+            }
+            SessionEnd::Gateway => match crate::gateway::run(state_dir) {
+                Ok(Some(registration)) => {
+                    screen.push_notice(registration.notice.clone());
+                    let provider = registration.provider_id.clone();
+                    match reopen_picker(PickerView::Catalog, &provider, Some(registration))? {
+                        PickerOutcome::Selected(next) => screen.set_selection(&next),
+                        PickerOutcome::Back => {}
+                        PickerOutcome::Exit => return Ok(()),
+                    }
+                }
+                Ok(None) => screen.push_notice("Gateway discovery cancelled".to_string()),
+                Err(error) => screen.push_notice(error.to_string()),
+            },
             SessionEnd::ReopenModelPicker | SessionEnd::OpenCatalog => {
                 let view = match outcome {
                     SessionEnd::OpenCatalog => PickerView::Catalog,
                     _ => PickerView::Models,
                 };
-                if let Some(next) = reopen_picker(view, &screen.selection.gateway)? {
-                    screen.set_selection(&next);
+                match reopen_picker(view, &screen.selection.gateway, None)? {
+                    PickerOutcome::Selected(next) => screen.set_selection(&next),
+                    PickerOutcome::Back => {}
+                    PickerOutcome::Exit => return Ok(()),
                 }
             }
         }
@@ -807,6 +863,8 @@ fn session_loop(
                     return Ok(SessionEnd::ReopenModelPicker);
                 }
                 ScreenAction::OpenCatalog => return Ok(SessionEnd::OpenCatalog),
+                ScreenAction::Login => return Ok(SessionEnd::Login),
+                ScreenAction::Gateway => return Ok(SessionEnd::Gateway),
             }
         }
         screen.poll_clipboard();
@@ -1094,7 +1152,8 @@ mod tests {
         });
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
-        assert!(idle[idle.len() - 2]
+        assert!(idle[idle.len() - 2].starts_with("/ commands "));
+        assert!(idle[idle.len() - 2]["/ commands ".len()..]
             .chars()
             .all(|character| character == '─'));
         assert!(!idle[idle.len() - 3].starts_with('>'));
@@ -1314,13 +1373,13 @@ mod tests {
             )
             .unwrap();
         let menu = draw_lines(&mut screen, 80, 16).join("\n");
-        assert!(menu.contains("Settings · ↑/↓ Enter Esc"));
-        assert!(menu.contains("Choose provider and model"));
+        assert!(menu.contains("Commands · ↑/↓ select · Enter apply · Esc dismiss"));
+        assert!(menu.contains("Choose model"));
         assert!(menu.contains("thinking medium · mouse on"));
         screen.set_input_text("/mouse ");
         let menu = draw_lines(&mut screen, 80, 16).join("\n");
         assert!(menu.contains("Native text selection"));
-        assert!(!menu.contains("Choose provider and model"));
+        assert!(!menu.contains("Choose model"));
         screen
             .apply_action(KeyAction::Edit(input::EditorKey::Down), &mut backend)
             .unwrap();
@@ -1350,7 +1409,7 @@ mod tests {
         assert_eq!(screen.input_text(), "/");
         assert!(!draw_lines(&mut screen, 80, 16)
             .join("\n")
-            .contains("Settings ·"));
+            .contains("Commands ·"));
         screen
             .apply_action(
                 KeyAction::Edit(input::EditorKey::Character('m')),
@@ -1359,11 +1418,11 @@ mod tests {
             .unwrap();
         assert!(draw_lines(&mut screen, 80, 16)
             .join("\n")
-            .contains("Settings ·"));
+            .contains("Commands ·"));
         screen.set_input_text("$skill");
         assert!(!draw_lines(&mut screen, 80, 16)
             .join("\n")
-            .contains("Settings ·"));
+            .contains("Commands ·"));
         assert_eq!(screen.input_text(), "$skill");
         fs::remove_dir_all(state).unwrap();
     }

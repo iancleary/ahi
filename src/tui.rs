@@ -8,12 +8,17 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::chat;
+use crate::chat::input::{EditorKey, InputEditor};
+use crate::commands::{self, CommandContext, CommandMenu, CommonAction, PickerOutcome};
 use crate::error::{Error, Result};
 use crate::harness::{self, Registry};
 
@@ -41,14 +46,18 @@ pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
     let mut picker = Picker::new(registry);
     // Cancelling startup exits, even if an old selection file exists. Only
     // Enter starts chat; cancelling /model instead keeps the active selection.
-    if let Some(selection) = pick(state, &mut picker, refresh)? {
-        chat::interact(state, &selection, |view, gateway| {
+    if let PickerOutcome::Selected(selection) = pick(state, &mut picker, refresh)? {
+        chat::interact(state, &selection, |view, gateway, registration| {
             // Reopen the same curated picker, with a fresh local snapshot.
             // A malformed external edit retains the last valid registry.
             if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
                 picker.status = err.to_string();
             }
             picker.reset_view();
+            if let Some(registration) = registration {
+                picker.set_registration(registration);
+            }
+            picker.focus_provider(gateway);
             if matches!(view, chat::PickerView::Catalog) {
                 if let Some(provider) = picker
                     .registry
@@ -57,6 +66,7 @@ pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
                     .position(|entry| entry.id == gateway)
                 {
                     picker.screen = Screen::Catalog { provider };
+                    picker.cursor.select(Some(0));
                 }
             }
             pick(state, &mut picker, false)
@@ -68,11 +78,24 @@ pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
     })
 }
 
-fn pick(state: &Path, picker: &mut Picker, refresh: bool) -> Result<Option<String>> {
+fn pick(state: &Path, picker: &mut Picker, refresh: bool) -> Result<PickerOutcome> {
     let mut terminal = ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
-    let result = pick_loop(&mut terminal, state, picker, refresh);
+    let result =
+        enable_command_paste().and_then(|()| pick_loop(&mut terminal, state, picker, refresh));
+    let cleanup = disable_command_paste();
     ratatui::restore();
+    cleanup?;
     result
+}
+
+fn enable_command_paste() -> Result<()> {
+    crossterm::execute!(io::stdout(), EnableBracketedPaste)
+        .map_err(|error| Error::new(format!("terminal paste: {error}")))
+}
+
+fn disable_command_paste() -> Result<()> {
+    crossterm::execute!(io::stdout(), DisableBracketedPaste)
+        .map_err(|error| Error::new(format!("terminal paste: {error}")))
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +126,10 @@ struct Picker {
     screen: Screen,
     cursor: ListState,
     status: String,
+    command_input: Option<InputEditor>,
+    command_menu: CommandMenu,
+    registration: Option<harness::GatewayRegistration>,
+    new_installation: bool,
     refresh_errors: BTreeMap<String, String>,
     print_on_exit: Vec<String>,
 }
@@ -111,14 +138,40 @@ impl Picker {
     fn new(registry: Registry) -> Self {
         let mut cursor = ListState::default();
         cursor.select(Some(0));
+        let status = if registry
+            .providers
+            .iter()
+            .all(|entry| entry.models.is_empty())
+        {
+            "No models selected; c choose models · / commands"
+        } else {
+            "Enter saves the highlighted model and opens chat"
+        }
+        .to_string();
         Self {
             registry,
             screen: Screen::Picker,
             cursor,
-            status: "Enter saves the highlighted model and opens chat".to_string(),
+            status,
+            command_input: None,
+            command_menu: CommandMenu::default(),
+            registration: None,
+            new_installation: false,
             refresh_errors: BTreeMap::new(),
             print_on_exit: Vec::new(),
         }
+    }
+
+    fn set_registration(&mut self, registration: harness::GatewayRegistration) {
+        self.status = match registration.catalog {
+            harness::CatalogPersistence::Saved => {
+                "Space adds/removes models; Enter uses a checked model".to_string()
+            }
+            harness::CatalogPersistence::Failed(_) => {
+                "Gateway registered; resolve cache conflict, then r refresh".to_string()
+            }
+        };
+        self.registration = Some(registration);
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -214,9 +267,54 @@ impl Picker {
     }
 
     fn reset_view(&mut self) {
+        self.registration = None;
         self.screen = Screen::Picker;
         self.cursor = ListState::default();
         self.cursor.select(Some(0));
+    }
+
+    fn focus_provider(&mut self, id: &str) {
+        let row = self
+            .rows()
+            .iter()
+            .position(|row| {
+                matches!(row, Row::Model { .. }) && self.registry.providers[row.provider()].id == id
+            })
+            .or_else(|| {
+                self.rows()
+                    .iter()
+                    .position(|row| self.registry.providers[row.provider()].id == id)
+            });
+        self.cursor.select(row.or(Some(0)));
+    }
+
+    fn back_to_models(&mut self) {
+        let selected = self.selected();
+        let entry = &self.registry.providers[selected.provider()];
+        let id = entry.id.clone();
+        let model_id = match (self.screen, selected) {
+            (Screen::Catalog { .. }, Row::Model { model, .. }) => {
+                Some(catalog_ids(entry)[model].to_string())
+            }
+            _ => None,
+        };
+        self.reset_view();
+        self.focus_provider(&id);
+        if let Some(position) = self.rows().iter().position(|row| {
+            matches!(row, Row::Model { provider, model }
+                if self.registry.providers[*provider].id == id
+                    && Some(&self.registry.providers[*provider].models[*model].id) == model_id.as_ref())
+        }) {
+            self.cursor.select(Some(position));
+        }
+        self.status = "c choose models · / commands · Enter use highlighted model".to_string();
+    }
+
+    fn command_context(&self) -> CommandContext {
+        match self.screen {
+            Screen::Picker => CommandContext::Models,
+            Screen::Catalog { .. } => CommandContext::Catalog,
+        }
     }
 
     fn save_curated(&mut self, state: &Path, provider: usize, ids: &[String], focus: &str) -> bool {
@@ -293,6 +391,11 @@ impl Picker {
     }
 
     fn refresh(&mut self, terminal: &mut ratatui::DefaultTerminal, state: &Path) -> Result<()> {
+        let provider_id = self.registry.providers[self.selected().provider()]
+            .id
+            .clone();
+        let catalog = matches!(self.screen, Screen::Catalog { .. });
+        let selected = self.cursor.selected().unwrap_or(0);
         self.status = "Refreshing catalogs (up to 15 seconds per provider)…".to_string();
         self.draw(terminal)?;
         match harness::refresh_all(state) {
@@ -314,7 +417,21 @@ impl Picker {
             }
             Err(err) => self.status = err.to_string(),
         }
+        self.registration = None;
         self.reset_view();
+        self.focus_provider(&provider_id);
+        if catalog {
+            if let Some(provider) = self
+                .registry
+                .providers
+                .iter()
+                .position(|entry| entry.id == provider_id)
+            {
+                self.screen = Screen::Catalog { provider };
+                self.cursor
+                    .select(Some(selected.min(self.rows().len().saturating_sub(1))));
+            }
+        }
         Ok(())
     }
 
@@ -331,11 +448,7 @@ impl Picker {
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(4),
-                Constraint::Length(if matches!(self.screen, Screen::Catalog { .. }) {
-                    5
-                } else {
-                    3
-                }),
+                Constraint::Length(5),
             ])
             .split(frame.area());
         let rows = self.rows();
@@ -360,7 +473,7 @@ impl Picker {
                             .unwrap_or_default()
                     ),
                     Row::Empty(_) => match self.screen {
-                        Screen::Picker => provider.empty_reason.clone().unwrap_or_default(),
+                        Screen::Picker => "  No models selected · c choose models".to_string(),
                         Screen::Catalog { .. } if provider.catalog.is_none() => {
                             "catalog unavailable: press r to refresh".to_string()
                         }
@@ -390,37 +503,143 @@ impl Picker {
             })
             .collect();
         let title = match self.screen {
-            Screen::Picker => "models.json — curated models (Enter opens chat)",
-            Screen::Catalog { .. } => "catalog — curate models.json (Space toggle; Esc back)",
+            Screen::Picker => "Models · Enter use model".to_string(),
+            Screen::Catalog { provider } => {
+                let entry = &self.registry.providers[provider];
+                format!(
+                    "Catalog · {} · {} checked{}",
+                    entry.id,
+                    entry.models.len(),
+                    if self
+                        .registration
+                        .as_ref()
+                        .is_some_and(|registration| registration.provider_id == entry.id)
+                    {
+                        " · 3 Choose models"
+                    } else {
+                        ""
+                    }
+                )
+            }
         };
+        self.draw_list(frame, chunks[0], items, &title);
+        self.draw_details(frame, &chunks);
+    }
+
+    fn draw_list(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        items: Vec<ListItem<'_>>,
+        title: &str,
+    ) {
         frame.render_stateful_widget(
             List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(title))
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            chunks[0],
+            area,
             &mut self.cursor,
         );
+    }
+
+    fn draw_details(&self, frame: &mut ratatui::Frame, chunks: &[ratatui::layout::Rect]) {
         let provider = &self.registry.providers[self.selected().provider()];
-        let detail = format!(
-            "{}  auth {}  catalog {}{}",
-            provider.base_url,
-            provider.auth,
-            provider.catalog_age(),
-            provider
-                .catalog_error
-                .as_ref()
-                .map(|error| format!("\nLast refresh/catalog error: {error}"))
-                .unwrap_or_default()
-        );
+        let detail = if let Some(registration) = self.registration.as_ref().filter(|registration| {
+            registration.provider_id == provider.id && matches!(self.screen, Screen::Catalog { .. })
+        }) {
+            match &registration.catalog {
+                harness::CatalogPersistence::Saved => format!("{}\nNo chat model has changed. Space adds models; Enter uses a checked model.", registration.notice),
+                harness::CatalogPersistence::Failed(error) => format!("Gateway {} registered, but catalog save failed.\nResolve cache conflict; r refresh or /gateway retry.\nCache error: {error}", registration.provider_id),
+            }
+        } else if provider.models.is_empty() && matches!(self.screen, Screen::Picker) {
+            if self.new_installation
+                && self.registry.providers.len() == 1
+                && provider.id == "openai"
+                && provider.auth == "signed-out"
+                && provider.catalog.is_none()
+            {
+                "Add your first gateway: press / and choose Add gateway.\nOr sign in with OpenAI from Commands.".to_string()
+            } else if provider.catalog.is_none() {
+                "No models selected. Press c to choose models.\nCatalog unavailable: r discovers models; /gateway retries discovery.".to_string()
+            } else {
+                "No models selected. Press c to choose models from the catalog.\nFor another gateway, press / and choose Add gateway.".to_string()
+            }
+        } else {
+            format!(
+                "{}  auth {}  catalog {}{}\nSaved in models.json",
+                provider.base_url,
+                provider.auth,
+                provider.catalog_age(),
+                provider
+                    .catalog_error
+                    .as_ref()
+                    .map(|error| format!("\nLast refresh/catalog error: {error}"))
+                    .unwrap_or_default()
+            )
+        };
+        let metadata = match self.selected() {
+            Row::Model { model, .. } => match self.screen {
+                Screen::Picker => Some(&provider.models[model].metadata),
+                Screen::Catalog { .. } => catalog_ids(provider).get(model).and_then(|id| {
+                    provider
+                        .models
+                        .iter()
+                        .find(|choice| choice.id == **id)
+                        .map(|choice| &choice.metadata)
+                        .or_else(|| {
+                            provider
+                                .catalog
+                                .as_ref()
+                                .and_then(|catalog| catalog.metadata.get(*id))
+                        })
+                }),
+            },
+            _ => None,
+        };
+        let detail = match metadata {
+            Some(metadata) if !metadata.summary().is_empty() => {
+                format!("{}\n{detail}", metadata.summary())
+            }
+            _ => detail,
+        };
         frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), chunks[1]);
         let help = match self.screen {
-            Screen::Picker => "r refresh all  c catalog  e edit  Up/Down move  Shift+Up/Down or Shift+J/K on gateway header: reorder  Enter chat  q back/quit",
-            Screen::Catalog { .. } => "Up/Down or j/k: move highlight\nShift+Up/Down or Shift+j/k: reorder highlighted checked model and save\nSpace toggle  y copy id  e edit  r refresh  Esc back  q quit",
+            Screen::Picker => "/ commands · Enter use model · c catalog · Esc/q cancel\n↑/↓ move · Shift+↑/↓ reorder gateway · r refresh · e edit",
+            Screen::Catalog { .. } => "/ commands · Space add/remove · Enter use checked model\nEsc models · q cancel · ↑/↓ move · Shift+↑/↓ reorder\ny copy · e edit · r refresh",
         };
-        frame.render_widget(
-            Paragraph::new(format!("{}\n{help}", self.status)).wrap(Wrap { trim: false }),
-            chunks[2],
-        );
+        let footer =
+            Layout::vertical([Constraint::Length(2), Constraint::Length(3)]).split(chunks[2]);
+        if let Some(input) = &self.command_input {
+            let viewport = input.viewport(footer[0].width as usize, footer[0].height as usize);
+            frame.render_widget(Paragraph::new(viewport.lines.join("\n")), footer[0]);
+            if footer[0].width > 0 && footer[0].height > 0 {
+                frame.set_cursor_position((
+                    footer[0].x + viewport.cursor_column as u16,
+                    footer[0].y + viewport.cursor_row as u16,
+                ));
+            }
+        } else {
+            frame.render_widget(
+                Paragraph::new(&*self.status).wrap(Wrap { trim: false }),
+                footer[0],
+            );
+        }
+        frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), footer[1]);
+        if let Some(input) = &self.command_input {
+            let popup_area = ratatui::layout::Rect::new(
+                chunks[0].x,
+                chunks[0].y,
+                chunks[0].width,
+                chunks[2].y - chunks[0].y,
+            );
+            self.command_menu.draw(
+                frame,
+                popup_area,
+                &input.contents(),
+                self.command_context(),
+                " / commands ",
+            );
+        }
     }
 }
 
@@ -429,31 +648,186 @@ fn pick_loop(
     state: &Path,
     picker: &mut Picker,
     refresh: bool,
-) -> Result<Option<String>> {
+) -> Result<PickerOutcome> {
+    picker.new_installation = !state.join("models.json").exists();
     if refresh {
         picker.refresh(terminal, state)?;
     }
     let mut selection = None;
+    let mut outcome = PickerOutcome::Back;
     loop {
         picker.draw(terminal)?;
         if !event::poll(Duration::from_millis(200)).map_err(|err| Error::new(err.to_string()))? {
             continue;
         }
-        let Event::Key(key) = event::read().map_err(|err| Error::new(err.to_string()))? else {
+        let event = event::read().map_err(|err| Error::new(err.to_string()))?;
+        if let Event::Paste(text) = &event {
+            if let Some(command) = &mut picker.command_input {
+                if !text.chars().any(char::is_control)
+                    && command.contents().len().saturating_add(text.len()) <= 128
+                {
+                    command.insert_paste(text);
+                    picker.command_menu.reset();
+                } else {
+                    picker.status = "Paste a single-line command (maximum 128 bytes)".to_string();
+                }
+            }
+            continue;
+        }
+        let Event::Key(key) = event else {
             continue;
         };
         if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        let context = picker.command_context();
+        if let Some(command) = &mut picker.command_input {
+            let text = command.contents();
+            match key.code {
+                KeyCode::Up | KeyCode::Down => {
+                    picker.command_menu.navigate(
+                        &text,
+                        context,
+                        if key.code == KeyCode::Up { -1 } else { 1 },
+                    );
+                }
+                KeyCode::Esc => {
+                    picker.command_menu.dismissed = true;
+                    picker.command_input = None;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    picker.command_input = None;
+                }
+                KeyCode::Backspace => {
+                    command.apply(EditorKey::Backspace, 80);
+                    picker.command_menu.reset();
+                    if command.contents().is_empty() {
+                        picker.command_input = None;
+                    }
+                }
+                KeyCode::Enter => {
+                    let command = picker
+                        .command_menu
+                        .chosen(&text, context)
+                        .unwrap_or(&text)
+                        .to_string();
+                    picker.command_input = None;
+                    picker.command_menu.reset();
+                    if commands::common_action(&command) == Some(CommonAction::Login) {
+                        disable_command_paste()?;
+                        ratatui::restore();
+                        let result = crate::login::run(state);
+                        *terminal = ratatui::try_init()
+                            .map_err(|error| Error::new(format!("terminal resume: {error}")))?;
+                        enable_command_paste()?;
+                        picker.status = match result {
+                            Ok(()) => match reload(
+                                &mut picker.registry,
+                                state,
+                                &picker.refresh_errors,
+                            ) {
+                                Ok(()) => {
+                                    "OpenAI login completed; catalogs and model selection unchanged"
+                                        .to_string()
+                                }
+                                Err(error) => {
+                                    format!("OpenAI login completed; reload failed: {error}")
+                                }
+                            },
+                            Err(error) => error.to_string(),
+                        };
+                    } else if commands::common_action(&command) == Some(CommonAction::Gateway) {
+                        disable_command_paste()?;
+                        ratatui::restore();
+                        let result = crate::gateway::run(state);
+                        *terminal = ratatui::try_init()
+                            .map_err(|error| Error::new(format!("terminal resume: {error}")))?;
+                        enable_command_paste()?;
+                        match result {
+                            Ok(Some(registration)) => {
+                                let provider_id = registration.provider_id.clone();
+                                picker.set_registration(registration);
+                                match reload(&mut picker.registry, state, &picker.refresh_errors) {
+                                    Ok(()) => {
+                                        if let Some(provider) = picker
+                                            .registry
+                                            .providers
+                                            .iter()
+                                            .position(|entry| entry.id == provider_id)
+                                        {
+                                            picker.screen = Screen::Catalog { provider };
+                                            picker.cursor.select(Some(0));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        picker.status =
+                                            format!("{}; reload failed: {error}", picker.status)
+                                    }
+                                }
+                            }
+                            Ok(None) => picker.status = "Gateway discovery cancelled".to_string(),
+                            Err(error) => picker.status = error.to_string(),
+                        }
+                    } else {
+                        match commands::common_action(&command) {
+                            Some(CommonAction::Quit) => {
+                                outcome = PickerOutcome::Exit;
+                                break;
+                            }
+                            Some(CommonAction::Models) => picker.back_to_models(),
+                            Some(CommonAction::Catalog) => {
+                                picker.screen = Screen::Catalog {
+                                    provider: picker.selected().provider(),
+                                };
+                                picker.cursor.select(Some(0));
+                            }
+                            _ => {
+                                picker.status = "Unknown command; press / for Commands".to_string()
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && !character.is_control()
+                        && command.contents().len() + character.len_utf8() <= 128 =>
+                {
+                    command.apply(EditorKey::Character(character), 80);
+                    picker.command_menu.reset();
+                }
+                KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End | KeyCode::Delete => {
+                    let editor_key = match key.code {
+                        KeyCode::Left => EditorKey::Left,
+                        KeyCode::Right => EditorKey::Right,
+                        KeyCode::Home => EditorKey::Home,
+                        KeyCode::End => EditorKey::End,
+                        _ => EditorKey::Delete,
+                    };
+                    command.apply(editor_key, 80);
+                    picker.command_menu.reset();
+                }
+                _ => {}
+            }
             continue;
         }
         if picker.navigate(state, key) {
             continue;
         }
         match key.code {
+            KeyCode::Char('/') => {
+                let mut input = InputEditor::new();
+                input.insert_paste("/");
+                picker.command_input = Some(input);
+                picker.command_menu.reset();
+            }
             KeyCode::Char('q') => break,
             KeyCode::Esc | KeyCode::Left if matches!(picker.screen, Screen::Catalog { .. }) => {
-                picker.reset_view()
+                picker.back_to_models()
             }
             KeyCode::Esc => break,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Char(' ') if matches!(picker.screen, Screen::Catalog { .. }) => {
                 picker.toggle(state)
             }
@@ -467,10 +841,12 @@ fn pick_loop(
             KeyCode::Char('r') => picker.refresh(terminal, state)?,
             KeyCode::Char('e') => {
                 // Editor-only reload preserves the editor's bytes; it never resaves JSON.
+                disable_command_paste()?;
                 ratatui::restore();
                 let edited = edit_models(state);
                 *terminal = ratatui::try_init()
                     .map_err(|err| Error::new(format!("terminal resume: {err}")))?;
+                enable_command_paste()?;
                 match edited.and_then(|exit| {
                     reload(&mut picker.registry, state, &picker.refresh_errors)?;
                     Ok(exit)
@@ -500,16 +876,28 @@ fn pick_loop(
                     }
                 }
             }
-            KeyCode::Enter if matches!(picker.screen, Screen::Picker) => {
+            KeyCode::Enter => {
                 if let Row::Model { provider, model } = picker.selected() {
-                    let provider = &picker.registry.providers[provider];
-                    selection = Some(format!("{}/{}", provider.id, provider.models[model].id));
-                    break;
+                    let entry = &picker.registry.providers[provider];
+                    let id = match picker.screen {
+                        Screen::Picker => entry.models[model].id.as_str(),
+                        Screen::Catalog { .. } => catalog_ids(entry)[model],
+                    };
+                    if entry.models.iter().any(|choice| choice.id == id) {
+                        selection = Some(format!("{}/{id}", entry.id));
+                        break;
+                    }
+                    picker.status =
+                        "Press Space to add this model, then Enter to use it".to_string();
+                } else if matches!(picker.screen, Screen::Catalog { .. }) {
+                    picker.status =
+                        "No models available; r refresh or /gateway retry discovery".to_string();
                 }
             }
             _ => {}
         }
     }
+    picker.registration = None;
     if let Some(selection) = &selection {
         std::fs::create_dir_all(state)
             .map_err(|err| Error::new(format!("{}: {err}", state.display())))?;
@@ -521,7 +909,10 @@ fn pick_loop(
             path.display()
         ));
     }
-    Ok(selection)
+    Ok(match selection {
+        Some(selection) => PickerOutcome::Selected(selection),
+        None => outcome,
+    })
 }
 
 /// Commit the new registry only after the complete local load succeeds.
@@ -670,7 +1061,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("catalog — curate models.json"));
+        assert!(text.contains("Catalog · openai"));
         assert!(text.contains("[x] missing  [absent from catalog]"));
         assert!(text.contains("[ ] reference-only"));
         assert!(text.contains("retrieval time unknown (old catalog format)"));
@@ -886,8 +1277,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("no models in models.json: press e to edit, c to browse the catalog"));
-        assert!(text.contains("Enter opens chat"));
+        assert!(text.contains("No models selected · c choose models"));
+        assert!(text.contains("Enter use model"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -56,7 +56,6 @@ pub(crate) enum ResponseEvent {
         cached_input_tokens: Option<u64>,
         cost_usd: Option<f64>,
     },
-    #[allow(dead_code)] // Awaiting authoritative model capability metadata.
     ContextWindow(u64),
     /// TODO(tool-runner): emit after EVERY tool call returns, including errors,
     /// before continuing the assistant response. The UI rechecks Git HEAD

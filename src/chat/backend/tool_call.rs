@@ -51,6 +51,24 @@ impl ToolCallAssembler {
         self.calls.is_empty()
     }
 
+    pub(super) fn push_function(
+        &mut self,
+        index: usize,
+        id: String,
+        name: String,
+        arguments: String,
+    ) -> Result<()> {
+        self.extend(vec![ToolCallDelta {
+            index,
+            id: Some(id),
+            kind: Some("function".to_string()),
+            function: Some(FunctionDelta {
+                name: Some(name),
+                arguments: Some(arguments),
+            }),
+        }])
+    }
+
     pub(super) fn extend(&mut self, deltas: Vec<ToolCallDelta>) -> Result<()> {
         for delta in deltas {
             if delta.index >= MAX_CALLS {

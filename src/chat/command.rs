@@ -9,6 +9,8 @@ use super::thinking::ThinkingLevel;
 pub(crate) enum ParsedCommand {
     ReopenModelPicker,
     OpenCatalog,
+    Login,
+    Gateway,
     Exit,
     Clear,
     ShowMouse,
@@ -20,13 +22,20 @@ pub(crate) enum ParsedCommand {
 }
 
 pub(crate) fn parse(text: &str) -> ParsedCommand {
+    use crate::commands::{common_action, CommonAction};
+    if let Some(action) = common_action(text) {
+        return match action {
+            CommonAction::Models => ParsedCommand::ReopenModelPicker,
+            CommonAction::Catalog => ParsedCommand::OpenCatalog,
+            CommonAction::Login => ParsedCommand::Login,
+            CommonAction::Gateway => ParsedCommand::Gateway,
+            CommonAction::Quit => ParsedCommand::Exit,
+        };
+    }
     let mut parts = text.split_whitespace();
     let name = parts.next().unwrap_or(text);
     let rest: Vec<&str> = parts.collect();
     match (name, rest.as_slice()) {
-        ("/model" | "/models", []) => ParsedCommand::ReopenModelPicker,
-        ("/catalog", []) => ParsedCommand::OpenCatalog,
-        ("/exit" | "/quit", []) => ParsedCommand::Exit,
         ("/clear", []) => ParsedCommand::Clear,
         ("/mouse", []) => ParsedCommand::ShowMouse,
         ("/mouse", ["on"]) => ParsedCommand::SetMouse(true),
