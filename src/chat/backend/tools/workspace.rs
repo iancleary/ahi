@@ -27,20 +27,23 @@ impl Workspace {
     }
 
     /// Resolve a normalized relative path. The canonical result must equal the
-    /// lexical join, so no symbolic link is followed, inside or outside.
+    /// lexical join, so no symbolic link is followed, inside or outside, and a
+    /// differently cased spelling of a real path (which `realpath` corrects on
+    /// case-insensitive filesystems) is refused rather than matched by policy.
     /// The remaining window between this check and the read is accepted for
     /// read-only tools; a sandbox, not this check, contains a hostile process.
     pub(super) fn resolve(&self, normalized: &str) -> std::result::Result<PathBuf, &'static str> {
-        let joined = if normalized.is_empty() {
-            self.root.clone()
-        } else {
-            self.root.join(normalized)
-        };
+        // Push components one at a time: a Windows verbatim (`\\?\`) root
+        // keeps a joined `/` literally, which would never match canonically.
+        let mut joined = self.root.clone();
+        for part in normalized.split('/').filter(|part| !part.is_empty()) {
+            joined.push(part);
+        }
         let canonical = joined
             .canonicalize()
             .map_err(|_| "path does not exist or cannot be read")?;
         if canonical != joined || !canonical.starts_with(&self.root) {
-            return Err("path is not a canonical path inside the working directory; symbolic links are not followed");
+            return Err("path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused");
         }
         if self
             .excluded

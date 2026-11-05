@@ -233,6 +233,23 @@ mod tests {
         let state = Err("path is inside ahi's state directory, which tools cannot read");
         assert_eq!(run(READ_FILE, "state/models.json"), state);
         assert_eq!(run(LIST_DIR, "state"), state);
+        // Case variants resolve to the same directory on case-insensitive
+        // filesystems; they must never be readable either.
+        for (tool, path) in [
+            (READ_FILE, "STATE/models.json"),
+            (LIST_DIR, "State"),
+            (READ_FILE, "SRC/main.rs"),
+        ] {
+            let result = run(tool, path);
+            assert!(
+                matches!(
+                    result,
+                    Err("path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused")
+                        | Err("path does not exist or cannot be read")
+                ),
+                "{path}: {result:?}"
+            );
+        }
         assert_eq!(run(LIST_DIR, "src/main.rs"), Err("not a directory"));
         assert_eq!(
             run(READ_FILE, "missing"),
@@ -242,7 +259,7 @@ mod tests {
         {
             let listing = run(LIST_DIR, "").unwrap();
             assert_eq!(listing, "big\nbinary\ninner@\nlink@\nsrc/\nstate/");
-            let escaped = "path is not a canonical path inside the working directory; symbolic links are not followed";
+            let escaped = "path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused";
             assert_eq!(run(READ_FILE, "link"), Err(escaped));
             assert_eq!(run(READ_FILE, "inner/main.rs"), Err(escaped));
         }

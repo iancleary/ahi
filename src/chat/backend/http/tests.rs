@@ -1110,20 +1110,72 @@ fn operator_decisions_approve_deny_and_grant_for_the_session() {
     );
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));
     assert_eq!(server.join().unwrap().len(), 3);
+}
 
-    // The grant is scoped to the gateway and still asks outside its prefix.
-    let (url, _server) = server_sequence(vec![
-        calls_stream(&[("c5", "read_file", json!({"path": "secret"}))]),
-        text_stream("done"),
+#[test]
+fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
+    let (url, _first) = server_sequence(vec![
+        calls_stream(&[("c1", "read_file", json!({"path": "src/a.rs"}))]),
+        text_stream("granted"),
     ]);
-    write_models(&fixture.state, &url, json!({"id": "vendor/model"}));
+    let fixture = ToolFixture::new(&url, ASK_ALL, json!({"id": "vendor/model"}));
     let mut backend = fixture.backend();
+    let (_, approvals) = collect_answering(
+        &mut backend,
+        request(),
+        vec![Some(vec![ToolDecision::ApproveForSession])],
+    );
+    assert_eq!(approvals.len(), 1);
+
+    // Same backend, later turn, same gateway: the grant covers src/ silently.
+    let (url, _second) = server_sequence(vec![
+        calls_stream(&[("c2", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("reused"),
+    ]);
+    let provider = |url: &str| {
+        json!({"baseUrl": url, "api": "openai-completions", "apiKey": "gateway",
+               "models": [{"id": "vendor/model"}]})
+    };
+    let write = |url: &str| {
+        fs::write(
+            fixture.state.join("models.json"),
+            json!({"providers": {"local": provider(url), "other": provider(url)}}).to_string(),
+        )
+        .unwrap()
+    };
+    write(&url);
+    let (events, approvals) = collect_answering(&mut backend, request(), vec![]);
+    assert!(approvals.is_empty());
+    assert_eq!(
+        results(&events),
+        vec![("c2".into(), 0, "fn b() {}\n".into())]
+    );
+
+    // Outside the granted prefix it still asks.
+    let (url, _third) = server_sequence(vec![
+        calls_stream(&[("c3", "read_file", json!({"path": "secret"}))]),
+        text_stream("asked"),
+    ]);
+    write(&url);
     let (_, approvals) = collect_answering(
         &mut backend,
         request(),
         vec![Some(vec![ToolDecision::Deny])],
     );
     assert_eq!(approvals.len(), 1);
+
+    // Another gateway would receive the file, so the grant does not apply.
+    let (url, _fourth) = server_sequence(vec![
+        calls_stream(&[("c4", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("asked again"),
+    ]);
+    write(&url);
+    let mut other = request();
+    other.selection = parse_selection("other/vendor/model");
+    let (events, approvals) =
+        collect_answering(&mut backend, other, vec![Some(vec![ToolDecision::Deny])]);
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(results(&events)[0].1, 126);
 }
 
 #[test]

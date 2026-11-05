@@ -500,7 +500,13 @@ impl ChatScreen {
         {
             format!("{status} ")
         } else if let Some(pending) = &self.approval {
-            pending.hint()
+            // Approval keys apply only to a blank input; say so instead of
+            // advertising keys that would edit the draft.
+            if self.input.is_blank() {
+                pending.hint()
+            } else {
+                "Tool approval waiting: clear the draft (Ctrl+C) to answer ".to_string()
+            }
         } else if self.response_in_progress {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
             if chunks[1].width < 12 {
@@ -1955,6 +1961,11 @@ mod tests {
         }
         assert_eq!(screen.input.contents(), "/quit");
         assert!(decisions.try_recv().is_err());
+        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        assert!(
+            hint.contains("clear the draft (Ctrl+C) to answer"),
+            "{hint}"
+        );
         assert_eq!(
             press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter),
             ScreenAction::Exit
