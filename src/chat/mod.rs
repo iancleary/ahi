@@ -31,7 +31,7 @@ use crossterm::event::{
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
 
 use backend::{
@@ -102,6 +102,18 @@ struct ChatScreen {
     transcript_width: usize,
     transcript_height: usize,
     spinner_frame: usize,
+    /// Wrapped rows, re-laid from `dirty_from` on demand, never per frame.
+    layout: transcript::render::TranscriptLayout,
+    dirty: transcript::render::Dirty,
+    /// A tool returned since the last drain; refresh Git status once per drain.
+    location_dirty: bool,
+    /// A Git status probe in flight on its own thread; the UI never waits on it.
+    location_receiver: Option<Receiver<(String, Option<location::GitStatus>)>>,
+    /// The backend is between connection attempts: (next attempt, of).
+    reconnecting: Option<(u8, u8)>,
+    /// The last turn failed before the gateway was reached, so Enter on a
+    /// blank input sends the same transcript again.
+    resend_available: bool,
 }
 
 impl ChatScreen {
@@ -133,6 +145,12 @@ impl ChatScreen {
             transcript_width: 80,
             transcript_height: 1,
             spinner_frame: 0,
+            layout: transcript::render::TranscriptLayout::new(),
+            dirty: transcript::render::Dirty::From(0),
+            location_dirty: false,
+            location_receiver: None,
+            reconnecting: None,
+            resend_available: false,
         };
         screen.refresh_location();
         if let Some(notice) = notice {
@@ -146,11 +164,71 @@ impl ChatScreen {
         self.thinking
     }
 
+    /// Mark the message at `index` (and everything after it) for re-layout.
+    fn mark_dirty(&mut self, index: usize) {
+        use transcript::render::Dirty;
+        self.dirty = match self.dirty {
+            Dirty::From(from) => Dirty::From(from.min(index)),
+            // An earlier full mark outranks an append of the last message.
+            Dirty::AppendedLast => Dirty::From(index.min(self.messages.len().saturating_sub(1))),
+        };
+    }
+
+    /// Text was appended to the last message and nothing else changed.
+    fn mark_appended_last(&mut self) {
+        use transcript::render::Dirty;
+        let last = self.messages.len().saturating_sub(1);
+        if let Dirty::From(from) = self.dirty {
+            if from >= last {
+                // Clean, or only the last message dirty: resume from its tail
+                // unless it was already marked for a full re-layout.
+                self.dirty = if from == last {
+                    Dirty::From(last)
+                } else {
+                    Dirty::AppendedLast
+                };
+            }
+        }
+    }
+
+    fn push_message(&mut self, message: ChatMessage) {
+        self.mark_dirty(self.messages.len());
+        self.messages.push(message);
+    }
+
+    /// Bring the row layout up to date with the transcript and width.
+    fn sync_layout(&mut self) {
+        self.layout
+            .sync(&self.messages, self.transcript_width, &mut self.dirty);
+    }
+
+    fn row_count(&mut self) -> usize {
+        self.sync_layout();
+        self.layout.len()
+    }
+
     fn set_selection(&mut self, selection: &str) {
         let selection = parse_selection(selection);
         if selection != self.selection {
             self.meters.context_tokens = None;
             self.meters.context_window = None;
+        }
+        if selection.gateway != self.selection.gateway {
+            // The transcript follows the operator to the new provider; say so
+            // before the next message carries it there.
+            let carried = self
+                .messages
+                .iter()
+                .filter(|message| !message.role.is_notice())
+                .count();
+            if carried > 0 {
+                self.push_notice(format!(
+                    "switched provider from {} to {}: the {carried} messages above \
+                     will be sent to {} with your next message",
+                    self.selection.gateway, selection.gateway, selection.gateway
+                ));
+                self.scroll_from_bottom = 0;
+            }
         }
         self.selection = selection;
     }
@@ -205,9 +283,8 @@ impl ChatScreen {
                 self.text_selection.clear();
                 return self.apply_action(action, backend);
             }
-            let rows = transcript::render::rows(&self.messages, self.transcript_width);
-            let start = rows
-                .len()
+            let count = self.row_count();
+            let start = count
                 .saturating_sub(self.scroll_from_bottom)
                 .saturating_sub(self.transcript_height);
             match mouse.kind {
@@ -217,7 +294,7 @@ impl ChatScreen {
                         mouse.row,
                         self.transcript_area,
                         start,
-                        rows.len(),
+                        count,
                     );
                     self.copy_status = None;
                 }
@@ -226,7 +303,7 @@ impl ChatScreen {
                     mouse.row,
                     self.transcript_area,
                     start,
-                    rows.len(),
+                    count,
                 ),
                 MouseEventKind::Up(MouseButton::Left) if self.text_selection.release() => {
                     self.copy_selection();
@@ -325,7 +402,7 @@ impl ChatScreen {
                     }
                     self.input.clear();
                     self.settings_menu.reset();
-                    return self.dispatch_command(command);
+                    return self.dispatch_command(command, backend);
                 }
                 _ => {}
             }
@@ -333,8 +410,17 @@ impl ChatScreen {
         match action {
             KeyAction::Ignore => Ok(ScreenAction::Continue),
             KeyAction::Cancel => {
-                self.text_selection.clear();
-                self.copy_status = None;
+                // A selection or a pending approval owns Esc first; with
+                // neither, Esc stops the streaming response.
+                if self.response_in_progress
+                    && self.approval.is_none()
+                    && self.text_selection.is_empty()
+                {
+                    self.cancel_response(backend);
+                } else {
+                    self.text_selection.clear();
+                    self.copy_status = None;
+                }
                 Ok(ScreenAction::Continue)
             }
             KeyAction::CopySelection => {
@@ -391,8 +477,8 @@ impl ChatScreen {
     }
 
     fn copy_selection(&mut self) {
-        let rows = transcript::render::rows(&self.messages, self.transcript_width);
-        if let Some(text) = self.text_selection.text(&rows) {
+        self.sync_layout();
+        if let Some(text) = self.text_selection.text(self.layout.rows()) {
             self.pending_copy = Some(text);
             self.poll_clipboard();
         }
@@ -421,29 +507,49 @@ impl ChatScreen {
     }
 
     fn poll_backend(&mut self) {
-        let Some(receiver) = self.receiver.take() else {
-            return;
-        };
-        loop {
-            match receiver.try_recv() {
-                Ok(event) => {
-                    let finished = self.apply_event(event);
-                    if finished {
+        if let Some(receiver) = self.receiver.take() {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let finished = self.apply_event(event);
+                        if finished {
+                            self.response_in_progress = false;
+                            self.assistant_open = false;
+                            break;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => {
+                        self.receiver = Some(receiver);
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
                         self.response_in_progress = false;
                         self.assistant_open = false;
-                        return;
+                        break;
                     }
                 }
-                Err(TryRecvError::Empty) => {
-                    self.receiver = Some(receiver);
-                    return;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.response_in_progress = false;
-                    self.assistant_open = false;
-                    return;
-                }
             }
+        }
+        self.poll_location();
+    }
+
+    /// Land a finished Git status probe, then start the one a drained batch
+    /// of tool returns asked for. One probe at a time, never on this thread.
+    fn poll_location(&mut self) {
+        if let Some(receiver) = &self.location_receiver {
+            match receiver.try_recv() {
+                Ok((directory, git_status)) => {
+                    self.location_receiver = None;
+                    self.location_directory = directory;
+                    self.location_git = git_status;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.location_receiver = None,
+            }
+        }
+        if self.location_dirty && self.location_receiver.is_none() {
+            self.location_dirty = false;
+            self.refresh_location();
         }
     }
 
@@ -471,20 +577,16 @@ impl ChatScreen {
         self.transcript_width = chunks[0].width as usize;
         self.transcript_height = chunks[0].height as usize;
         self.clamp_scroll();
-        let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width);
-        let mut visible = transcript::render::visible_text(
-            &lines,
+        let row_count = self.layout.len();
+        let (mut visible, visible_start) = transcript::render::visible_lines(
+            self.layout.rows(),
+            self.transcript_width,
             self.transcript_height,
             self.scroll_from_bottom,
         );
-        let visible_start = lines
-            .len()
-            .saturating_sub(self.scroll_from_bottom)
-            .saturating_sub(self.transcript_height);
-        self.text_selection
-            .highlight(&mut visible.lines, visible_start);
-        frame.render_widget(Paragraph::new(visible), chunks[0]);
-        let max_scroll = lines.len().saturating_sub(self.transcript_height);
+        self.text_selection.highlight(&mut visible, visible_start);
+        frame.render_widget(Paragraph::new(Text::from(visible)), chunks[0]);
+        let max_scroll = row_count.saturating_sub(self.transcript_height);
         if self.mouse_capture {
             self.scroll_navigation.draw(
                 frame,
@@ -509,11 +611,19 @@ impl ChatScreen {
             }
         } else if self.response_in_progress {
             let spinner = SPINNER[self.spinner_frame % SPINNER.len()];
+            let verb = match self.reconnecting {
+                Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
+                None => "Working".to_string(),
+            };
             if chunks[1].width < 12 {
                 format!("{spinner} ")
+            } else if chunks[1].width < 48 {
+                format!("{spinner} {verb} ")
             } else {
-                format!("{spinner} Working ")
+                format!("{spinner} {verb} · Esc cancels ")
             }
+        } else if self.resend_available && self.input.is_blank() {
+            "Enter resends the last message ".to_string()
         } else {
             String::new()
         };
@@ -587,16 +697,28 @@ impl ChatScreen {
         }
         let text = self.input.contents();
         if text.trim().is_empty() {
+            // A blank Enter after a connection failure sends the same
+            // transcript again; otherwise it does nothing.
+            if self.resend_available {
+                self.send_transcript(backend);
+            }
             return Ok(ScreenAction::Continue);
         }
         self.input.clear();
         self.settings_menu.reset();
         if text.trim_start().starts_with('/') {
-            return self.dispatch_command(text.trim());
+            return self.dispatch_command(text.trim(), backend);
         }
-        self.messages
-            .push(ChatMessage::new(TranscriptRole::Operator, text));
+        self.push_message(ChatMessage::new(TranscriptRole::Operator, text));
         self.scroll_from_bottom = 0;
+        self.send_transcript(backend);
+        Ok(ScreenAction::Continue)
+    }
+
+    /// Start a turn from the transcript as it stands. Screen-only rows stay
+    /// behind.
+    fn send_transcript(&mut self, backend: &mut dyn CompletionBackend) {
+        self.resend_available = false;
         self.refresh_location();
         let request = ChatRequest {
             selection: self.selection.clone(),
@@ -604,7 +726,7 @@ impl ChatScreen {
             messages: self
                 .messages
                 .iter()
-                .filter(|message| message.role != TranscriptRole::Notice)
+                .filter(|message| !message.role.is_notice())
                 .cloned()
                 .collect(),
         };
@@ -613,10 +735,13 @@ impl ChatScreen {
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.assistant_open = false;
-        Ok(ScreenAction::Continue)
     }
 
-    fn dispatch_command(&mut self, text: &str) -> Result<ScreenAction> {
+    fn dispatch_command(
+        &mut self,
+        text: &str,
+        backend: &mut dyn CompletionBackend,
+    ) -> Result<ScreenAction> {
         match command::parse(text) {
             ParsedCommand::ReopenModelPicker => Ok(ScreenAction::ReopenModelPicker),
             ParsedCommand::OpenCatalog => Ok(ScreenAction::OpenCatalog),
@@ -624,7 +749,13 @@ impl ChatScreen {
             ParsedCommand::Gateway => Ok(ScreenAction::Gateway),
             ParsedCommand::Exit => Ok(ScreenAction::Exit),
             ParsedCommand::Clear => {
+                // Enter waits for the turn, so this is defensive: a cleared
+                // transcript must never leave a worker streaming into it.
+                if self.response_in_progress {
+                    backend.cancel();
+                }
                 self.messages.clear();
+                self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
                 self.meters.clear_counts();
                 self.scroll_from_bottom = 0;
@@ -632,6 +763,7 @@ impl ChatScreen {
                 self.approval = None;
                 self.response_in_progress = false;
                 self.assistant_open = false;
+                self.resend_available = false;
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::SetMouse(enabled) => {
@@ -671,31 +803,37 @@ impl ChatScreen {
         // A nonzero offset means the reader has left live-follow mode. Grow
         // that offset with the transcript so the same rows remain visible.
         // Count wrapped rows, not newlines: streamed text can soft-wrap too.
-        let previous_rows = (self.scroll_from_bottom > 0).then(|| {
-            transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1)).len()
-        });
+        let previous_rows = (self.scroll_from_bottom > 0).then(|| self.row_count());
+        if !matches!(event, ResponseEvent::Reconnecting { .. }) {
+            self.reconnecting = None;
+        }
         let finished = match event {
+            ResponseEvent::Reconnecting { attempt, attempts } => {
+                self.reconnecting = Some((attempt, attempts));
+                false
+            }
             ResponseEvent::TextDelta(text) => {
                 if !self.assistant_open {
-                    self.messages
-                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
+                    self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
                 }
                 if let Some(message) = self.messages.last_mut() {
                     message.text.push_str(&text);
                 }
+                self.mark_appended_last();
                 false
             }
-            ResponseEvent::ToolCallsRequested(calls) => {
+            ResponseEvent::ToolCallsRequested { calls, native } => {
                 // The calls end the assistant message that requested them and
                 // are replayed with their results on later requests.
                 if !self.assistant_open {
-                    self.messages
-                        .push(ChatMessage::new(TranscriptRole::Assistant, ""));
+                    self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                 }
+                let last = self.messages.len().saturating_sub(1);
                 if let Some(message) = self.messages.last_mut() {
-                    message.tool = Some(ToolPayload::Calls(calls));
+                    message.tool = Some(ToolPayload::Calls { calls, native });
                 }
+                self.mark_dirty(last);
                 self.assistant_open = false;
                 false
             }
@@ -703,6 +841,7 @@ impl ChatScreen {
                 self.push_notice(String::new());
                 let pending = approval::PendingApproval::new(request, self.messages.len() - 1);
                 self.messages[pending.notice_index].text = pending.prompt();
+                self.mark_dirty(pending.notice_index);
                 // Replacing an unanswered approval drops its reply: a denial.
                 self.approval = Some(pending);
                 self.assistant_open = false;
@@ -728,8 +867,8 @@ impl ChatScreen {
             }
             ResponseEvent::ToolCallReturned => {
                 // A tool may change HEAD even when it reports an error.
-                // Refresh once per return, never on the rendering timer.
-                self.refresh_location();
+                // Refresh once per drained batch, never on the rendering timer.
+                self.location_dirty = true;
                 false
             }
             ResponseEvent::ToolResult {
@@ -745,25 +884,37 @@ impl ChatScreen {
                     name: tool,
                     content,
                 });
-                self.messages.push(message);
+                self.push_message(message);
                 self.assistant_open = false;
-                self.refresh_location();
                 false
             }
             ResponseEvent::Completed => {
                 self.approval = None;
                 true
             }
-            ResponseEvent::Failed(message) => {
+            ResponseEvent::Failed { message, kind } => {
                 self.approval = None;
-                self.push_notice(message);
+                // A connection failure left the transcript as the operator
+                // sent it (or ending in tool results): the same request can
+                // go again. A partial reply at the tail cannot.
+                self.resend_available = kind == crate::error::ErrorKind::Transport
+                    && self
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| !message.role.is_notice())
+                        .is_some_and(|message| {
+                            matches!(
+                                message.role,
+                                TranscriptRole::Operator | TranscriptRole::Tool { .. }
+                            )
+                        });
+                self.push_alert(message);
                 true
             }
         };
         if let Some(previous_rows) = previous_rows {
-            let current_rows =
-                transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1))
-                    .len();
+            let current_rows = self.row_count();
             self.scroll_from_bottom = self
                 .scroll_from_bottom
                 .saturating_add(current_rows.saturating_sub(previous_rows));
@@ -780,8 +931,48 @@ impl ChatScreen {
     }
 
     fn push_notice(&mut self, text: String) {
-        self.messages
-            .push(ChatMessage::new(TranscriptRole::Notice, text));
+        self.push_message(ChatMessage::new(TranscriptRole::Notice, text));
+    }
+
+    fn push_alert(&mut self, text: String) {
+        self.push_message(ChatMessage::new(TranscriptRole::Alert, text));
+    }
+
+    /// Esc during a response. The partial reply stays in the transcript and
+    /// is sent with the next message, as other harnesses do; an assistant
+    /// message that never received text is removed so no provider sees an
+    /// empty turn. The receiver is dropped at once: the worker stops at its
+    /// next read, request, or tool round and closes the connection.
+    fn cancel_response(&mut self, backend: &mut dyn CompletionBackend) {
+        backend.cancel();
+        self.receiver = None;
+        self.response_in_progress = false;
+        self.approval = None;
+        let partial = self.assistant_open
+            && self
+                .messages
+                .last()
+                .is_some_and(|message| message.role == TranscriptRole::Assistant);
+        let kept = if partial {
+            let empty = self
+                .messages
+                .last()
+                .is_some_and(|message| message.text.is_empty() && message.tool.is_none());
+            if empty {
+                self.messages.pop();
+                self.mark_dirty(self.messages.len());
+            }
+            !empty
+        } else {
+            false
+        };
+        self.assistant_open = false;
+        self.push_alert(if kept {
+            "response cancelled; the partial reply above stays in the transcript".to_string()
+        } else {
+            "response cancelled".to_string()
+        });
+        self.scroll_from_bottom = 0;
     }
 
     fn answer_approval(&mut self, answer: approval::ApprovalKey) {
@@ -790,9 +981,11 @@ impl ChatScreen {
         };
         let complete = pending.apply(answer);
         let prompt = pending.prompt();
-        if let Some(message) = self.messages.get_mut(pending.notice_index) {
+        let notice_index = pending.notice_index;
+        if let Some(message) = self.messages.get_mut(notice_index) {
             message.text = prompt;
         }
+        self.mark_dirty(notice_index);
         if complete {
             if let Some(pending) = self.approval.take() {
                 pending.finish();
@@ -801,19 +994,37 @@ impl ChatScreen {
         self.scroll_from_bottom = 0;
     }
 
+    /// Probe the working directory and Git status on a worker thread. The
+    /// footer keeps its last snapshot until the probe lands, so `git status`
+    /// on a large tree never stalls a keystroke or a frame.
     fn refresh_location(&mut self) {
-        let (directory, git_status) = location::current();
-        if self.location_directory != directory || self.location_git != git_status {
-            self.location_directory = directory;
-            self.location_git = git_status;
+        if self.location_receiver.is_some() {
+            self.location_dirty = true;
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(location::current());
+        });
+        self.location_receiver = Some(receiver);
+    }
+
+    /// Block until the in-flight Git status probe lands. Tests only.
+    #[cfg(test)]
+    fn wait_for_location(&mut self) {
+        if let Some(receiver) = self.location_receiver.take() {
+            if let Ok((directory, git_status)) = receiver.recv() {
+                self.location_directory = directory;
+                self.location_git = git_status;
+            }
         }
     }
 
     fn clamp_scroll(&mut self) {
-        let lines = transcript::render::wrapped_lines(&self.messages, self.transcript_width.max(1));
+        let count = self.row_count();
         transcript::render::clamp_scroll(
             &mut self.scroll_from_bottom,
-            lines.len(),
+            count,
             self.transcript_height,
         );
     }
@@ -951,8 +1162,298 @@ mod tests {
         }
     }
 
+    /// A turn that never finishes on its own; the test feeds its events.
+    struct HangingBackend {
+        requests: Vec<ChatRequest>,
+        sender: Option<mpsc::Sender<ResponseEvent>>,
+        cancels: usize,
+    }
+
+    impl CompletionBackend for HangingBackend {
+        fn submit(&mut self, request: ChatRequest) -> Receiver<ResponseEvent> {
+            self.requests.push(request);
+            let (sender, receiver) = mpsc::channel();
+            self.sender = Some(sender);
+            receiver
+        }
+
+        fn cancel(&mut self) {
+            self.cancels += 1;
+        }
+    }
+
+    #[test]
+    fn a_connection_failure_offers_a_resend_on_blank_enter_and_shows_reconnects() {
+        use crate::error::ErrorKind;
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-resend");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("explain");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        let sender = backend.sender.clone().unwrap();
+        sender
+            .send(ResponseEvent::Reconnecting {
+                attempt: 2,
+                attempts: 3,
+            })
+            .unwrap();
+        screen.poll_backend();
+        let rows = draw_lines(&mut screen, 100, 12);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Reconnecting 2/3 · Esc cancels")));
+        sender
+            .send(ResponseEvent::Failed {
+                message: "cannot reach the gateway after 3 connection attempts".into(),
+                kind: ErrorKind::Transport,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert!(!screen.response_in_progress());
+        assert!(screen.reconnecting.is_none());
+        assert!(screen.resend_available);
+        assert_eq!(
+            screen.messages().last().unwrap().role,
+            TranscriptRole::Alert
+        );
+        let rows = draw_lines(&mut screen, 100, 12);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Enter resends the last message")));
+        assert!(!rows.iter().any(|row| row.contains("Reconnecting")));
+
+        // Blank Enter sends the same transcript again, without a new row.
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        assert_eq!(backend.requests[1].messages, backend.requests[0].messages);
+        assert!(screen.response_in_progress());
+        assert!(!screen.resend_available);
+        let roles: Vec<_> = screen.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, [TranscriptRole::Operator, TranscriptRole::Alert]);
+
+        // Other kinds, and a transport failure after a partial reply, offer
+        // nothing: the tail is not a request the operator sent.
+        let sender = backend.sender.clone().unwrap();
+        sender
+            .send(ResponseEvent::TextDelta("partial".into()))
+            .unwrap();
+        sender
+            .send(ResponseEvent::Failed {
+                message: "model response stream interrupted".into(),
+                kind: ErrorKind::Transport,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert!(!screen.resend_available);
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 2);
+        screen.set_input_text("again");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        backend
+            .sender
+            .clone()
+            .unwrap()
+            .send(ResponseEvent::Failed {
+                message: "model request failed (HTTP 401)".into(),
+                kind: ErrorKind::Auth,
+            })
+            .unwrap();
+        screen.poll_backend();
+        assert!(!screen.resend_available);
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn esc_cancels_a_streaming_response_and_keeps_the_partial_reply() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-cancel");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("explain");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(screen.response_in_progress());
+        let hint = draw_lines(&mut screen, 100, 12);
+        assert!(hint.iter().any(|row| row.contains("Working · Esc cancels")));
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::TextDelta("partial ans".to_string()))
+            .unwrap();
+        screen.poll_backend();
+        assert_eq!(screen.messages().last().unwrap().text, "partial ans");
+
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        assert!(!screen.response_in_progress());
+        assert!(screen.receiver.is_none());
+        let roles: Vec<_> = screen.messages().iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            [
+                TranscriptRole::Operator,
+                TranscriptRole::Assistant,
+                TranscriptRole::Alert
+            ]
+        );
+        assert_eq!(
+            screen.messages().last().unwrap().text,
+            "response cancelled; the partial reply above stays in the transcript"
+        );
+        // Events from the abandoned turn no longer reach the screen.
+        let _ = backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::TextDelta(" more".to_string()));
+        screen.poll_backend();
+        assert_eq!(screen.messages()[1].text, "partial ans");
+        let finished = draw_lines(&mut screen, 100, 12);
+        assert!(!finished.iter().any(|row| row.contains("Working")));
+
+        // The next message carries the partial reply and not the alert.
+        screen.set_input_text("continue");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        let texts: Vec<_> = backend.requests[1]
+            .messages
+            .iter()
+            .map(|m| (m.role, m.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (TranscriptRole::Operator, "explain"),
+                (TranscriptRole::Assistant, "partial ans"),
+                (TranscriptRole::Operator, "continue"),
+            ]
+        );
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn esc_before_any_reply_leaves_no_empty_assistant_turn_and_yields_to_selection() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-cancel-early");
+        let mut screen = screen_in(&state);
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("explain");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        // An assistant message opened by an empty delta is removed again.
+        backend
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(ResponseEvent::TextDelta(String::new()))
+            .unwrap();
+        screen.poll_backend();
+        assert_eq!(screen.messages().len(), 2);
+        // A live selection owns the first Esc; the response keeps running.
+        screen
+            .text_selection
+            .begin(0, 0, Rect::new(0, 0, 80, 10), 0, 10);
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 0);
+        assert!(screen.response_in_progress());
+        assert!(screen.text_selection.is_empty());
+        screen
+            .apply_action(KeyAction::Cancel, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        let roles: Vec<_> = screen.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, [TranscriptRole::Operator, TranscriptRole::Alert]);
+        assert_eq!(screen.messages().last().unwrap().text, "response cancelled");
+        // Enter during a response keeps a command draft and cancels nothing;
+        // Esc is the one key that ends the turn.
+        screen.set_input_text("again");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        screen.set_input_text("/clear");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.cancels, 1);
+        assert_eq!(screen.input_text(), "/clear");
+        assert!(screen.response_in_progress());
+        let _ = fs::remove_dir_all(state);
+    }
+
     fn screen_in(state: &Path) -> ChatScreen {
         ChatScreen::load(state, "openai/gpt-4.1")
+    }
+
+    #[test]
+    fn git_status_is_probed_off_the_ui_thread_and_lands_on_poll() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-location");
+        let mut screen = screen_in(&state);
+        // Construction starts a probe; the footer keeps its empty snapshot
+        // until the probe lands rather than waiting on `git status`.
+        assert!(screen.location_receiver.is_some());
+        screen.wait_for_location();
+        assert!(screen.location_receiver.is_none());
+        assert!(!screen.location_directory.is_empty());
+        // A request while one is in flight is remembered, not stacked.
+        screen.refresh_location();
+        screen.refresh_location();
+        assert!(screen.location_dirty);
+        screen.wait_for_location();
+        screen.poll_location();
+        assert!(!screen.location_dirty);
+        assert!(screen.location_receiver.is_some());
+        screen.wait_for_location();
+    }
+
+    #[test]
+    fn switching_provider_with_history_posts_a_disclosure_notice_once() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-switch");
+        let mut screen = screen_in(&state);
+        // An empty transcript has nothing to disclose, at startup or later.
+        screen.set_selection("home/qwen");
+        assert!(screen.messages().is_empty());
+        screen.push_message(ChatMessage::new(TranscriptRole::Operator, "hi".to_string()));
+        screen.push_message(ChatMessage::new(
+            TranscriptRole::Assistant,
+            "hello".to_string(),
+        ));
+        // Same provider, other model: nothing to disclose.
+        screen.set_selection("home/llama");
+        assert_eq!(screen.messages().len(), 2);
+        screen.set_selection("anthropic/claude-sonnet-4-5");
+        let notice = screen.messages().last().unwrap();
+        assert_eq!(notice.role, TranscriptRole::Notice);
+        assert_eq!(
+            notice.text,
+            "switched provider from home to anthropic: the 2 messages above will be sent to anthropic with your next message"
+        );
+        assert_eq!(screen.selection.gateway, "anthropic");
     }
 
     #[test]
@@ -1818,17 +2319,26 @@ mod tests {
             arguments: serde_json::from_value(serde_json::json!({"path": "private-path"})).unwrap(),
         };
         assert!(!screen.apply_event(ResponseEvent::TextDelta("looking".into())));
-        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call.clone()])));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested {
+            calls: vec![call.clone()],
+            native: None
+        }));
         assert_eq!(
             screen.messages,
             vec![ChatMessage {
                 role: TranscriptRole::Assistant,
                 text: "looking".into(),
-                tool: Some(ToolPayload::Calls(vec![call.clone()])),
+                tool: Some(ToolPayload::Calls {
+                    calls: vec![call.clone()],
+                    native: None
+                }),
             }]
         );
         // A tool-only assistant turn renders nothing; raw arguments never render.
-        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested(vec![call])));
+        assert!(!screen.apply_event(ResponseEvent::ToolCallsRequested {
+            calls: vec![call],
+            native: None
+        }));
         assert_eq!(screen.messages.len(), 2);
         let rendered = draw_lines(&mut screen, 40, 12).join("\n");
         assert!(rendered.contains("looking"));
@@ -1985,7 +2495,10 @@ mod tests {
         let mut screen = screen_in(&state);
         let (event, decisions) = approval(&[("src/a.rs", "src")]);
         screen.apply_event(event);
-        assert!(screen.apply_event(ResponseEvent::Failed("ended".into())));
+        assert!(screen.apply_event(ResponseEvent::Failed {
+            message: "ended".into(),
+            kind: crate::error::ErrorKind::Other,
+        }));
         assert!(screen.approval.is_none());
         assert!(matches!(
             decisions.try_recv(),

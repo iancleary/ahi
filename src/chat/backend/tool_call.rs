@@ -1,8 +1,6 @@
 //! Assemble untrusted streamed function calls before exposing them to policy.
 //! Parsing a call is not authorization to execute it.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -41,14 +39,16 @@ struct PendingCall {
     arguments: String,
 }
 
+/// Calls indexed by the model's `index`: a flat array of at most `MAX_CALLS`
+/// entries, where a hole at finish means the indexes were not contiguous.
 #[derive(Default)]
 pub(super) struct ToolCallAssembler {
-    calls: BTreeMap<usize, PendingCall>,
+    calls: Vec<Option<PendingCall>>,
 }
 
 impl ToolCallAssembler {
     pub(super) fn is_empty(&self) -> bool {
-        self.calls.is_empty()
+        self.calls.iter().all(Option::is_none)
     }
 
     pub(super) fn push_function(
@@ -72,31 +72,34 @@ impl ToolCallAssembler {
     pub(super) fn extend(&mut self, deltas: Vec<ToolCallDelta>) -> Result<()> {
         for delta in deltas {
             if delta.index >= MAX_CALLS {
-                return Err(Error::new("model tool call index exceeds limit"));
+                return Err(Error::limit("model tool call index exceeds limit"));
             }
-            let call = self.calls.entry(delta.index).or_default();
+            if self.calls.len() <= delta.index {
+                self.calls.resize_with(delta.index + 1, || None);
+            }
+            let call = self.calls[delta.index].get_or_insert_with(PendingCall::default);
             if let Some(id) = delta.id {
                 if !valid_identifier(&id, 128) || call.id.as_ref().is_some_and(|old| old != &id) {
-                    return Err(Error::new("invalid or changing model tool call id"));
+                    return Err(Error::protocol("invalid or changing model tool call id"));
                 }
                 call.id = Some(id);
             }
             if let Some(kind) = delta.kind {
                 if kind != "function" {
-                    return Err(Error::new("unsupported model tool call type"));
+                    return Err(Error::protocol("unsupported model tool call type"));
                 }
                 call.kind = Some(kind);
             }
             if let Some(function) = delta.function {
                 if let Some(name) = function.name {
                     if call.name.len() + name.len() > 64 {
-                        return Err(Error::new("model tool name exceeds limit"));
+                        return Err(Error::limit("model tool name exceeds limit"));
                     }
                     call.name.push_str(&name);
                 }
                 if let Some(arguments) = function.arguments {
                     if call.arguments.len() + arguments.len() > MAX_ARGUMENT_BYTES {
-                        return Err(Error::new("model tool arguments exceed limit"));
+                        return Err(Error::limit("model tool arguments exceed limit"));
                     }
                     call.arguments.push_str(&arguments);
                 }
@@ -106,28 +109,31 @@ impl ToolCallAssembler {
     }
 
     pub(super) fn finish(self) -> Result<Vec<ToolCall>> {
-        if self.calls.is_empty() {
-            return Err(Error::new("model finished tool calls without any calls"));
+        if self.is_empty() {
+            return Err(Error::protocol(
+                "model finished tool calls without any calls",
+            ));
         }
-        let mut ids = BTreeSet::new();
-        let mut result = Vec::new();
-        for (expected_index, (index, call)) in self.calls.into_iter().enumerate() {
-            if index != expected_index {
-                return Err(Error::new("model tool call indices are not contiguous"));
-            }
+        let mut result: Vec<ToolCall> = Vec::with_capacity(self.calls.len());
+        for call in self.calls {
+            let Some(call) = call else {
+                return Err(Error::protocol(
+                    "model tool call indices are not contiguous",
+                ));
+            };
             let id = call
                 .id
-                .ok_or_else(|| Error::new("model tool call has no id"))?;
-            if !ids.insert(id.clone()) {
-                return Err(Error::new("model tool call ids are not unique"));
+                .ok_or_else(|| Error::protocol("model tool call has no id"))?;
+            if result.iter().any(|existing| existing.id == id) {
+                return Err(Error::protocol("model tool call ids are not unique"));
             }
             if call.kind.as_deref() != Some("function") || !valid_identifier(&call.name, 64) {
-                return Err(Error::new("model tool call has an invalid function"));
+                return Err(Error::protocol("model tool call has an invalid function"));
             }
             // Never include parser errors or raw arguments in diagnostics: either
             // may contain prompt text or sensitive values from the model.
             let arguments: Map<String, Value> = serde_json::from_str(&call.arguments)
-                .map_err(|_| Error::new("model tool arguments must be a JSON object"))?;
+                .map_err(|_| Error::protocol("model tool arguments must be a JSON object"))?;
             result.push(ToolCall {
                 id,
                 name: call.name,

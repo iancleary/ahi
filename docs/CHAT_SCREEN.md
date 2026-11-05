@@ -1,6 +1,6 @@
 # Chat screen
 
-Status: configured gateways stream real Chat Completions responses, and curated OpenAI selections use the browser-login [Responses transport](OPENAI_INFERENCE.md). Chat, Models, and Catalog share the **Commands** popup and guided gateway onboarding. Gateway builtin read-only tools are policy-gated by `ahi.actions.yaml`; OpenAI tool execution and conversation persistence remain unimplemented; [Tool calls](TOOL_CALLS.md) separates implemented parsing from the proposed execution lifecycle. The current interaction design and terminal evidence are documented in [Terminal experience](TERMINAL_EXPERIENCE.md); [SPEC.md](SPEC.md) remains the compatibility/security contract.
+Status: configured gateways stream real responses over the protocol their `api` declares ([Providers](PROVIDERS.md)), and curated OpenAI selections use the browser-login [Responses transport](OPENAI_INFERENCE.md). Chat, Models, and Catalog share the **Commands** popup and guided gateway onboarding. Builtin read-only tools are policy-gated by `ahi.actions.yaml` on every protocol; conversation persistence remains unimplemented; [Tool calls](TOOL_CALLS.md) separates implemented parsing from the proposed execution lifecycle. The current interaction design and terminal evidence are documented in [Terminal experience](TERMINAL_EXPERIENCE.md); [SPEC.md](SPEC.md) remains the compatibility/security contract.
 
 ## Purpose
 
@@ -26,7 +26,7 @@ From top to bottom:
 2. **Input.** A full-width horizontal rule above and below, in the accent color (cyan), with no side borders and no prompt character. Embed known context usage, such as `28.4% / 272k`, near the right end of the upper rule. Use muted lavender-blue (256-color index 103) with dim styling, one space around the label, and two trailing rule cells. Leave at least two leading rule cells. On narrow terminals, compact to percentage only, then omit the label if even that cannot fit; never wrap. Unknown usage, unknown capacity, or zero capacity leaves a plain rule, while known zero usage displays `0%`. No warning thresholds are invented. While a response is active, animate a cyan spinner and `Working` at the upper rule's left edge, opposite context; remove it on completion. In very narrow terminals show only the spinner, and shorten/hide context rather than overlap it. There is no separate activity row.
 
    Drafts soft-wrap before submission, measuring terminal cells and preserving Unicode grapheme clusters. The box grows upward from one to at most eight visual rows, moving its upper rule upward while leaving the footer and lower rule anchored. Taller drafts scroll internally to keep the insertion cursor visible; short terminals further reduce the viewport. Resizing reflows the draft without changing its contents. Visual wrapping never inserts submitted newlines; Shift+Enter still inserts a real newline. An insertion cursor after a completely full row gets a new visual row.
-3. **Workspace/model row.** The left side is a Powerlevel10k-style Nerd Font location: OS logo, folder icon, working directory (home shortened to `~`), then `on  ` and the git branch. Arch Linux uses ``; other platforms use their own logo or a generic fallback. A detached HEAD shows the short commit id instead of the branch. Outside a repository, omit the git segment. Use the operator's Powerlevel10k-style palette at normal brightness: terminal-default distro logo, blue path/folder (256-color index 31), brighter bold repository name (39), and green Git icons/branch (76). Follow the branch with nonzero Powerlevel10k worktree counts, in order: red `~N` conflicts (196), yellow `+N` staged and `!N` unstaged (178), blue `?N` untracked (39). A file can count as both staged and unstaged. Counts refer to files, not lines; a rename counts once. Clean worktrees omit markers. If status cannot be read, show `status unavailable` instead of implying clean. On the right, show `(gateway) model • thinking-level`, right-aligned. Reserve its width first, with a gap from the workspace; shorten the workspace from the left with `…` when narrow, preserving visible colors.
+3. **Workspace/model row.** The left side is a Powerlevel10k-style Nerd Font location: OS logo, folder icon, working directory (home shortened to `~`), then `on  ` and the git branch. Arch Linux uses ``; other platforms use their own logo or a generic fallback. A detached HEAD shows the short commit id instead of the branch. Outside a repository, omit the git segment. Use the operator's Powerlevel10k-style palette at normal brightness: terminal-default distro logo, blue path/folder (256-color index 31), brighter bold repository name (39), and green Git icons/branch (76). Follow the branch with nonzero Powerlevel10k worktree counts, in order: red `~N` conflicts (196), yellow `+N` staged and `!N` unstaged (178), blue `?N` untracked (39). A file can count as both staged and unstaged. Counts refer to files, not lines; a rename counts once. Clean worktrees omit markers. If status cannot be read, show `status unavailable` instead of implying clean. Status is probed on a worker thread at load, after each message is sent, and once per drained batch of tool returns; the row keeps its last snapshot until the probe lands, so a slow `git status` never delays a frame. On the right, show `(gateway) model • thinking-level`, right-aligned. Reserve its width first, with a gap from the workspace; shorten the workspace from the left with `…` when narrow, preserving visible colors.
 There is no second footer row. Cumulative input/output tokens, cache counts, cost, subscription, and compaction indicators are not permanently displayed. Commands shows cumulative reported-usage cost when calculable; it is not the provider's billing total. Other backend accounting remains internal. Context used is the input token count of the latest response, not the cumulative session total; capacity uses `k`/`M` suffixes with at most one decimal.
 
 The workspace uses the colors above at normal brightness. The provider/model/thinking segment remains muted lavender-blue (256-color index 103) with dim styling.
@@ -35,7 +35,7 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit the input. An empty or whitespace-only input does nothing. |
+| `Enter` | Submit the input. An empty or whitespace-only input does nothing, except after a connection failure, when it sends the same transcript again (the activity line says `Enter resends the last message`). |
 | `Shift+Enter`, `Alt+Enter` | Insert a newline. Both are accepted because many terminals do not report `Shift+Enter`. |
 | `Ctrl+J` | Insert a newline (fallback for terminals that report neither). |
 | `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete` | Edit within the input. `Up` and `Down` move between visual input rows, including soft-wrapped rows. |
@@ -43,7 +43,7 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 | `Ctrl+T` | Cycle the thinking level. |
 | `Ctrl+C` | Clear the input if it is not empty. Otherwise exit. |
 | `Ctrl+D` | Exit when the input is empty. |
-| `Esc` | Dismiss Commands while retaining the chat draft, or clear transcript selection. It does not currently cancel an upstream model request. During a tool approval with a blank input, deny the remaining calls. |
+| `Esc` | Dismiss Commands while retaining the chat draft, or clear transcript selection. With neither open, cancel the streaming response: the partial reply stays in the transcript and is sent with the next message, an assistant turn that received no text is removed, and a highlighted notice records the cancellation. During a tool approval with a blank input, deny the remaining calls. |
 | `y`, `s`, `n`, `a` | Only during a tool approval with a blank input: approve once, approve for the session under the shown directory, deny, or approve the remaining calls. Any other key edits the draft as usual, so `/quit` still works. |
 
 ## Commands
@@ -54,7 +54,7 @@ Non-quit command submission during an active response preserves the draft; submi
 
 | Command | Action |
 |---|---|
-| `/model` | Reload local settings and reopen the curated model picker, retaining the last valid registry if an edit is invalid. A new selection is written to `<state>/selection` and takes effect for the next message without clearing the transcript. Cancelling the picker keeps the current selection. |
+| `/model` | Reload local settings and reopen the curated model picker, retaining the last valid registry if an edit is invalid. A new selection is written to `<state>/selection` and takes effect for the next message without clearing the transcript. Choosing a model on a different provider while the transcript has messages posts a notice that those messages will go to the new provider with the next message. Cancelling the picker keeps the current selection. |
 | `/login` | Open the shared [OpenAI login view](OPENAI_LOGIN.md), also available in the model and catalog screens. Return to chat after success, failure, or cancellation without changing the active model or clearing the transcript. Like other commands except quit, wait for any active response to finish before applying. |
 | `/gateway` | Enter an inference base URL, preview its discovered catalog, and confirm registration. Opens the discovered gateway's catalog with an immediate registration/cache result. Space curates; Enter on a checked model explicitly uses it. Registration alone leaves the active model and transcript unchanged. Also available in both model screens; see [Gateway discovery](GATEWAY_DISCOVERY.md). |
 | `/thinking <level>` | Set the thinking level. With no argument, show the current level. |
@@ -69,7 +69,7 @@ The stored preference becomes a request parameter only when effective metadata e
 
 ## Backend interface
 
-`src/chat/` talks to a model through one trait. A typed `CompletionTransport` selects either gateway Chat Completions or pinned public OpenAI Responses, and each adapter normalizes streaming data into the same screen events. See [Gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md) for metadata resolution and request limits.
+`src/chat/` talks to a model through one trait. A `CompletionConnection` carries the wire protocol, the destination and authentication (`CompletionTransport`), and the model metadata separately; each protocol adapter normalizes streaming data into the same screen events. See [Gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md) for metadata resolution and request limits.
 
 ```rust
 pub struct ChatRequest {
@@ -87,21 +87,27 @@ pub enum ResponseEvent {
     ToolResult { call_id: String, tool: String, output: String, content: String, exit_code: i32 },
     ToolCallReturned,                         // after every result, including failures
     Completed,
-    Failed(String),
+    Failed { message: String, kind: ErrorKind },   // what the screen acts on
+    Reconnecting { attempt: u8, attempts: u8 },    // between connection attempts
 }
 
 pub trait CompletionBackend {
     fn submit(&mut self, request: ChatRequest) -> std::sync::mpsc::Receiver<ResponseEvent>;
+    fn cancel(&mut self) {}                   // stop the active turn
 }
 ```
 
 The screen drains the receiver on each frame tick (about 50 ms), so the user interface never blocks on the backend. No async runtime is added.
 
+**Cancellation:** `Esc` calls `cancel` and drops the receiver, so the screen is free at once. The worker checks the flag before each request, before each tool round, and around every read of the response body; bytes that arrive after the cancel are discarded, the stream ends with an error the screen never sees, and dropping the reader closes the connection, which is the only cancellation signal these APIs accept. A read blocked on a silent server returns when its next bytes arrive or the 120-second request deadline passes; closing earlier would not save tokens, since a server that is not writing cannot notice a closed socket until it writes. Rows the screen adds for itself (`Notice`, `Alert`) are never sent to a model.
+
+**Failures:** `Failed` carries the `ErrorKind`. A `Transport` failure that leaves the transcript ending in an operator message or tool results sets a resend affordance: `Enter` on a blank input sends the same transcript again. `Reconnecting` shows in the activity line while the backend waits between connection attempts to an unreachable gateway. Kinds, hints, and the retry rule are in [Providers](PROVIDERS.md#errors).
+
 **Tool-return hook:** the backend emits `ResponseEvent::ToolCallReturned` after every tool call returns (success, error, or denial), right after its `ToolResult` and before resuming the assistant response. Its handler reads the current directory/Git HEAD and worktree counts, compares them with the screen's stored snapshot, and updates changed values for the next redraw. It does not end the response or clear the transcript. Location/status are also refreshed at chat load and on normal message submission, not polled on frame ticks. HEAD is read directly; file counts use local `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z --untracked-files=all`. This reads the worktree without optional index writes or network requests. Parsing uses NUL-delimited bytes so spaces, newlines, non-UTF-8 names, renames, and conflicts are counted correctly. Ahead/behind, stash counts, and in-progress Git actions are not displayed yet. The builtin tools are read-only, so a tool-driven branch change is not yet exercised; that integration test arrives with the first writing tool.
 
 ## Tool calls
 
-Gateway tools are deny-by-default and builtin-only. OpenAI Responses parses requests but never enters this execution loop. ahi is not a package manager: it never downloads a tool, names a program from configuration, or loads a remote tool definition. `ahi.actions.yaml` in the working directory only selects and bounds the builtin tools compiled into ahi, the same posture as `repo: builtin` checkers. The file is found only in the working directory where `ahi tui` started, not in a parent repository root; starting in a subdirectory disables tools.
+Tools are deny-by-default and builtin-only, on every protocol including browser-login OpenAI Responses. ahi is not a package manager: it never downloads a tool, names a program from configuration, or loads a remote tool definition. `ahi.actions.yaml` in the working directory only selects and bounds the builtin tools compiled into ahi, the same posture as `repo: builtin` checkers. The file is found only in the working directory where `ahi tui` started, not in a parent repository root; starting in a subdirectory disables tools.
 
 | Tool | Arguments | Output |
 |---|---|---|
@@ -156,11 +162,12 @@ That was the original screen-development baseline, not current production behavi
 | `approval.rs` | Pending tool approval: per-call decisions, prompt text, and key hint |
 | `thinking.rs` | `ThinkingLevel` and `<state>/thinking` |
 | `backend/mod.rs` | `CompletionBackend`, `ChatRequest`, and `ResponseEvent` |
-| `backend/http.rs` | Transport dispatch, gateway streaming Chat Completions and builtin round loop |
+| `backend/http.rs` | The protocol-neutral turn loop: send, decode, run approved builtins, continue |
+| `backend/protocol/` | One adapter per wire protocol (Chat Completions, Responses, Anthropic Messages): request body, stream decoder, tool definitions; `replay.rs` pairs calls with results |
+| `backend/sse.rs` | Bounded SSE framing with reusable buffers, shared by the adapters |
 | `backend/http/responses.rs` | OpenAI Responses serialization, bounded stream normalization, and validated function requests |
 | `backend/tool_loop.rs` | One tool round: policy, approval, execution, results, and session grants |
 | `backend/tools/` | Builtin `read_file` and `list_dir`, and working-directory containment |
-| `backend/wire.rs` | Transcript to Chat Completions `messages`, including complete tool exchanges |
 | `../actions.rs` | `ahi.actions.yaml` parsing and rule evaluation |
 | `../commands.rs` | Shared context-aware command registry, popup state/rendering, and explicit picker outcomes |
 
@@ -182,7 +189,7 @@ That was the original screen-development baseline, not current production behavi
 
 - OpenAI Responses is implemented and verified with local HTTP fixtures; live browser-token inference acceptance was not checked in this implementation.
 - Token counts are consumed when reported. Capacity and cost remain unknown without authoritative metadata. Without a tokenizer, context capacity is displayed, not an exact preflight token-budget guarantee.
-- Reliable upstream cancellation, per-model reasoning-effort maps, image input, and native Responses reasoning/tool-result history remain future work. Gateway builtin exchanges replay in memory.
+- Cancellation closes the connection at the next read; a provider that keeps generating after a client disconnect is outside ahi's control. Per-model reasoning-effort maps and image input remain future work. Gateway builtin exchanges replay in memory.
 - The transcript, including gateway tool exchanges, is not persisted and is lost on exit. Session grants last for the process only.
 - Gateway tools run in process with software path checks, not an OS sandbox. Other sandbox profiles are refused. OpenAI tool execution remains disabled.
 

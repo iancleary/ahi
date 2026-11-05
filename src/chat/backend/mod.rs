@@ -4,10 +4,11 @@
 //! runtime is involved.
 
 mod http;
+mod protocol;
+mod sse;
 mod tool_call;
 mod tool_loop;
 pub(crate) mod tools;
-mod wire;
 
 pub(crate) use tool_call::ToolCall;
 
@@ -17,6 +18,7 @@ pub(crate) use http::HttpBackend;
 
 use super::thinking::ThinkingLevel;
 use super::transcript::ChatMessage;
+use crate::error::ErrorKind;
 
 /// Gateway and model, already split on the first slash of a selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +55,11 @@ pub(crate) struct ChatRequest {
 pub(crate) enum ResponseEvent {
     TextDelta(String),
     /// Validated requests only. This event never grants execution authority.
-    ToolCallsRequested(Vec<ToolCall>),
+    /// `native` is the provider's own output the screen stores for replay.
+    ToolCallsRequested {
+        calls: Vec<ToolCall>,
+        native: Option<super::transcript::NativeReplay>,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -81,13 +87,29 @@ pub(crate) enum ResponseEvent {
         exit_code: i32,
     },
     Completed,
-    /// A completion that could not be produced.
-    Failed(String),
+    /// A completion that could not be produced. `kind` is what the screen
+    /// acts on: a `Transport` failure before any reply offers a resend, the
+    /// others only explain themselves.
+    Failed {
+        message: String,
+        kind: ErrorKind,
+    },
+    /// A gateway could not be reached and another connection attempt follows
+    /// after a short backoff. Only connection failures are retried, never a
+    /// request the server may have received.
+    Reconnecting {
+        attempt: u8,
+        attempts: u8,
+    },
 }
 
 /// Completes one turn without blocking the screen.
 pub(crate) trait CompletionBackend {
     fn submit(&mut self, request: ChatRequest) -> Receiver<ResponseEvent>;
+    /// Stop the active turn: no further request, tool round, or stream read
+    /// proceeds, and the connection is dropped at the next read. The screen
+    /// drops the receiver as well, so the turn's final event goes nowhere.
+    fn cancel(&mut self) {}
 }
 
 /// One call awaiting the operator, described by its prepared (normalized)

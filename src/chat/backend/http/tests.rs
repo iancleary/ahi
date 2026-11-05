@@ -1,12 +1,42 @@
 use super::*;
 use crate::chat::backend::parse_selection;
-use crate::chat::backend::{ProposedAction, ToolDecision};
+use crate::chat::backend::sse::FRAME_CAP;
+use crate::chat::backend::{ProposedAction, ToolCall, ToolDecision};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
+use crate::error::ErrorKind;
+use crate::harness::{ModelMetadata, Protocol};
+use serde_json::json;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 use std::thread;
+
+/// Chat Completions stream decoding with default metadata.
+fn read_stream(body: &[u8], sender: &Sender<ResponseEvent>) -> Result<StreamOutcome> {
+    protocol::read_stream(
+        Protocol::OpenAiCompletions,
+        std::io::Cursor::new(body.to_vec()),
+        sender,
+        &ModelMetadata::default(),
+    )
+}
+
+/// Browser-token Responses request body for a text-only request.
+fn responses_request_body(request: &ChatRequest, metadata: &ModelMetadata) -> Result<Vec<u8>> {
+    protocol::request_body(
+        Protocol::OpenAiResponses,
+        &RequestContext::new(
+            &request.selection.model,
+            request.thinking,
+            metadata,
+            &request.messages,
+            None,
+            true,
+        ),
+    )
+}
 
 const RESPONSE_SECRET_MARKER: &str = "synthetic-response-secret-marker";
 
@@ -96,6 +126,13 @@ fn serve_one(listener: &TcpListener, response: &str) -> String {
     request
 }
 
+fn failed(message: impl Into<String>, kind: ErrorKind) -> ResponseEvent {
+    ResponseEvent::Failed {
+        message: message.into(),
+        kind,
+    }
+}
+
 fn request_body(request: &str) -> serde_json::Value {
     serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
@@ -126,7 +163,7 @@ fn backend(state: &Path) -> HttpBackend {
     HttpBackend::with_workspace(state.to_path_buf(), workspace)
 }
 
-fn responses_fixture(body: &str) -> (Result<()>, Vec<ResponseEvent>, String) {
+fn responses_fixture(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
     responses_fixture_with_refresh(body, false, Some("text/event-stream; charset=utf-8"))
 }
 
@@ -134,7 +171,7 @@ fn responses_fixture_with_refresh(
     body: &str,
     refresh: bool,
     content_type: Option<&str>,
-) -> (Result<()>, Vec<ResponseEvent>, String) {
+) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
     let token_server = refresh.then(|| server("200 OK", Some("application/json"), r#"{"access_token":"disposable-browser-token","refresh_token":"rotated-disposable-token","expires_in":3600,"scope":"chatgpt.tokens.use.direct"}"#));
     let token_url = token_server
         .as_ref()
@@ -151,7 +188,7 @@ fn responses_fixture_with_refresh(
     let mut input = request();
     input.selection = parse_selection("openai/curated-model");
     let metadata = crate::harness::ModelMetadata::default();
-    let body_bytes = responses::request_body(&input, &metadata).unwrap();
+    let body_bytes = responses_request_body(&input, &metadata).unwrap();
     let response = crate::harness::fixture_inference_response(
         &state,
         &body_bytes,
@@ -160,7 +197,14 @@ fn responses_fixture_with_refresh(
     )
     .unwrap();
     let (sender, receiver) = mpsc::channel();
-    let result = responses::consume(response, &sender, &metadata);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = decode(
+        Protocol::OpenAiResponses,
+        &metadata,
+        response,
+        &sender,
+        &cancel,
+    );
     let events = receiver.try_iter().collect();
     let received = server.join().unwrap();
     if let Some((_, token_server)) = token_server {
@@ -262,14 +306,15 @@ fn verify_responses_http_workflow() {
     )
     .unwrap();
     let body: serde_json::Value =
-        serde_json::from_slice(&responses::request_body(&request(), &metadata).unwrap()).unwrap();
+        serde_json::from_slice(&responses_request_body(&request(), &metadata).unwrap()).unwrap();
     assert_eq!(body["reasoning"], json!({"effort":"medium"}));
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert!(body.get("max_output_tokens").is_none());
     let metadata = serde_json::from_value::<crate::harness::ModelMetadata>(
         json!({"inputLimits":{"maxRequestBytes":1}}),
     )
     .unwrap();
-    assert!(responses::request_body(&request(), &metadata).is_err());
+    assert!(responses_request_body(&request(), &metadata).is_err());
 }
 
 fn verify_responses_http_failures() {
@@ -361,7 +406,7 @@ fn verify_responses_http_failures() {
         assert!(!format!("{events:?}").contains(RESPONSE_SECRET_MARKER));
         assert!(!events.iter().any(|event| matches!(
             event,
-            ResponseEvent::Completed | ResponseEvent::ToolCallsRequested(_)
+            ResponseEvent::Completed | ResponseEvent::ToolCallsRequested { .. }
         )));
     }
     let bodies = [
@@ -438,13 +483,28 @@ fn verify_responses_tool_requests() {
         completed_response(vec![first.clone(), second.clone()]),
     ]);
     let (result, events, _) = responses_fixture(&body);
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("tool execution is disabled"));
+    // The parser yields validated calls; only the turn loop may run them,
+    // and only through the same policy gate as every other protocol.
+    let StreamOutcome::ToolCalls {
+        text,
+        calls,
+        native,
+    } = result.unwrap()
+    else {
+        panic!("expected validated tool calls");
+    };
+    assert!(text.is_empty());
     assert!(
-        matches!(&events[..], [ResponseEvent::Usage {..}, ResponseEvent::ToolCallsRequested(calls)] if calls.len() == 2 && calls[0].id == "call_first" && calls[0].arguments["path"] == "src/世界.rs")
+        calls.len() == 2
+            && calls[0].id == "call_first"
+            && calls[0].arguments["path"] == "src/世界.rs"
     );
+    // The terminal output items travel with the calls for native replay.
+    let native = native.expect("native output items");
+    assert_eq!(native.protocol, Protocol::OpenAiResponses);
+    assert_eq!(native.items.len(), 2);
+    assert_eq!(native.items[0]["call_id"], "call_first");
+    assert!(matches!(&events[..], [ResponseEvent::Usage { .. }]));
     for (first, second, complete) in [
         (first.clone(), second.clone(), false),
         (
@@ -497,7 +557,7 @@ fn verify_responses_tool_requests() {
         assert!(result.is_err());
         assert!(!events
             .iter()
-            .any(|event| matches!(event, ResponseEvent::ToolCallsRequested(_))));
+            .any(|event| matches!(event, ResponseEvent::ToolCallsRequested { .. })));
     }
 }
 
@@ -535,7 +595,10 @@ fn collect(backend: &mut HttpBackend, request: ChatRequest) -> Vec<ResponseEvent
     let mut events = Vec::new();
     loop {
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        let done = matches!(event, ResponseEvent::Completed | ResponseEvent::Failed(_));
+        let done = matches!(
+            event,
+            ResponseEvent::Completed | ResponseEvent::Failed { .. }
+        );
         events.push(event);
         if done {
             assert!(matches!(
@@ -608,7 +671,7 @@ fn failures_do_not_echo_upstream_secrets_or_claim_completion() {
             "401 Unauthorized",
             "application/json",
             "secret-token",
-            "model request failed (HTTP 401); no automatic retry was attempted",
+            "model request failed (HTTP 401); no automatic retry was attempted; check the provider's apiKey or headers in models.json",
         ),
         (
             "302 Found",
@@ -656,7 +719,10 @@ fn failures_do_not_echo_upstream_secrets_or_claim_completion() {
         let (url, server) = server(status, Some(content_type), body);
         let state = state_for(&url);
         let events = collect(&mut backend(&state), request());
-        assert_eq!(events.last(), Some(&ResponseEvent::Failed(expected.into())));
+        assert!(
+            matches!(events.last(), Some(ResponseEvent::Failed { message, kind }) if message == expected && (*kind == ErrorKind::Auth) == expected.contains("401")),
+            "{events:?}"
+        );
         server.join().unwrap();
         fs::remove_dir_all(state).unwrap();
     }
@@ -697,11 +763,14 @@ fn fragmented_parallel_tool_calls_are_validated_but_never_executed() {
     let state = state_for(&url);
     let events = collect(&mut backend(&state), request());
     assert_eq!(events, vec![
-        ResponseEvent::ToolCallsRequested(vec![
-            ToolCall { id: "call_a".into(), name: "read_file".into(), arguments: serde_json::from_value(json!({"path": "src/main.rs"})).unwrap() },
-            ToolCall { id: "call_b".into(), name: "bash".into(), arguments: serde_json::from_value(json!({"command": "echo secret"})).unwrap() }
-        ]),
-        ResponseEvent::Failed("tool execution is disabled: no ahi.actions.yaml rule approves a builtin tool in this working directory".into())
+        ResponseEvent::ToolCallsRequested {
+            calls: vec![
+                ToolCall { id: "call_a".into(), name: "read_file".into(), arguments: serde_json::from_value(json!({"path": "src/main.rs"})).unwrap() },
+                ToolCall { id: "call_b".into(), name: "bash".into(), arguments: serde_json::from_value(json!({"command": "echo secret"})).unwrap() }
+            ],
+            native: None,
+        },
+        failed("tool execution is disabled: no ahi.actions.yaml rule approves a builtin tool in this working directory", ErrorKind::Policy)
     ]);
     let received = server.join().unwrap();
     let (_, body) = received.split_once("\r\n\r\n").unwrap();
@@ -778,18 +847,31 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     let mut backend = backend(&state);
     let mut input = request();
     input.selection = parse_selection("openai/gpt-4.1");
+    // OpenAI is implicit, so an unconfigured entry is a stale curated
+    // selection, not a missing gateway.
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "selected gateway is not registered in models.json".into()
+        vec![failed(
+            "selected model is no longer curated in models.json; reopen /model",
+            ErrorKind::Other
         )]
     );
+    input.selection = parse_selection("missing/gpt-4.1");
+    assert_eq!(
+        collect(&mut backend, input.clone()),
+        vec![failed(
+            "selected gateway is not registered in models.json",
+            ErrorKind::Other
+        )]
+    );
+    input.selection = parse_selection("openai/gpt-4.1");
     let configured = json!({"providers":{"openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-completions","models":[{"id":"gpt-4.1"}]}}});
     fs::write(state.join("models.json"), configured.to_string()).unwrap();
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "OpenAI credential unavailable: run ahi login".into()
+        vec![failed(
+            "OpenAI credential unavailable: run ahi login",
+            ErrorKind::Auth
         )]
     );
     fs::create_dir(state.join("credentials")).unwrap();
@@ -800,8 +882,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     .unwrap();
     assert_eq!(
         collect(&mut backend, input.clone()),
-        vec![ResponseEvent::Failed(
-            "run ahi login to migrate to the current OpenAI flow".into()
+        vec![failed(
+            "run ahi login to migrate to the current OpenAI flow",
+            ErrorKind::Auth
         )]
     );
     for field in ["baseUrl", "apiKey", "headers", "api"] {
@@ -809,13 +892,13 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
         conflict["providers"]["openai"][field] = match field {
             "baseUrl" => json!("http://127.0.0.1:1/v1"),
             "headers" => json!({"Authorization":"$UNSET_INFERENCE_FIXTURE"}),
-            "api" => json!("other"),
+            "api" => json!("anthropic-messages"),
             _ => json!("$UNSET_INFERENCE_FIXTURE"),
         };
         fs::write(state.join("models.json"), conflict.to_string()).unwrap();
         let events = collect(&mut backend, input.clone());
         assert!(
-            matches!(&events[..], [ResponseEvent::Failed(message)] if message.contains("conflict") || message.contains("browser credentials require") || message.contains("api must be openai-completions")),
+            matches!(&events[..], [ResponseEvent::Failed { message, .. }] if message.contains("conflict") || message.contains("browser credentials require") || message.contains("api must be openai-completions")),
             "{events:?}"
         );
     }
@@ -824,8 +907,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
     input.selection.model = "removed".into();
     assert_eq!(
         collect(&mut backend, input),
-        vec![ResponseEvent::Failed(
-            "selected model is no longer curated in models.json; reopen /model".into()
+        vec![failed(
+            "selected model is no longer curated in models.json; reopen /model",
+            ErrorKind::Other
         )]
     );
     fs::remove_dir_all(state).unwrap();
@@ -888,6 +972,262 @@ fn calls_stream(calls: &[(&str, &str, serde_json::Value)]) -> String {
     stream(&tool_stream(&[json!(deltas)], "tool_calls"))
 }
 
+#[test]
+fn cancelling_a_turn_closes_the_connection_at_the_next_read_and_never_completes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let delta = |text: &str| {
+            format!(
+                "data: {}\n\n",
+                json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]})
+            )
+        };
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.write_all(delta("partial").as_bytes()).unwrap();
+        // The client cancels while this read is blocked; the next bytes are
+        // what let it notice, and they must not reach the transcript.
+        thread::sleep(Duration::from_millis(400));
+        let _ = stream.write_all(delta(" more").as_bytes());
+        let started = std::time::Instant::now();
+        let mut byte = [0u8; 1];
+        let closed = matches!(stream.read(&mut byte), Ok(0) | Err(_));
+        (closed, started.elapsed())
+    });
+    let state = state_for(&url);
+    let mut backend = backend(&state);
+    let receiver = backend.submit(request());
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ResponseEvent::TextDelta(text) => {
+                assert_eq!(text, "partial");
+                break;
+            }
+            ResponseEvent::ContextWindow(_) | ResponseEvent::Usage { .. } => {}
+            other => panic!("unexpected event before the first delta: {other:?}"),
+        }
+    }
+    backend.cancel();
+    let mut events = Vec::new();
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(event) => {
+                let done = matches!(
+                    event,
+                    ResponseEvent::Completed | ResponseEvent::Failed { .. }
+                );
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("worker did not stop after cancel"),
+        }
+    }
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::Completed)));
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed { message, .. }) if message == "response cancelled"),
+        "{events:?}"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::TextDelta(text) if text == " more")));
+    let (closed, waited) = server.join().unwrap();
+    assert!(closed, "the client kept the connection open after cancel");
+    assert!(waited < Duration::from_secs(3), "close took {waited:?}");
+    let _ = fs::remove_dir_all(state);
+}
+
+/// A loopback port with nothing listening: bind, read the port, drop.
+fn unused_port_url() -> (String, u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    (format!("http://127.0.0.1:{port}/v1"), port)
+}
+
+#[test]
+fn an_unreachable_gateway_gets_three_connection_attempts_then_a_transport_failure() {
+    let (url, _) = unused_port_url();
+    let state = state_for(&url);
+    let started = std::time::Instant::now();
+    let events = collect(&mut backend(&state), request());
+    let elapsed = started.elapsed();
+    let reconnects: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseEvent::Reconnecting { attempt, attempts } => Some((*attempt, *attempts)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reconnects, [(2, 3), (3, 3)]);
+    assert!(
+        matches!(
+            events.last(),
+            Some(ResponseEvent::Failed { message, kind: ErrorKind::Transport })
+                if message.starts_with("cannot reach the gateway after 3 connection attempts")
+        ),
+        "{events:?}"
+    );
+    // Both pauses were taken (250 ms + 750 ms) and nothing waited on a deadline.
+    assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn a_gateway_that_comes_up_during_the_backoff_serves_the_turn() {
+    let (url, port) = unused_port_url();
+    let state = state_for(&url);
+    // Nothing listens for the first attempt and the first pause; the
+    // listener appears before the last attempt (at about 1 s).
+    let server = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(450));
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        serve_one(&listener, &text_stream("late but here"))
+    });
+    let events = collect(&mut backend(&state), request());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::Reconnecting { .. })));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ResponseEvent::TextDelta(text) if text == "late but here")));
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let received = server.join().unwrap();
+    assert!(received.starts_with("POST /v1/chat/completions HTTP/1.1"));
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn cancelling_during_the_backoff_ends_the_turn_without_another_attempt() {
+    let (url, _) = unused_port_url();
+    let state = state_for(&url);
+    let mut backend = backend(&state);
+    let receiver = backend.submit(request());
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ResponseEvent::Reconnecting { attempt: 2, .. } => break,
+            ResponseEvent::ContextWindow(_) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+    let started = std::time::Instant::now();
+    backend.cancel();
+    let last = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(&last, ResponseEvent::Failed { message, .. } if message == "response cancelled"),
+        "{last:?}"
+    );
+    // Well inside the 250 ms pause: the wait polled the flag.
+    assert!(started.elapsed() < Duration::from_millis(200));
+    fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn an_authentication_failure_names_the_credential_source_and_never_its_value() {
+    for (api_key, headers, expected_hint) in [
+        (
+            json!("$AHI_TEST_GATEWAY_KEY"),
+            json!({}),
+            "check the AHI_TEST_GATEWAY_KEY environment variable this gateway's credential is read from",
+        ),
+        // Header values are the `gateway` marker or `$NAME`; models.json never
+        // holds a literal secret.
+        (
+            json!(null),
+            json!({"X-Token": "gateway"}),
+            "check the provider's apiKey or headers in models.json",
+        ),
+        (
+            json!(null),
+            json!({}),
+            "this gateway is configured without a credential; add apiKey or headers in models.json",
+        ),
+    ] {
+        let (url, server) = server("403 Forbidden", Some("application/json"), "secret-body");
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-auth-hint");
+        let mut provider = json!({
+            "baseUrl": url, "api": "openai-completions", "headers": headers,
+            "models": [{"id": "vendor/model"}]
+        });
+        if !api_key.is_null() {
+            provider["apiKey"] = api_key;
+        }
+        fs::write(
+            state.join("models.json"),
+            json!({"providers": {"local": provider}}).to_string(),
+        )
+        .unwrap();
+        // The variable exists only inside the resolver; the hint must carry
+        // its name and nothing of its value.
+        let events = {
+            let _guard = EnvGuard::set("AHI_TEST_GATEWAY_KEY", "gateway-secret-value");
+            collect(&mut backend(&state), request())
+        };
+        match events.last() {
+            Some(ResponseEvent::Failed { message, kind }) => {
+                assert_eq!(*kind, ErrorKind::Auth, "{message}");
+                assert_eq!(
+                    message,
+                    &format!(
+                        "model request failed (HTTP 403); no automatic retry was attempted; {expected_hint}"
+                    )
+                );
+                assert!(!message.contains("secret"));
+            }
+            other => panic!("{other:?}"),
+        }
+        server.join().unwrap();
+        fs::remove_dir_all(state).unwrap();
+    }
+}
+
+/// Set an environment variable for one scope. Tests that read the environment
+/// run in parallel, so the name is unique to this test.
+struct EnvGuard(&'static str);
+
+impl EnvGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        std::env::set_var(name, value);
+        Self(name)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
+    }
+}
+
 fn text_stream(text: &str) -> String {
     stream(&format!(
         "data: {}\n\ndata: [DONE]\n\n",
@@ -915,7 +1255,10 @@ fn collect_answering(
                 }
             }
             event => {
-                let done = matches!(event, ResponseEvent::Completed | ResponseEvent::Failed(_));
+                let done = matches!(
+                    event,
+                    ResponseEvent::Completed | ResponseEvent::Failed { .. }
+                );
                 events.push(event);
                 if done {
                     assert!(answers.is_empty(), "unused approval answers");
@@ -960,11 +1303,14 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
     assert_eq!(
         events,
         vec![
-            ResponseEvent::ToolCallsRequested(vec![super::super::tools::call(
-                "call_a",
-                "read_file",
-                json!({"path": "./src/a.rs"})
-            )]),
+            ResponseEvent::ToolCallsRequested {
+                calls: vec![super::super::tools::call(
+                    "call_a",
+                    "read_file",
+                    json!({"path": "./src/a.rs"})
+                )],
+                native: None,
+            },
             ResponseEvent::ToolResult {
                 call_id: "call_a".into(),
                 tool: "read_file".into(),
@@ -1113,12 +1459,32 @@ fn operator_decisions_approve_deny_and_grant_for_the_session() {
 }
 
 #[test]
-fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
-    let (url, _first) = server_sequence(vec![
+fn a_session_grant_carries_across_turns_but_not_to_another_gateway_or_destination() {
+    // One server, one destination, for every turn below: a grant is bound to
+    // the exact destination, so each turn must reach the same URL.
+    let (url, _server) = server_sequence(vec![
         calls_stream(&[("c1", "read_file", json!({"path": "src/a.rs"}))]),
         text_stream("granted"),
+        calls_stream(&[("c2", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("reused"),
+        calls_stream(&[("c3", "read_file", json!({"path": "secret"}))]),
+        text_stream("asked"),
+        calls_stream(&[("c4", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("asked again"),
     ]);
     let fixture = ToolFixture::new(&url, ASK_ALL, json!({"id": "vendor/model"}));
+    let provider = |url: &str| {
+        json!({"baseUrl": url, "api": "openai-completions", "apiKey": "gateway",
+               "models": [{"id": "vendor/model"}]})
+    };
+    let write = |local: &str, other: &str| {
+        fs::write(
+            fixture.state.join("models.json"),
+            json!({"providers": {"local": provider(local), "other": provider(other)}}).to_string(),
+        )
+        .unwrap()
+    };
+    write(&url, &url);
     let mut backend = fixture.backend();
     let (_, approvals) = collect_answering(
         &mut backend,
@@ -1127,23 +1493,8 @@ fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
     );
     assert_eq!(approvals.len(), 1);
 
-    // Same backend, later turn, same gateway: the grant covers src/ silently.
-    let (url, _second) = server_sequence(vec![
-        calls_stream(&[("c2", "read_file", json!({"path": "src/b.rs"}))]),
-        text_stream("reused"),
-    ]);
-    let provider = |url: &str| {
-        json!({"baseUrl": url, "api": "openai-completions", "apiKey": "gateway",
-               "models": [{"id": "vendor/model"}]})
-    };
-    let write = |url: &str| {
-        fs::write(
-            fixture.state.join("models.json"),
-            json!({"providers": {"local": provider(url), "other": provider(url)}}).to_string(),
-        )
-        .unwrap()
-    };
-    write(&url);
+    // Same backend, later turn, same gateway and destination: the grant
+    // covers src/ silently.
     let (events, approvals) = collect_answering(&mut backend, request(), vec![]);
     assert!(approvals.is_empty());
     assert_eq!(
@@ -1152,11 +1503,6 @@ fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
     );
 
     // Outside the granted prefix it still asks.
-    let (url, _third) = server_sequence(vec![
-        calls_stream(&[("c3", "read_file", json!({"path": "secret"}))]),
-        text_stream("asked"),
-    ]);
-    write(&url);
     let (_, approvals) = collect_answering(
         &mut backend,
         request(),
@@ -1165,17 +1511,33 @@ fn a_session_grant_carries_across_turns_but_not_to_another_gateway() {
     assert_eq!(approvals.len(), 1);
 
     // Another gateway would receive the file, so the grant does not apply.
-    let (url, _fourth) = server_sequence(vec![
-        calls_stream(&[("c4", "read_file", json!({"path": "src/b.rs"}))]),
-        text_stream("asked again"),
-    ]);
-    write(&url);
     let mut other = request();
     other.selection = parse_selection("other/vendor/model");
     let (events, approvals) =
         collect_answering(&mut backend, other, vec![Some(vec![ToolDecision::Deny])]);
     assert_eq!(approvals.len(), 1);
-    assert_eq!(results(&events)[0].1, 126);
+    assert_eq!(
+        results(&events),
+        vec![("c4".into(), 126, "denied: denied by the operator".into())]
+    );
+
+    // The same gateway id reconfigured to a different URL is a different
+    // destination; the grant does not follow the id there.
+    let (moved, _moved) = server_sequence(vec![
+        calls_stream(&[("c5", "read_file", json!({"path": "src/b.rs"}))]),
+        text_stream("asked at the new destination"),
+    ]);
+    write(&moved, &url);
+    let (events, approvals) = collect_answering(
+        &mut backend,
+        request(),
+        vec![Some(vec![ToolDecision::Deny])],
+    );
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(
+        results(&events),
+        vec![("c5".into(), 126, "denied: denied by the operator".into())]
+    );
 }
 
 #[test]
@@ -1197,8 +1559,9 @@ fn a_dropped_approval_denies_the_batch_and_ends_the_turn() {
     assert_eq!(returns(&events), 2);
     assert_eq!(
         events.last(),
-        Some(&ResponseEvent::Failed(
-            "tool approval was cancelled; no further calls ran".into()
+        Some(&failed(
+            "tool approval was cancelled; no further calls ran",
+            ErrorKind::Other
         ))
     );
     assert_eq!(server.join().unwrap().len(), 1);
@@ -1223,9 +1586,10 @@ fn the_round_cap_returns_results_and_stops() {
     assert_eq!(returns(&events), rounds + 1);
     assert_eq!(
         events.last(),
-        Some(&ResponseEvent::Failed(format!(
-            "model exceeded {rounds} tool rounds in one turn; no further calls ran"
-        )))
+        Some(&failed(
+            format!("model exceeded {rounds} tool rounds in one turn; no further calls ran"),
+            ErrorKind::Limit
+        ))
     );
     assert_eq!(server.join().unwrap().len(), rounds + 1);
 }
@@ -1245,9 +1609,14 @@ fn a_resubmission_over_max_request_bytes_fails_before_network() {
     fs::write(fixture.workspace.join("src/big.txt"), "x".repeat(8192)).unwrap();
     let (events, _) = collect_answering(&mut fixture.backend(), request(), vec![]);
     assert_eq!(results(&events)[0].1, 0);
-    assert_eq!(
-        events.last(),
-        Some(&ResponseEvent::Failed("model request exceeds inputLimits.maxRequestBytes; shorten the conversation or select another model".into()))
+    assert!(
+        matches!(
+            events.last(),
+            Some(ResponseEvent::Failed { message, kind: ErrorKind::Limit })
+                if message.starts_with("model request is ")
+                    && message.ends_with(" bytes, over inputLimits.maxRequestBytes (4096); /clear the conversation, send a shorter message, or select another model")
+        ),
+        "{events:?}"
     );
     assert_eq!(server.join().unwrap().len(), 1);
 }
@@ -1281,11 +1650,14 @@ fn earlier_tool_exchanges_replay_on_the_next_turn() {
     let (url, server) = server_sequence(vec![text_stream("again")]);
     let state = state_for(&url);
     let mut assistant = ChatMessage::new(TranscriptRole::Assistant, "checking");
-    assistant.tool = Some(ToolPayload::Calls(vec![super::super::tools::call(
-        "call_a",
-        "read_file",
-        json!({"path": "a"}),
-    )]));
+    assistant.tool = Some(ToolPayload::Calls {
+        calls: vec![super::super::tools::call(
+            "call_a",
+            "read_file",
+            json!({"path": "a"}),
+        )],
+        native: None,
+    });
     let mut result = ChatMessage::new(TranscriptRole::Tool { exit_code: 0 }, "preview only");
     result.tool = Some(ToolPayload::Result {
         call_id: "call_a".into(),
@@ -1317,4 +1689,204 @@ fn earlier_tool_exchanges_replay_on_the_next_turn() {
     );
     assert!(body.get("tools").is_none());
     fs::remove_dir_all(state).unwrap();
+}
+
+// ---- Other wire protocols through the same loop ----
+
+fn anthropic_events(events: &[serde_json::Value]) -> String {
+    stream(
+        &events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect::<String>(),
+    )
+}
+
+fn anthropic_text(text: &str) -> String {
+    anthropic_events(&[
+        json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":20,"cache_read_input_tokens":5}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+fn anthropic_tool_use(id: &str, name: &str, input: &str) -> String {
+    anthropic_events(&[
+        json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":20}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+fn write_protocol_models(state: &Path, url: &str, api: &str) {
+    fs::write(
+        state.join("models.json"),
+        json!({"providers": {"local": {
+            "baseUrl": url, "api": api, "apiKey": "gateway",
+            "models": [{"id": "vendor/model", "maxTokens": 2048}]
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_anthropic_gateway_runs_the_same_tool_loop_and_replays_blocks() {
+    let (url, server) = server_sequence(vec![
+        anthropic_tool_use("toolu_01", "read_file", "{\"path\": \"src/a.rs\"}"),
+        anthropic_text("done"),
+    ]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    write_protocol_models(&fixture.state, &url, "anthropic-messages");
+    let events = collect(&mut fixture.backend(), request());
+    assert_eq!(
+        results(&events),
+        vec![("toolu_01".into(), 0, "fn a() {}\n".into())]
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ResponseEvent::Usage {
+            input_tokens: 25,
+            output_tokens: 3,
+            cached_input_tokens: Some(5),
+            ..
+        }
+    )));
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("POST /v1/messages HTTP/1.1"));
+    let lower = requests[0].to_ascii_lowercase();
+    assert!(lower.contains("x-api-key: gateway\r\n"), "{lower}");
+    assert!(lower.contains("anthropic-version: 2023-06-01\r\n"));
+    assert!(!lower.contains("authorization:"));
+    let first = request_body(&requests[0]);
+    assert_eq!(first["max_tokens"], 2048);
+    assert_eq!(first["tools"][0]["name"], "read_file");
+    assert!(first["tools"][0]["input_schema"].is_object());
+    assert!(first.get("system").is_none());
+    assert_eq!(first["messages"][0]["role"], "user");
+    assert_eq!(first["messages"][0]["content"][0]["text"], "first");
+    let second = request_body(&requests[1]);
+    let messages = second["messages"].as_array().unwrap();
+    let assistant = &messages[messages.len() - 2];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"][0]["type"], "tool_use");
+    assert_eq!(assistant["content"][0]["id"], "toolu_01");
+    assert_eq!(assistant["content"][0]["input"]["path"], "src/a.rs");
+    let result = &messages[messages.len() - 1];
+    assert_eq!(result["role"], "user");
+    assert_eq!(
+        result["content"][0],
+        json!({"type": "tool_result", "tool_use_id": "toolu_01", "content": "fn a() {}\n", "is_error": false})
+    );
+}
+
+#[test]
+fn a_responses_gateway_sends_output_limits_and_replays_function_items() {
+    let function = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"src/b.rs\"}"});
+    let first = response_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":function}),
+        json!({"type":"response.output_item.done","output_index":0,"item":function}),
+        completed_response(vec![function.clone()]),
+    ]);
+    let second = response_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_fixture","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_fixture","content_index":0,"delta":"ok"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":response_message("ok")}),
+        completed_response(vec![response_message("ok")]),
+    ]);
+    let (url, server) = server_sequence(vec![stream(&first), stream(&second)]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    write_protocol_models(&fixture.state, &url, "openai-responses");
+    let events = collect(&mut fixture.backend(), request());
+    assert_eq!(
+        results(&events),
+        vec![("call_1".into(), 0, "fn b() {}\n".into())]
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("POST /v1/responses HTTP/1.1"));
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("authorization: bearer gateway\r\n"));
+    let body = request_body(&requests[0]);
+    // A gateway, not a browser token: the output budget is sent.
+    assert_eq!(body["max_output_tokens"], 2048);
+    assert_eq!(body["store"], false);
+    assert_eq!(body["tools"][0]["type"], "function");
+    assert_eq!(body["tools"][0]["name"], "read_file");
+    let input = request_body(&requests[1])["input"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(input[input.len() - 2]["type"], "function_call");
+    assert_eq!(input[input.len() - 2]["call_id"], "call_1");
+    assert_eq!(
+        input[input.len() - 1],
+        json!({"type": "function_call_output", "call_id": "call_1", "output": "fn b() {}\n"})
+    );
+}
+
+#[test]
+fn a_cancelled_approval_runs_no_call_in_a_mixed_batch() {
+    // One call a rule approves outright, one that must ask. Dropping the
+    // reply cancels the whole batch: the approved read must not run either.
+    let (url, _server) = server_sequence(vec![calls_stream(&[
+        ("c1", "read_file", json!({"path": "src/a.rs"})),
+        ("c2", "list_dir", json!({"path": "src"})),
+    ])]);
+    let mixed = "version: 1\nrules:\n\
+        - {id: reads, action: tool_call, match: {tool: read_file, path: src}, effect: approve}\n\
+        - {id: ask-list, action: tool_call, match: {tool: list_dir}, effect: approve, ask: true}\n";
+    let fixture = ToolFixture::new(&url, mixed, json!({"id": "vendor/model"}));
+    let (events, approvals) = collect_answering(&mut fixture.backend(), request(), vec![None]);
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(
+        results(&events),
+        vec![
+            ("c1".into(), 126, "denied: approval cancelled".into()),
+            ("c2".into(), 126, "denied: approval cancelled".into()),
+        ]
+    );
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed { message, .. }) if message.contains("cancelled"))
+    );
+}
+
+#[test]
+fn the_turn_output_bound_is_a_cap_including_diagnostics() {
+    let (url, _server) = server_sequence(vec![
+        calls_stream(&[("c1", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c2", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c3", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c4", "read_file", json!({"path": "src/big.txt"}))]),
+        calls_stream(&[("c5", "read_file", json!({"path": "src/big.txt"}))]),
+        text_stream("done"),
+    ]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    fs::write(fixture.workspace.join("src/big.txt"), "y".repeat(64 * 1024)).unwrap();
+    let events = collect(&mut fixture.backend(), request());
+    let results = results(&events);
+    assert_eq!(results.len(), 5);
+    let total: usize = results.iter().map(|(_, _, content)| content.len()).sum();
+    // Content is capped; each call may add one fixed truncation notice.
+    assert!(
+        total <= super::super::tool_loop::MAX_TURN_OUTPUT_BYTES + 5 * 64,
+        "{total}"
+    );
+    assert!(results[3].2.len() <= 64 * 1024 + 64);
+    assert!(results[4].2.contains("budget") && results[4].2.len() <= 64);
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
 }

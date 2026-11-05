@@ -57,6 +57,8 @@ def main() -> None:
                     os.chdir(cwd)
                 env.pop("VISUAL", None)
                 env.pop("EDITOR", None)
+                # A developer's Anthropic key would add an implicit provider.
+                env.pop("ANTHROPIC_API_KEY", None)
                 if editor:
                     env["VISUAL"] = f"/bin/sh '{editor}'"
                 os.execve(binary, [str(binary), "--state-dir", str(state), "tui"], env)
@@ -676,6 +678,7 @@ def main() -> None:
             session.close()
         environment = os.environ.copy()
         environment["PATH"] = "/nonexistent"
+        environment.pop("ANTHROPIC_API_KEY", None)
         result = subprocess.run(
             [str(binary), "--state-dir", str(login_state), "login"],
             input="bare-code\n", text=True, capture_output=True,
@@ -1191,7 +1194,7 @@ def main() -> None:
             local_provider["models"][0]["inputLimits"] = {"maxRequestBytes": 1}
             reload_metadata()
             session.send("verify byte rejection\r")
-            session.expect("model request exceeds inputLimits.maxRequestBytes")
+            session.expect("over inputLimits.maxRequestBytes (")
             assert len(gateway_requests) == before
             session.capture("metadata-byte-rejection")
             local_provider["models"][0].pop("inputLimits")
@@ -1282,7 +1285,7 @@ def main() -> None:
             local_path.write_text(json.dumps(local_document))
             before = len(gateway_requests)
             session.send("容量\r")
-            session.expect("model request exceeds inputLimits.maxRequestBytes")
+            session.expect("over inputLimits.maxRequestBytes (")
             assert len(gateway_requests) == before
             session.send("/clear\r")
             local_provider["models"][0]["inputLimits"]["maxRequestBytes"] = exact_bytes

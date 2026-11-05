@@ -11,8 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
-
 use super::tools::{self, PreparedCall, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
@@ -35,13 +33,15 @@ pub(super) const EXIT_DENIED: i32 = 126;
 static NEXT_BATCH: AtomicU64 = AtomicU64::new(1);
 
 /// An operator approval that outlives one batch: this tool, under this
-/// non-empty prefix, in this workspace, for this gateway. Switching the
-/// gateway or the working directory needs a new approval, because the grant
-/// decides which files leave the machine and where they go.
+/// non-empty prefix, in this workspace, for this gateway at this destination.
+/// Switching the gateway, reconfiguring its URL, or changing the working
+/// directory needs a new approval, because the grant decides which files
+/// leave the machine and where they go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SessionGrant {
     root: PathBuf,
     gateway: String,
+    destination: String,
     tool: String,
     prefix: String,
 }
@@ -54,6 +54,7 @@ pub(super) struct ToolRuntime {
     workspace: Workspace,
     advertised: Vec<String>,
     gateway: String,
+    destination: String,
     grants: SessionGrants,
     rounds: usize,
     output_bytes: usize,
@@ -78,6 +79,7 @@ impl ToolRuntime {
         directory: &Path,
         state: &Path,
         gateway: &str,
+        destination: &str,
         grants: SessionGrants,
     ) -> Result<Option<Self>> {
         let Some(policy) = actions::load(directory, &tools::BUILTIN)? else {
@@ -92,14 +94,16 @@ impl ToolRuntime {
             policy,
             advertised,
             gateway: gateway.to_string(),
+            destination: destination.to_string(),
             grants,
             rounds: 0,
             output_bytes: 0,
         }))
     }
 
-    pub(super) fn definitions(&self) -> Vec<Value> {
-        tools::definitions(&self.advertised)
+    /// Protocol-neutral schemas of the advertised builtins.
+    pub(super) fn schemas(&self) -> Vec<tools::ToolSchema> {
+        tools::schemas(&self.advertised)
     }
 
     /// Decide and run one batch, emitting `ToolResult` then `ToolCallReturned`
@@ -127,11 +131,17 @@ impl ToolRuntime {
         let cancelled = self.ask(calls, &mut plans, sender)?;
         let mut messages = Vec::with_capacity(calls.len());
         for (call, plan) in calls.iter().zip(plans) {
-            let outcome = match plan {
+            let mut outcome = match plan {
                 Plan::Done(outcome) => outcome,
+                // A cancelled batch runs nothing further, including calls that
+                // rules alone had approved: the operator walked away from it.
+                Plan::Ask(prepared) | Plan::Run(prepared) if cancelled => {
+                    denied(&prepared, "approval cancelled")
+                }
                 Plan::Ask(prepared) => denied(&prepared, "approval cancelled"),
                 Plan::Run(prepared) => self.run(&prepared),
             };
+            self.account(&mut outcome);
             let mut message = ChatMessage::new(
                 TranscriptRole::Tool {
                     exit_code: outcome.exit_code,
@@ -157,7 +167,7 @@ impl ToolRuntime {
             messages.push(message);
         }
         if over_limit {
-            return Err(Error::new(format!(
+            return Err(Error::limit(format!(
                 "model exceeded {MAX_ROUNDS} tool rounds in one turn; no further calls ran"
             )));
         }
@@ -189,6 +199,7 @@ impl ToolRuntime {
             grants.iter().any(|grant| {
                 grant.root == self.workspace.root()
                     && grant.gateway == self.gateway
+                    && grant.destination == self.destination
                     && grant.tool == prepared.tool
                     && path_within(&grant.prefix, &prepared.path)
             })
@@ -254,6 +265,7 @@ impl ToolRuntime {
                             grants.push(SessionGrant {
                                 root: self.workspace.root().to_path_buf(),
                                 gateway: self.gateway.clone(),
+                                destination: self.destination.clone(),
                                 tool: prepared.tool.to_string(),
                                 prefix,
                             });
@@ -276,21 +288,36 @@ impl ToolRuntime {
             );
         }
         match tools::execute(prepared, &self.workspace) {
-            Ok(content) => {
-                self.output_bytes += content.len();
-                Outcome {
-                    exit_code: EXIT_OK,
-                    output: format!(
-                        "{} {}\n{}",
-                        prepared.tool,
-                        prepared.target(),
-                        preview(&content)
-                    ),
-                    content,
-                }
-            }
+            Ok(content) => Outcome {
+                exit_code: EXIT_OK,
+                output: format!(
+                    "{} {}\n{}",
+                    prepared.tool,
+                    prepared.target(),
+                    preview(&content)
+                ),
+                content,
+            },
             Err(message) => error(prepared.tool, Some(prepared.target()), message),
         }
+    }
+
+    /// Charge every result's model-facing content, including denials and
+    /// errors, against the turn budget. Content past the budget is cut and
+    /// replaced by a fixed notice, so a turn returns at most
+    /// `MAX_TURN_OUTPUT_BYTES` of tool content plus one short notice per call.
+    fn account(&mut self, outcome: &mut Outcome) {
+        const NOTICE: &str = "\n[truncated: tool output budget for this turn is exhausted]";
+        let remaining = MAX_TURN_OUTPUT_BYTES.saturating_sub(self.output_bytes);
+        if outcome.content.len() > remaining {
+            let mut cut = remaining;
+            while cut > 0 && !outcome.content.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            outcome.content.truncate(cut);
+            outcome.content.push_str(NOTICE);
+        }
+        self.output_bytes = self.output_bytes.saturating_add(outcome.content.len());
     }
 }
 

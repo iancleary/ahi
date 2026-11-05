@@ -50,13 +50,15 @@ fn refresh_at(state: &Path, catalog_url: &str, token_url: &str) -> Result<Vec<St
     authenticated(state, token_url, |token| fetch_models(catalog_url, token))
 }
 
-pub(crate) fn inference_response(state: &Path, body: &[u8]) -> Result<ureq::Response> {
-    inference_response_at(
-        state,
-        body,
-        "https://api.openai.com/v1/responses",
-        OPENAI_TOKEN,
-    )
+/// The only destination a browser credential is ever sent to for inference.
+pub(super) const INFERENCE_URL: &str = "https://api.openai.com/v1/responses";
+
+pub(crate) fn inference_response(
+    state: &Path,
+    body: &[u8],
+    client: &ureq::Agent,
+) -> Result<ureq::Response> {
+    inference_response_at(state, body, INFERENCE_URL, OPENAI_TOKEN, client)
 }
 
 #[cfg(test)]
@@ -66,7 +68,11 @@ pub(crate) fn fixture_inference_response(
     inference_url: &str,
     token_url: &str,
 ) -> Result<ureq::Response> {
-    inference_response_at(state, body, inference_url, token_url)
+    let client = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(120))
+        .build();
+    inference_response_at(state, body, inference_url, token_url, &client)
 }
 
 fn inference_response_at(
@@ -74,11 +80,8 @@ fn inference_response_at(
     body: &[u8],
     inference_url: &str,
     token_url: &str,
+    client: &ureq::Agent,
 ) -> Result<ureq::Response> {
-    let client = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(Duration::from_secs(120))
-        .build();
     authenticated(state, token_url, |token| {
         match client
             .post(inference_url)
@@ -96,7 +99,7 @@ fn inference_response_at(
             Err(ureq::Error::Status(status, _)) => {
                 Err(FetchError::Other(status_error("inference", status)))
             }
-            Err(_) => Err(FetchError::Other(Error::new(
+            Err(_) => Err(FetchError::Other(Error::transport(
                 "OpenAI inference network, TLS, or timeout error; generation was not retried",
             ))),
         }
@@ -128,23 +131,23 @@ fn authenticated<T>(
 
 fn read_credential(state: &Path) -> Result<Credential> {
     let file = fs::File::open(state.join("credentials/openai.json"))
-        .map_err(|_| Error::new("OpenAI credential unavailable: run ahi login"))?;
+        .map_err(|_| Error::auth("OpenAI credential unavailable: run ahi login"))?;
     let bytes = bounded_read(file)?;
     // Never propagate serde errors: they can contain secret values.
     let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| Error::new("invalid OpenAI credential: run ahi login"))?;
+        .map_err(|_| Error::auth("invalid OpenAI credential: run ahi login"))?;
     if value.get("flow").and_then(Value::as_str) != Some(FLOW) {
-        return Err(Error::new(MIGRATE));
+        return Err(Error::auth(MIGRATE));
     }
     let credential: Credential = serde_json::from_value(value)
-        .map_err(|_| Error::new("invalid OpenAI credential: run ahi login"))?;
+        .map_err(|_| Error::auth("invalid OpenAI credential: run ahi login"))?;
     if !valid_secret(&credential.access_token)
         || !valid_secret(&credential.refresh_token)
         || !valid_secret(&credential.client_id)
         || credential.resource != OPENAI_ORIGIN
         || !credential.scopes.iter().any(|scope| scope == DIRECT_SCOPE)
     {
-        return Err(Error::new(
+        return Err(Error::auth(
             "invalid OpenAI direct-token credential: run ahi login",
         ));
     }
@@ -159,7 +162,7 @@ enum FetchError {
 impl FetchError {
     fn into_error(self) -> Error {
         match self {
-            Self::Unauthorized => Error::new(EXPIRED),
+            Self::Unauthorized => Error::auth(EXPIRED),
             Self::Other(error) => error,
         }
     }
@@ -228,11 +231,15 @@ fn fetch_models(url: &str, token: &str) -> std::result::Result<Vec<String>, Fetc
 
 fn status_error(operation: &str, status: u16) -> Error {
     if (300..400).contains(&status) {
-        Error::new(format!(
+        Error::transport(format!(
             "OpenAI {operation} redirects are not followed (HTTP {status})"
         ))
+    } else if status == 401 || status == 403 {
+        Error::auth(format!(
+            "OpenAI {operation} HTTP {status}: run ahi login if authorization was revoked"
+        ))
     } else {
-        Error::new(format!(
+        Error::transport(format!(
             "OpenAI {operation} HTTP {status}: run ahi login if authorization was revoked"
         ))
     }
@@ -1164,7 +1171,7 @@ mod tests {
                     (final_status, "fixture body".into()),
                 ]);
                 let (url, requests) = server(replies);
-                let result = inference_response_at(
+                let result = fixture_inference_response(
                     &dir,
                     b"{\"store\":false}",
                     &format!("{url}/responses"),
@@ -1202,7 +1209,7 @@ mod tests {
                 ("401 Unauthorized", "private upstream text".into()),
                 (status, "private upstream text".into()),
             ]);
-            let error = inference_response_at(
+            let error = fixture_inference_response(
                 &dir,
                 b"{}",
                 &format!("{url}/responses"),
@@ -1220,7 +1227,7 @@ mod tests {
             let dir = credential_dir();
             let before = fs::read(dir.join("credentials/openai.json")).unwrap();
             let (url, requests) = server(vec![(status, "private upstream text".into())]);
-            let error = inference_response_at(&dir, b"{}", &url, "http://127.0.0.1:1/token")
+            let error = fixture_inference_response(&dir, b"{}", &url, "http://127.0.0.1:1/token")
                 .err()
                 .unwrap()
                 .to_string();

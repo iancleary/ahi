@@ -38,29 +38,22 @@ pub fn save_curated_models(
                 path.display()
             ))
         })?;
-    if provider != OPENAI_ID && !providers.contains_key(provider) {
-        return Err(Error::new(format!(
-            "unknown provider `{provider}` in models.json"
-        )));
-    }
-    if provider == OPENAI_ID && !providers.contains_key(provider) {
-        // Materializing the implicit built-in must not move it behind gateways.
+    if !providers.contains_key(provider) {
+        let Some(implicit) = implicit_entry_json(provider) else {
+            return Err(Error::new(format!(
+                "unknown provider `{provider}` in models.json"
+            )));
+        };
+        // An implicit built-in sorts first in the picker (no saved position);
+        // materialize it at the front and leave every saved position alone.
         let mut ordered = serde_json::Map::new();
-        ordered.insert(
-            OPENAI_ID.to_string(),
-            serde_json::json!({
-                "baseUrl": OPENAI_ORIGIN, "api": "openai-completions"
-            }),
-        );
+        ordered.insert(provider.to_string(), implicit);
         ordered.extend(std::mem::take(providers));
         *providers = ordered;
     }
-    let entry = providers.entry(provider).or_insert_with(|| {
-        serde_json::json!({
-            "baseUrl": OPENAI_ORIGIN,
-            "api": "openai-completions",
-        })
-    });
+    let entry = providers
+        .get_mut(provider)
+        .expect("provider was inserted above");
     let retained = entry
         .get("models")
         .and_then(Value::as_array)
@@ -136,9 +129,11 @@ pub fn save_provider_order(
     for id in order {
         let entry = match providers.remove(id) {
             Some(entry) => entry,
-            None if id == OPENAI_ID => serde_json::json!({
-                "baseUrl": OPENAI_ORIGIN, "api": "openai-completions", "models": []
-            }),
+            None if implicit_entry_json(id).is_some() => {
+                let mut entry = implicit_entry_json(id).expect("checked above");
+                entry["models"] = serde_json::json!([]);
+                entry
+            }
             None => return Err(Error::new("gateway to reorder is missing from models.json")),
         };
         reordered.insert(id.clone(), entry);

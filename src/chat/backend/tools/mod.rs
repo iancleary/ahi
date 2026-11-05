@@ -52,37 +52,52 @@ impl PreparedCall {
     }
 }
 
-/// Function definitions for the request's `tools` field, in builtin order.
-pub(super) fn definitions(enabled: &[String]) -> Vec<Value> {
+/// One builtin's schema, independent of any wire protocol. Each protocol
+/// serializes this into its own `tools` shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolSchema {
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
+    /// A JSON Schema object for the arguments.
+    pub(crate) parameters: Value,
+}
+
+/// Schemas for the enabled builtins, in builtin order.
+pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
     let path = |description: &str| json!({"type": "string", "description": description});
     BUILTIN
         .iter()
         .filter(|name| enabled.iter().any(|tool| tool == *name))
-        .map(|name| {
-            let (description, parameters) = match *name {
-                READ_FILE => (
-                    "Read a UTF-8 text file inside the working directory. Output is capped at 64 KiB.",
-                    json!({
-                        "type": "object",
-                        "properties": {"path": path("File path relative to the working directory")},
-                        "required": ["path"],
-                        "additionalProperties": false
-                    }),
-                ),
-                _ => (
-                    "List a directory inside the working directory. Directories end with '/', symbolic links with '@'. At most 500 entries.",
-                    json!({
-                        "type": "object",
-                        "properties": {"path": path("Directory relative to the working directory; defaults to '.'")},
-                        "additionalProperties": false
-                    }),
-                ),
-            };
-            json!({
-                "type": "function",
-                "function": {"name": name, "description": description, "parameters": parameters}
-            })
+        .map(|name| match *name {
+            READ_FILE => ToolSchema {
+                name: READ_FILE,
+                description: "Read a UTF-8 text file inside the working directory. Output is capped at 64 KiB.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"path": path("File path relative to the working directory")},
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+            },
+            _ => ToolSchema {
+                name: LIST_DIR,
+                description: "List a directory inside the working directory. Directories end with '/', symbolic links with '@'. At most 500 entries.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"path": path("Directory relative to the working directory; defaults to '.'")},
+                    "additionalProperties": false
+                }),
+            },
         })
+        .collect()
+}
+
+/// Chat Completions `tools[]` definitions for the enabled builtins.
+#[cfg(test)]
+pub(super) fn definitions(enabled: &[String]) -> Vec<Value> {
+    schemas(enabled)
+        .iter()
+        .map(crate::chat::backend::protocol::chat_completions::definition)
         .collect()
 }
 

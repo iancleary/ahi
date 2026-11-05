@@ -21,23 +21,66 @@ mod curation;
 mod gateway;
 mod metadata;
 mod openai;
+mod protocol;
 pub use metadata::{
-    CompletionCompatibility, InputLimits, InputModality, ModelCost, ModelMetadata, TokenParameter,
-    TokenPrice,
+    CompletionCompatibility, InputLimits, InputModality, ModelCost, ModelMetadata, ThinkingMode,
+    TokenParameter, TokenPrice,
 };
+pub(crate) use protocol::CatalogRoute;
+pub use protocol::Protocol;
 
 /// Resolved only when submitting a turn. Never log or debug-print credentials.
+///
+/// Three axes are kept apart on purpose: the provider's identity (the id the
+/// operator selected), the wire protocol it speaks, and how the request is
+/// authenticated. A protocol never implies an authentication scheme, and a
+/// configured gateway can never become the destination for a browser credential.
 pub(crate) struct CompletionConnection {
+    pub(crate) protocol: Protocol,
     pub(crate) transport: CompletionTransport,
     pub(crate) metadata: ModelMetadata,
+    /// Where the credential came from, so an authentication failure can name
+    /// the place to fix. Never the value.
+    pub(crate) credential: Credential,
 }
 
+/// The source of a connection's credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Credential {
+    BrowserLogin,
+    /// `apiKey` or a header read from this environment variable.
+    Environment(String),
+    /// The `gateway` marker as `apiKey` or a header value in models.json.
+    Configured,
+    None,
+}
+
+/// Destination and authentication for one connection.
 pub(crate) enum CompletionTransport {
+    /// A configured gateway: resolved headers, any protocol.
     Gateway {
         url: String,
         headers: BTreeMap<String, String>,
     },
+    /// The built-in OpenAI browser-login credential. Destination is pinned
+    /// inside `openai::inference_response`; protocol is always Responses.
     OpenAiResponses,
+}
+
+impl CompletionConnection {
+    /// Browser-token Responses omits request fields the subscription endpoint
+    /// rejects (Pi's `isChatGPTSignIn` boundary). Gateways get the full request.
+    pub(crate) fn browser_token(&self) -> bool {
+        matches!(self.transport, CompletionTransport::OpenAiResponses)
+    }
+
+    /// What a session grant is bound to: the exact destination, not the id.
+    pub(crate) fn destination(&self) -> &str {
+        match &self.transport {
+            CompletionTransport::Gateway { url, .. } => url,
+            CompletionTransport::OpenAiResponses => openai::INFERENCE_URL,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -52,33 +95,83 @@ pub(crate) fn completion_connection(
     let bytes = read_models_bytes(state)?;
     let file = parse_models(state, bytes.as_deref())?;
     let entry = file
-        .providers
-        .get(provider)
+        .entry(provider)
         .ok_or_else(|| Error::new("selected gateway is not registered in models.json"))?;
     if !entry.models.iter().any(|choice| choice.id == model) {
         return Err(Error::new(
             "selected model is no longer curated in models.json; reopen /model",
         ));
     }
+    let catalog = read_last_good(state, provider).ok().flatten();
+    let metadata = merge_metadata(catalog.as_ref(), &entry, model);
     if provider == OPENAI_ID {
         openai::catalog_source(&entry.base_url)?;
-        if entry.api != "openai-completions" || entry.api_key.is_some() || !entry.headers.is_empty()
+        if entry.api != Protocol::OpenAiCompletions
+            || entry.api_key.is_some()
+            || !entry.headers.is_empty()
         {
             return Err(Error::new("OpenAI browser login conflicts with configured api, apiKey, or headers; use a separate gateway id for proxies"));
         }
         return Ok(CompletionConnection {
+            protocol: Protocol::OpenAiResponses,
             transport: CompletionTransport::OpenAiResponses,
-            metadata: effective_metadata(state, provider, entry, model),
+            metadata,
+            credential: Credential::BrowserLogin,
         });
     }
     if entry.base_url.contains(['?', '#', '\\']) || entry.base_url.chars().any(char::is_control) {
         return Err(Error::new("inference baseUrl must not contain a query, fragment, backslash, or control characters"));
     }
-    let mut headers = BTreeMap::new();
+    let headers = gateway_headers(&entry)?;
+    let credential = credential_source(&entry);
+    Ok(CompletionConnection {
+        protocol: entry.api,
+        transport: CompletionTransport::Gateway {
+            url: format!(
+                "{}{}",
+                entry.base_url.trim_end_matches('/'),
+                entry.api.inference_path()
+            ),
+            headers,
+        },
+        metadata,
+        credential,
+    })
+}
+
+fn credential_source(entry: &ProviderEntry) -> Credential {
     if let Some(key) = &entry.api_key {
+        return match key.strip_prefix('$') {
+            Some(name) => Credential::Environment(name.to_string()),
+            None => Credential::Configured,
+        };
+    }
+    if let Some(name) = entry
+        .headers
+        .values()
+        .find_map(|value| value.strip_prefix('$'))
+    {
+        return Credential::Environment(name.to_string());
+    }
+    if entry.headers.is_empty() {
+        Credential::None
+    } else {
+        Credential::Configured
+    }
+}
+
+/// Resolve a gateway's authentication and extra headers. Secrets are read from
+/// the environment here and nowhere earlier.
+fn gateway_headers(entry: &ProviderEntry) -> Result<BTreeMap<String, String>> {
+    let mut headers = BTreeMap::new();
+    for (name, value) in entry.api.fixed_headers() {
+        headers.insert((*name).to_string(), (*value).to_string());
+    }
+    if let Some(key) = &entry.api_key {
+        let (name, prefix) = entry.api.api_key_header();
         headers.insert(
-            "authorization".to_string(),
-            format!("Bearer {}", resolve_marker(key)?),
+            name.to_string(),
+            format!("{prefix}{}", resolve_marker(key)?),
         );
     }
     for (name, value) in &entry.headers {
@@ -103,13 +196,7 @@ pub(crate) fn completion_connection(
             return Err(Error::new("duplicate inference header"));
         }
     }
-    Ok(CompletionConnection {
-        transport: CompletionTransport::Gateway {
-            url: format!("{}/chat/completions", entry.base_url.trim_end_matches('/')),
-            headers,
-        },
-        metadata: effective_metadata(state, provider, entry, model),
-    })
+    Ok(headers)
 }
 
 fn resolve_marker(value: &str) -> Result<String> {
@@ -135,6 +222,11 @@ pub(crate) use gateway::{
 
 pub const OPENAI_ID: &str = "openai";
 pub const OPENAI_ORIGIN: &str = "https://api.openai.com/v1";
+/// Built-in Anthropic provider, authenticated with an API key from the
+/// environment. It appears when `ANTHROPIC_API_KEY` is set or an entry exists.
+pub const ANTHROPIC_ID: &str = "anthropic";
+pub const ANTHROPIC_ORIGIN: &str = "https://api.anthropic.com/v1";
+pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 // Gateway-specific discovery convention, not an OpenAI API standard.
 const CATALOG_PATH: &str = "/agent/models.json";
 const BODY_CAP: u64 = 1024 * 1024;
@@ -263,22 +355,22 @@ pub fn load_registry(state: &Path) -> Result<Registry> {
 
 fn registry_from_models(state: &Path, file: ModelsFile, models_bytes: Option<Vec<u8>>) -> Registry {
     let mut providers = Vec::new();
-    let openai = file.providers.get(OPENAI_ID);
+    let openai = file.entry(OPENAI_ID).expect("openai is always implicit");
     providers.push(load_provider(
         state,
         OPENAI_ID,
-        openai
-            .map(|entry| entry.base_url.as_str())
-            .unwrap_or(OPENAI_ORIGIN),
-        openai
-            .map(|entry| entry.models.as_slice())
-            .unwrap_or_default(),
+        &openai,
         if state.join("credentials/openai.json").is_file() {
             "signed-in"
         } else {
             "signed-out"
         },
     ));
+    if !file.providers.contains_key(ANTHROPIC_ID) {
+        if let Some(entry) = file.entry(ANTHROPIC_ID) {
+            providers.push(load_provider(state, ANTHROPIC_ID, &entry, "env"));
+        }
+    }
     for (id, entry) in &file.providers {
         if id == OPENAI_ID {
             continue;
@@ -295,20 +387,7 @@ fn registry_from_models(state: &Path, file: ModelsFile, models_bytes: Option<Vec
         } else {
             "none"
         };
-        providers.push(load_provider(
-            state,
-            id,
-            &entry.base_url,
-            &entry.models,
-            auth,
-        ));
-    }
-    for provider in &mut providers {
-        if let Some(entry) = file.providers.get(&provider.id) {
-            for model in &mut provider.models {
-                model.metadata = effective_metadata(state, &provider.id, entry, &model.id);
-            }
-        }
+        providers.push(load_provider(state, id, entry, auth));
     }
     // Provider object order is the picker order. An unconfigured built-in
     // OpenAI stays first until an explicit reorder materializes its entry.
@@ -407,27 +486,19 @@ fn parse_models(state: &Path, bytes: Option<&[u8]>) -> Result<ModelsFile> {
     }
 }
 
-fn load_provider(
-    state: &Path,
-    id: &str,
-    base_url: &str,
-    configured: &[ModelId],
-    auth: &str,
-) -> LoadedProvider {
+/// Load one provider from its entry and its last-good catalog. The catalog is
+/// read once here; every curated model's metadata is merged from that one copy.
+fn load_provider(state: &Path, id: &str, entry: &ProviderEntry, auth: &str) -> LoadedProvider {
     let (catalog, catalog_error) = match read_last_good(state, id) {
         Ok(catalog) => (catalog, None),
         Err(err) => (None, Some(err.to_string())),
     };
-    let models = configured
+    let models = entry
+        .models
         .iter()
         .map(|model| ModelChoice {
             id: model.id.clone(),
-            metadata: catalog
-                .as_ref()
-                .and_then(|catalog| catalog.metadata.get(&model.id))
-                .cloned()
-                .unwrap_or_default()
-                .overlay(&model.metadata),
+            metadata: merge_metadata(catalog.as_ref(), entry, &model.id),
             status: match &catalog {
                 None => CatalogMembership::Unavailable,
                 Some(catalog) if catalog.models.contains(&model.id) => CatalogMembership::Listed,
@@ -437,12 +508,12 @@ fn load_provider(
         .collect();
     LoadedProvider {
         id: id.to_string(),
-        base_url: base_url.to_string(),
+        base_url: entry.base_url.clone(),
         models,
         auth: auth.to_string(),
         catalog,
         catalog_error,
-        empty_reason: configured.is_empty().then(|| {
+        empty_reason: entry.models.is_empty().then(|| {
             "no models in models.json: press e to edit, c to browse the catalog".to_string()
         }),
     }
@@ -452,33 +523,46 @@ fn load_provider(
 pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
     check_id(id)?;
     let file = read_models(state)?;
+    let entry = file
+        .entry(id)
+        .ok_or_else(|| Error::new(format!("unknown provider `{id}`")))?;
     let (source, models, metadata) = if id == OPENAI_ID {
-        let base_url = file
-            .providers
-            .get(id)
-            .map(|entry| entry.base_url.as_str())
-            .unwrap_or(OPENAI_ORIGIN);
         (
-            openai::catalog_source(base_url)?,
-            openai::refresh(state, base_url)?,
+            openai::catalog_source(&entry.base_url)?,
+            openai::refresh(state, &entry.base_url)?,
             BTreeMap::new(),
         )
     } else {
-        let entry = file
-            .providers
-            .get(id)
-            .ok_or_else(|| Error::new(format!("unknown provider `{id}`")))?;
-        let catalog = fetch_gateway_catalog(&entry.base_url, Some(id))?;
-        if catalog.provider_id != id {
-            return Err(Error::new(
-                "catalog provider id does not match registered gateway",
-            ));
+        match entry.api.catalog_route() {
+            CatalogRoute::GatewayConvention => {
+                let catalog = fetch_gateway_catalog(&entry.base_url, Some(id))?;
+                if catalog.provider_id != id {
+                    return Err(Error::new(
+                        "catalog provider id does not match registered gateway",
+                    ));
+                }
+                (
+                    catalog_url(&entry.base_url)?,
+                    catalog.models,
+                    catalog.metadata,
+                )
+            }
+            CatalogRoute::StandardModels => {
+                let headers = gateway_headers(&entry)?;
+                let (models, mut metadata) = fetch_standard_models(&entry.base_url, &headers)?;
+                // `/models` lists ids and names only. Typed metadata that
+                // discovery or an earlier refresh recorded for an id that is
+                // still listed survives; the fresh name overlays it.
+                if let Ok(Some(previous)) = read_last_good(state, id) {
+                    for (model, fresh) in metadata.iter_mut() {
+                        if let Some(kept) = previous.metadata.get(model) {
+                            *fresh = kept.overlay(fresh);
+                        }
+                    }
+                }
+                (standard_models_url(&entry.base_url), models, metadata)
+            }
         }
-        (
-            catalog_url(&entry.base_url)?,
-            catalog.models,
-            catalog.metadata,
-        )
     };
     write_last_good(
         state,
@@ -500,10 +584,31 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
 /// not persisted in the catalog (a failed refresh leaves that file untouched).
 pub fn refresh_all(state: &Path) -> Result<BTreeMap<String, String>> {
     let registry = load_registry(state)?;
+    // Providers refresh concurrently: each writes only its own catalog file,
+    // so N providers take one round trip, not N in sequence.
+    let outcomes = std::thread::scope(|scope| {
+        let handles: Vec<_> = registry
+            .providers
+            .iter()
+            .map(|provider| {
+                let id = provider.id.as_str();
+                (id, scope.spawn(move || refresh_provider(state, id)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(id, handle)| {
+                let outcome = handle
+                    .join()
+                    .unwrap_or_else(|_| Err(Error::new("catalog refresh thread panicked")));
+                (id, outcome)
+            })
+            .collect::<Vec<_>>()
+    });
     let mut errors = BTreeMap::new();
-    for provider in registry.providers {
-        if let Err(err) = refresh_provider(state, &provider.id) {
-            errors.insert(provider.id, err.to_string());
+    for (id, outcome) in outcomes {
+        if let Err(err) = outcome {
+            errors.insert(id.to_string(), err.to_string());
         }
     }
     Ok(errors)
@@ -514,8 +619,80 @@ fn catalog_url(base_url: &str) -> Result<String> {
     Ok(format!("{origin}{CATALOG_PATH}"))
 }
 
+fn standard_models_url(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+/// `GET <baseUrl>/models` as OpenAI and Anthropic publish it: a `data` array of
+/// objects with an `id`, and for Anthropic a `display_name`. Anthropic pages
+/// with `has_more`/`last_id`; a bounded number of pages is followed.
+fn fetch_standard_models(
+    base_url: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<(Vec<String>, BTreeMap<String, ModelMetadata>)> {
+    #[derive(Deserialize)]
+    struct Page {
+        data: Vec<Entry>,
+        #[serde(default)]
+        has_more: bool,
+        #[serde(default)]
+        last_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        #[serde(default)]
+        display_name: Option<String>,
+    }
+    const MAX_PAGES: usize = 8;
+    let mut models = Vec::new();
+    let mut metadata = BTreeMap::new();
+    let mut after: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let mut url = format!("{}?limit=1000", standard_models_url(base_url));
+        if let Some(after) = &after {
+            if !valid_model_id(after) || after.contains(['&', '?', '#', '/', '%']) {
+                return Err(Error::protocol("invalid model catalog page cursor"));
+            }
+            url.push_str("&after_id=");
+            url.push_str(after);
+        }
+        let bytes = http_get_with_headers(&url, headers)?;
+        // Never propagate serde errors: a body can contain anything.
+        let page: Page = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::protocol("invalid model catalog: expected a data array"))?;
+        for entry in page.data {
+            if !valid_model_id(&entry.id) {
+                return Err(Error::protocol("invalid model catalog id"));
+            }
+            if metadata.contains_key(&entry.id) {
+                return Err(Error::protocol("duplicate model catalog id"));
+            }
+            let model = ModelMetadata {
+                name: entry
+                    .display_name
+                    .filter(|name| !name.trim().is_empty() && !name.chars().any(char::is_control)),
+                ..ModelMetadata::default()
+            };
+            metadata.insert(entry.id.clone(), model);
+            models.push(entry.id);
+        }
+        if !page.has_more {
+            return Ok((models, metadata));
+        }
+        after = match page.last_id.or_else(|| models.last().cloned()) {
+            Some(cursor) if Some(&cursor) != after.as_ref() => Some(cursor),
+            _ => return Err(Error::protocol("model catalog pagination did not advance")),
+        };
+    }
+    Err(Error::limit(
+        "model catalog has more pages than ahi follows; curate models by id instead",
+    ))
+}
+
 struct GatewayCatalog {
     provider_id: String,
+    protocol: Protocol,
     api_key: String,
     base_url: String,
     models: Vec<String>,
@@ -534,7 +711,10 @@ fn fetch_gateway_catalog(base_url: &str, registered: Option<&str>) -> Result<Gat
             .iter()
             .filter(|(id, entry)| match registered {
                 Some(registered) => id.as_str() == registered,
-                None => entry.get("api").and_then(Value::as_str) == Some("openai-completions"),
+                None => entry
+                    .get("api")
+                    .and_then(Value::as_str)
+                    .is_some_and(|api| Protocol::parse(api).is_some()),
             })
             .collect::<Vec<_>>();
         if registered.is_none() && candidates.len() > 1 {
@@ -579,9 +759,6 @@ fn fetch_gateway_catalog(base_url: &str, registered: Option<&str>) -> Result<Gat
             "catalog baseUrl must have the same origin as the entered gateway URL",
         ));
     }
-    if catalog.api != "openai-completions" {
-        return Err(Error::new("catalog API must be openai-completions"));
-    }
     check_marker("catalog apiKey", &catalog.api_key)
         .map_err(|_| Error::new("catalog apiKey must be gateway or a valid $NAME reference"))?;
     let provider_id = match (&catalog.id, &catalog.provider) {
@@ -612,6 +789,7 @@ fn fetch_gateway_catalog(base_url: &str, registered: Option<&str>) -> Result<Gat
     }
     Ok(GatewayCatalog {
         provider_id,
+        protocol: catalog.api,
         api_key: catalog.api_key,
         base_url: inference_url.trim_end_matches('/').to_string(),
         models,
@@ -620,17 +798,43 @@ fn fetch_gateway_catalog(base_url: &str, registered: Option<&str>) -> Result<Gat
 }
 
 fn http_get(url: &str) -> Result<Vec<u8>> {
+    http_get_with_headers(url, &BTreeMap::new())
+}
+
+/// Bounded JSON GET. With headers, the response is authenticated and its
+/// error text can carry upstream content, so transport errors are generic.
+fn http_get_with_headers(url: &str, headers: &BTreeMap<String, String>) -> Result<Vec<u8>> {
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(FETCH_TIMEOUT)
         .timeout_read(FETCH_TIMEOUT)
         .timeout_write(FETCH_TIMEOUT)
         .build();
-    let response = match agent.get(url).set("Accept", "application/json").call() {
+    let mut request = agent.get(url).set("Accept", "application/json");
+    for (name, value) in headers {
+        request = request.set(name, value);
+    }
+    let authenticated = !headers.is_empty();
+    let response = match request.call() {
         Ok(response) => response,
         Err(ureq::Error::Status(code, _)) if (300..400).contains(&code) => {
-            return Err(Error::new(format!(
+            return Err(Error::transport(format!(
                 "redirects are not followed ({code} from {url})"
+            )));
+        }
+        Err(ureq::Error::Status(401 | 403, _)) if authenticated => {
+            return Err(Error::auth(format!(
+                "catalog fetch {url}: authentication rejected; check the configured key"
+            )));
+        }
+        Err(ureq::Error::Status(code, _)) if authenticated => {
+            return Err(Error::transport(format!(
+                "catalog fetch {url}: status {code}"
+            )));
+        }
+        Err(_) if authenticated => {
+            return Err(Error::transport(format!(
+                "catalog fetch {url}: network, TLS, or timeout error"
             )));
         }
         Err(err) => return Err(Error::new(format!("catalog fetch {url}: {err}"))),
@@ -778,9 +982,11 @@ fn check_id(id: &str) -> Result<()> {
 }
 
 fn check_entry(id: &str, entry: &ProviderEntry) -> Result<()> {
-    if entry.api != "openai-completions" {
+    // The reserved `openai` id keeps its legacy spelling; it selects browser
+    // login and the Responses adapter regardless (see completion_connection).
+    if id == OPENAI_ID && entry.api != Protocol::OpenAiCompletions {
         return Err(Error::new(format!(
-            "gateway `{id}` api must be openai-completions"
+            "gateway `{id}` api must be openai-completions (browser login selects the Responses transport)"
         )));
     }
     validate_inference_url(&entry.base_url)?;
@@ -822,15 +1028,15 @@ fn check_marker(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn effective_metadata(
-    state: &Path,
-    provider: &str,
+/// Effective metadata for one curated model: the cached catalog entry, then the
+/// provider's compat defaults, then the model's own local fields on top. A pure
+/// function over data the caller already holds; it reads no file.
+fn merge_metadata(
+    catalog: Option<&CatalogSnapshot>,
     entry: &ProviderEntry,
     model: &str,
 ) -> ModelMetadata {
-    let cached = read_last_good(state, provider)
-        .ok()
-        .flatten()
+    let cached = catalog
         .and_then(|catalog| catalog.metadata.get(model).cloned())
         .unwrap_or_default();
     let mut local = entry
@@ -1007,6 +1213,86 @@ struct ModelsFile {
     _schema: Option<String>,
 }
 
+impl ModelsFile {
+    /// The configured entry, or the implicit built-in one for a reserved id.
+    /// `openai` is always implicit; `anthropic` only when its key is set.
+    fn entry(&self, id: &str) -> Option<std::borrow::Cow<'_, ProviderEntry>> {
+        use std::borrow::Cow;
+        if let Some(entry) = self.providers.get(id) {
+            return Some(Cow::Borrowed(entry));
+        }
+        implicit_entry(id).map(Cow::Owned)
+    }
+}
+
+/// The built-in entry a reserved id has before it is materialized in models.json.
+fn implicit_entry(id: &str) -> Option<ProviderEntry> {
+    match id {
+        OPENAI_ID => Some(ProviderEntry {
+            base_url: OPENAI_ORIGIN.to_string(),
+            api: Protocol::OpenAiCompletions,
+            api_key: None,
+            models: Vec::new(),
+            headers: BTreeMap::new(),
+            compat: CompletionCompatibility::default(),
+        }),
+        ANTHROPIC_ID if anthropic_key_present() => Some(ProviderEntry {
+            base_url: ANTHROPIC_ORIGIN.to_string(),
+            api: Protocol::AnthropicMessages,
+            api_key: Some(format!("${ANTHROPIC_KEY_ENV}")),
+            models: Vec::new(),
+            headers: BTreeMap::new(),
+            compat: CompletionCompatibility::default(),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `ANTHROPIC_API_KEY` is set. Tests decide this per thread, so a
+/// developer's exported key cannot change what a fixture loads.
+#[cfg(not(test))]
+fn anthropic_key_present() -> bool {
+    std::env::var_os(ANTHROPIC_KEY_ENV).is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ANTHROPIC_KEY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn anthropic_key_present() -> bool {
+    TEST_ANTHROPIC_KEY.with(std::cell::Cell::get)
+}
+
+/// Pretend `ANTHROPIC_API_KEY` is set for the calling test thread.
+#[cfg(test)]
+pub(crate) fn test_set_anthropic_key(present: bool) {
+    TEST_ANTHROPIC_KEY.with(|cell| cell.set(present));
+}
+
+/// The JSON written when a reserved id is first materialized by a save.
+pub(super) fn implicit_entry_json(id: &str) -> Option<Value> {
+    let entry = implicit_entry(id)?;
+    let mut value = serde_json::json!({
+        "baseUrl": entry.base_url,
+        "api": entry.api.as_str(),
+    });
+    if let Some(key) = entry.api_key {
+        value["apiKey"] = Value::String(key);
+    }
+    Some(value)
+}
+
+fn deserialize_protocol<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Protocol, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    Protocol::parse(&text).ok_or_else(|| {
+        serde::de::Error::custom(format!("api must be one of {}", Protocol::supported_list()))
+    })
+}
+
 // Validate while serde still has the input position, so validation errors carry
 // real JSON line/column locations rather than guessed string-search offsets.
 fn deserialize_providers<'de, D: serde::Deserializer<'de>>(
@@ -1040,12 +1326,13 @@ fn deserialize_providers<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_map(Providers)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderEntry {
     #[serde(rename = "baseUrl")]
     base_url: String,
-    api: String,
+    #[serde(deserialize_with = "deserialize_protocol")]
+    api: Protocol,
     #[serde(default, rename = "apiKey")]
     api_key: Option<String>,
     #[serde(default)]
@@ -1063,7 +1350,7 @@ fn deserialize_compatibility<'de, D: serde::Deserializer<'de>>(
     serde_json::from_value(value).map_err(|_| serde::de::Error::custom("invalid provider compat: expected supported boolean flags and maxTokensField max_tokens or max_completion_tokens"))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ModelId {
     id: String,
     metadata: ModelMetadata,
@@ -1091,7 +1378,8 @@ struct Catalog {
     id: Option<String>,
     #[serde(default)]
     provider: Option<String>,
-    api: String,
+    #[serde(deserialize_with = "deserialize_protocol")]
+    api: Protocol,
     #[serde(rename = "apiKey")]
     api_key: String,
     models: Vec<ModelId>,
@@ -1139,6 +1427,16 @@ mod tests {
         port
     }
 
+    /// Look a provider up by id: the implicit `anthropic` entry appears when
+    /// the developer's shell exports ANTHROPIC_API_KEY, shifting indexes.
+    fn provider<'a>(registry: &'a Registry, id: &str) -> &'a LoadedProvider {
+        registry
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .unwrap_or_else(|| panic!("provider {id}"))
+    }
+
     fn read_http_request(sock: &mut std::net::TcpStream) {
         let mut buf = Vec::new();
         let mut tmp = [0_u8; 1024];
@@ -1183,6 +1481,168 @@ mod tests {
     }
 
     #[test]
+    fn protocols_select_the_inference_path_and_credential_header() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("harness-protocols");
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{
+                "claude":{"baseUrl":"https://anthropic.example/v1","api":"anthropic-messages","apiKey":"gateway","models":[{"id":"claude-x"}]},
+                "proxy":{"baseUrl":"https://proxy.example/v1/","api":"openai-responses","apiKey":"gateway","headers":{"X-Team":"gateway"},"models":[{"id":"gpt-x"}]},
+                "home":{"baseUrl":"http://127.0.0.1:11434/v1","api":"openai-completions","models":[{"id":"qwen"}]}
+            }}"#,
+        )
+        .unwrap();
+        let claude = completion_connection(&dir, "claude", "claude-x").unwrap();
+        assert_eq!(claude.protocol, Protocol::AnthropicMessages);
+        assert!(!claude.browser_token());
+        let CompletionTransport::Gateway { url, headers } = &claude.transport else {
+            panic!("gateway transport");
+        };
+        assert_eq!(url, "https://anthropic.example/v1/messages");
+        assert_eq!(claude.destination(), url);
+        assert_eq!(headers["x-api-key"], "gateway");
+        assert_eq!(headers["anthropic-version"], "2023-06-01");
+        assert!(!headers.contains_key("authorization"));
+
+        let proxy = completion_connection(&dir, "proxy", "gpt-x").unwrap();
+        assert_eq!(proxy.protocol, Protocol::OpenAiResponses);
+        let CompletionTransport::Gateway { url, headers } = &proxy.transport else {
+            panic!("gateway transport");
+        };
+        assert_eq!(url, "https://proxy.example/v1/responses");
+        assert_eq!(headers["authorization"], "Bearer gateway");
+        assert_eq!(headers["x-team"], "gateway");
+
+        let home = completion_connection(&dir, "home", "qwen").unwrap();
+        assert_eq!(home.protocol, Protocol::OpenAiCompletions);
+        assert_eq!(
+            home.destination(),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+
+        // The reserved id keeps its legacy spelling and the browser transport.
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-responses","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        let error = load_registry(&dir).unwrap_err().to_string();
+        assert!(error.contains("api must be openai-completions"), "{error}");
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"lab":{"baseUrl":"https://lab.example/v1","api":"grpc","models":[]}}}"#,
+        )
+        .unwrap();
+        let error = load_registry(&dir).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "api must be one of openai-completions, openai-responses, anthropic-messages"
+            ),
+            "{error}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_implicit_anthropic_provider_follows_the_key_and_materializes_in_front() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("harness-anthropic");
+        fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"lab":{"baseUrl":"https://lab.example/v1","api":"openai-completions","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        let ids = |registry: &Registry| {
+            registry
+                .providers
+                .iter()
+                .map(|provider| provider.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&load_registry(&dir).unwrap()), ["openai", "lab"]);
+        test_set_anthropic_key(true);
+        let registry = load_registry(&dir).unwrap();
+        assert_eq!(ids(&registry), ["openai", "anthropic", "lab"]);
+        let anthropic = provider(&registry, ANTHROPIC_ID);
+        assert_eq!(anthropic.auth, "env");
+        assert_eq!(anthropic.base_url, ANTHROPIC_ORIGIN);
+        assert!(anthropic.models.is_empty());
+        // Curating a model materializes the entry at the front, with the
+        // environment reference and protocol, leaving saved order alone.
+        let saved =
+            save_curated_models(&dir, &registry, ANTHROPIC_ID, &["claude-x".to_string()]).unwrap();
+        assert_eq!(ids(&saved), ["openai", "anthropic", "lab"]);
+        let document: Value =
+            serde_json::from_slice(&fs::read(dir.join("models.json")).unwrap()).unwrap();
+        let keys: Vec<&String> = document["providers"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["anthropic", "lab"]);
+        assert_eq!(
+            document["providers"]["anthropic"]["apiKey"],
+            format!("${ANTHROPIC_KEY_ENV}")
+        );
+        assert_eq!(
+            document["providers"]["anthropic"]["api"],
+            "anthropic-messages"
+        );
+        // The key is resolved from the real environment only at submission.
+        match completion_connection(&dir, ANTHROPIC_ID, "claude-x") {
+            Ok(connection) => {
+                assert!(std::env::var_os(ANTHROPIC_KEY_ENV).is_some());
+                assert_eq!(connection.protocol, Protocol::AnthropicMessages);
+                assert_eq!(
+                    connection.destination(),
+                    format!("{ANTHROPIC_ORIGIN}/messages")
+                );
+            }
+            Err(error) => {
+                assert!(std::env::var_os(ANTHROPIC_KEY_ENV).is_none());
+                assert!(error
+                    .to_string()
+                    .contains("environment variable is missing"));
+            }
+        }
+        test_set_anthropic_key(false);
+        assert_eq!(
+            ids(&load_registry(&dir).unwrap()),
+            ["openai", "anthropic", "lab"]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn standard_models_refresh_keeps_display_names_and_sends_the_configured_key() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("harness-standard");
+        let body = br#"{"data":[{"id":"claude-b","display_name":"Claude B","type":"model"},{"id":"claude-a","display_name":" "}],"has_more":false}"#;
+        let port = serve("200 OK", "", body);
+        fs::write(
+            dir.join("models.json"),
+            format!(
+                r#"{{"providers":{{"claude":{{"baseUrl":"http://127.0.0.1:{port}/v1","api":"anthropic-messages","apiKey":"gateway","models":[{{"id":"claude-a"}}]}}}}}}"#
+            ),
+        )
+        .unwrap();
+        refresh_provider(&dir, "claude").unwrap();
+        let registry = load_registry(&dir).unwrap();
+        let claude = registry
+            .providers
+            .iter()
+            .find(|provider| provider.id == "claude")
+            .unwrap();
+        let catalog = claude.catalog.as_ref().unwrap();
+        assert_eq!(catalog.models, ["claude-b", "claude-a"]);
+        assert_eq!(
+            catalog.source.as_deref(),
+            Some(format!("http://127.0.0.1:{port}/v1/models").as_str())
+        );
+        assert_eq!(
+            catalog.metadata["claude-b"].name.as_deref(),
+            Some("Claude B")
+        );
+        assert_eq!(catalog.metadata["claude-a"].name, None);
+        assert_eq!(claude.models[0].status, CatalogMembership::Listed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_secret_api_key_is_refused() {
         let err = check_marker("apiKey", "sk-live-secret").unwrap_err();
         assert!(err.to_string().contains("$NAME"));
@@ -1203,7 +1663,7 @@ mod tests {
         let error = refresh_provider(&dir, "lab").unwrap_err().to_string();
         assert!(error.contains("redirects are not followed"), "{error}");
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert_eq!(
             lab.models,
             vec![ModelChoice {
@@ -1227,7 +1687,7 @@ mod tests {
             .to_string()
             .contains("does not match"));
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(
             lab.empty_reason.as_deref(),
@@ -1251,7 +1711,7 @@ mod tests {
         refresh_provider(&dir, "lab").unwrap();
         let saved = fs::read(dir.join("catalogs/lab.json")).unwrap();
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
         assert!(lab
@@ -1271,7 +1731,7 @@ mod tests {
         assert!(refresh_provider(&dir, "lab").is_err());
         assert_eq!(fs::read(dir.join("catalogs/lab.json")).unwrap(), saved);
         let registry = load_registry(&dir).unwrap();
-        let lab = &registry.providers[1];
+        let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
         let _ = fs::remove_dir_all(dir);
@@ -1331,7 +1791,7 @@ mod tests {
             "retrieval time unknown (old catalog format)"
         );
         assert_eq!(
-            registry.providers[1].models,
+            provider(&registry, "lab").models,
             vec![ModelChoice {
                 id: "local-only".to_string(),
                 metadata: ModelMetadata::default(),

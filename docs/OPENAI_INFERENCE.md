@@ -1,6 +1,6 @@
 # OpenAI browser-login inference
 
-ahi sends a curated `openai/<model>` chat turn to the public OpenAI **Responses API**. Gateways continue using Chat Completions. This is implemented transport code, not a plan for a future transport. OpenAI tool requests are parsed but **execution remains disabled**. Gateway Chat Completions separately supports policy-gated builtin read-only tools; see [Tool calls](TOOL_CALLS.md).
+ahi sends a curated `openai/<model>` chat turn to the public OpenAI **Responses API** with the browser-login credential. Gateways speak whichever protocol their `api` declares; see [Providers](PROVIDERS.md). This is implemented transport code, not a plan for a future transport. OpenAI tool requests go through the same policy-gated builtin tool loop as every other protocol; see [Tool calls](TOOL_CALLS.md).
 
 Related contracts: [browser login](OPENAI_LOGIN.md), [gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md), and [chat screen](CHAT_SCREEN.md).
 
@@ -10,8 +10,9 @@ Related contracts: [browser login](OPENAI_LOGIN.md), [gateway model configuratio
 ChatRequest (selection + text history + thinking level)
   → local curation/configuration validation
   → CompletionConnection { CompletionTransport, ModelMetadata }
-      Gateway { url, headers } → Chat Completions + policy-gated builtin loop
-      OpenAiResponses         → pinned Responses adapter
+      Gateway { url, headers } → the declared protocol's adapter
+      OpenAiResponses         → pinned Responses adapter, browser-token profile
+  → one protocol-neutral turn loop with the policy-gated builtin tools
   → request serialization and byte-limit validation
   → credential validation / bounded refresh
   → HTTP response → bounded SSE events → chat ResponseEvent
@@ -50,9 +51,9 @@ For an ordinary text conversation the payload is equivalent to:
 }
 ```
 
-The assistant entry uses Responses' easy-input message form. All existing user/assistant text is replayed on each turn; notices and UI tool-result blocks are not silently converted into provider results. There is no `previous_response_id`, server-stored conversation, tool declaration, or invented tool output.
+The assistant entry uses Responses' easy-input message form. All existing user/assistant text is replayed on each turn, and complete builtin tool exchanges are replayed as `function_call` and `function_call_output` items; notices are never sent. Tool definitions are declared only when an `ahi.actions.yaml` rule approves a builtin. There is no `previous_response_id` or server-stored conversation, and no invented tool output.
 
-Reasoning is sent as `reasoning: {"effort": "medium"}` only when effective metadata explicitly enables both reasoning and reasoning-effort support and thinking is not Off. Off omits the setting; the literal `off` is never sent. A missing capability does not imply support. The metadata does not describe per-model effort-level maps; a service can reject a level unsupported by that particular model. No reasoning summaries or encrypted reasoning items are requested or replayed in this text-only implementation.
+Reasoning is sent as `reasoning: {"effort": "medium"}` only when effective metadata explicitly enables both reasoning and reasoning-effort support and thinking is not Off. Off omits the setting; the literal `off` is never sent. A missing capability does not imply support. The metadata does not describe per-model effort-level maps; a service can reject a level unsupported by that particular model. When reasoning effort is sent, the request also carries `include: ["reasoning.encrypted_content"]` (Pi sends it under the same condition, on the browser-login path too), and a tool-calling turn's terminal output items, reasoning included, are replayed verbatim with the tool results. See [Providers](PROVIDERS.md#protocols), native replay. No reasoning summary is displayed.
 
 **Browser-token exception:** Pi's current adapter explicitly omits `max_output_tokens`, temperature, and prompt-cache-retention/options fields for Sign in with ChatGPT. ahi follows that boundary, even if model metadata contains `maxTokens`. It does not copy gateway `max_tokens`, `max_completion_tokens`, `reasoning_effort`, or `stream_options` fields into Responses. Gateway output-budget behavior remains unchanged: the 4096-token conservative budget, model ceiling, selected field, and conditional usage/store settings still apply there.
 
@@ -79,7 +80,7 @@ EOF, `[DONE]`, or an HTTP 200 alone is **not** Responses success. Pending or con
 
 Limits: 1 MiB per SSE line/event, 16 MiB total stream, 128 output slots, bounded content indexes and identifiers, at most 32 validated function calls, and 64 KiB argument text per call. JSON object arguments, valid function names, contiguous normalized call indexes, and unique execution call IDs are required by the existing `ToolCallAssembler` boundary. Network byte fragmentation, including multibyte Unicode, is handled before JSON parsing. HTTP status must be 200. Content-Type alone is not an acceptance gate: the parser validates actual SSE framing, typed events, and successful terminal reconciliation, matching the OpenAI SDK's streaming behavior. A correctly completed SSE response works even with an incorrect or missing media-type header. Ordinary JSON, HTML/access pages, malformed events, and truncated streams still fail; there is no nonstreaming-JSON success fallback.
 
-A valid function-call batch produces `ToolCallsRequested`, the existing safe name/count notice, then a terminal execution-disabled failure. No arguments are printed, no tool is run, no result is fabricated, and no continuation request is submitted. An incomplete or malformed batch never reaches that boundary. The request worker alone sends the terminal screen event; parsers return a result rather than sending `Completed` themselves.
+A valid function-call batch produces `ToolCallsRequested` and the existing safe name/count notice, then enters the shared tool loop: without an approving rule the turn fails with `tool execution is disabled`; with one, each call is decided, run or denied, and its result is appended before the continuation request. No arguments are printed and no result is fabricated. An incomplete or malformed batch never reaches that boundary. The request worker alone sends the terminal screen event; parsers return a `StreamOutcome` rather than sending `Completed` themselves.
 
 ## Evidence from Pi
 
