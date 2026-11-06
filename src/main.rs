@@ -17,7 +17,7 @@ use ahi::VERSION;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ahi", version, about = "Fail-closed pre-commit runner.")]
+#[command(name = "ahi", version, about = "Fail-closed pre-commit runner with a terminal chat for OpenAI and compatible gateways.")]
 struct Cli {
     /// Path to a pre-commit config file.
     #[arg(long, short = 'c', global = true)]

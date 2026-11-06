@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The crate description, `--help` summary, and README opening now describe both the hook runner and the terminal chat; crates.io keywords and categories added.
+
 ## 0.6.0 (2026-11-06)
 
 ### Changed

@@ -1,6 +1,6 @@
 # ahi
 
-`ahi` is a Rust library and command-line tool that reads the [pre-commit](https://pre-commit.com/) configuration files (`.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`) and runs fast, offline checks. It parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository.
+`ahi` is a Rust library and command-line tool with two jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration files (`.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model call read-only workspace tools only where an `ahi.actions.yaml` rule approves them.
 
 Ian floated "agent hook interface" as an expansion. That expansion is not confirmed. The package, the library target, and the binary are all named `ahi`.
 
