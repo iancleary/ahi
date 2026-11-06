@@ -42,6 +42,8 @@ pub(crate) struct HttpBackend {
     agent: ureq::Agent,
     /// The active turn's cancel flag; `submit` replaces it, `cancel` sets it.
     cancel: Arc<AtomicBool>,
+    /// The active turn's worker, unparked by `cancel` so a backoff wait ends at once.
+    worker: Option<std::thread::Thread>,
 }
 
 impl HttpBackend {
@@ -56,6 +58,7 @@ impl HttpBackend {
                 .timeout(Duration::from_secs(120))
                 .build(),
             cancel: Arc::new(AtomicBool::new(false)),
+            worker: None,
         }
     }
 
@@ -85,7 +88,7 @@ impl CompletionBackend for HttpBackend {
         let agent = self.agent.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Arc::clone(&cancel);
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let workspace = workspace.or_else(|| std::env::current_dir().ok());
             let result = complete(
                 &state,
@@ -114,11 +117,15 @@ impl CompletionBackend for HttpBackend {
             };
             let _ = sender.send(event);
         });
+        self.worker = Some(handle.thread().clone());
         receiver
     }
 
     fn cancel(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        if let Some(worker) = &self.worker {
+            worker.unpark();
+        }
     }
 }
 
@@ -348,7 +355,9 @@ fn unreachable(kind: ureq::ErrorKind) -> bool {
     )
 }
 
-/// Sleep through a backoff in short steps so a cancel ends it promptly.
+/// Park through a backoff. `cancel` sets the flag and unparks this thread,
+/// so the wait ends as soon as the cancel lands rather than at the next poll.
+/// Parking can wake spuriously, so the deadline is re-checked each time.
 fn wait(backoff: Duration, cancel: &Arc<AtomicBool>) -> Result<()> {
     let deadline = Instant::now() + backoff;
     loop {
@@ -357,7 +366,7 @@ fn wait(backoff: Duration, cancel: &Arc<AtomicBool>) -> Result<()> {
         if now >= deadline {
             return Ok(());
         }
-        std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
+        std::thread::park_timeout(deadline - now);
     }
 }
 
