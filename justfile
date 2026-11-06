@@ -29,9 +29,9 @@ test:
 doc-check:
     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 
-# verify package contents without publishing
+# verify package contents without publishing (ahi-win32 is packaged with ahi)
 package:
-    cargo package
+    cargo package --workspace
 
 # build the crate
 build:
