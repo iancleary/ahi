@@ -2,6 +2,9 @@
 # Write ahi-<version>-sha256sums.txt in sha256sum format and check it.
 set -euo pipefail
 
+# shellcheck source=scripts/python_runner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/python_runner.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/write_sha256sums.sh --version <semver> --directory <path>
@@ -65,7 +68,7 @@ done
   sha256sum --check "$sums_name"
 )
 
-python3 - "$directory/$sums_name" "${names[@]}" <<'PY'
+run_python "$directory/$sums_name" "${names[@]}" <<'PY'
 import pathlib
 import re
 import sys

@@ -4,6 +4,10 @@
 
 This repository's publish workflow runs only after a GitHub Release is published from a tag on `iancleary/ahi`. Creating a tag or a release is a deliberate later step. Development work does not run this script.
 
+## Prerequisites
+
+The release scripts embed short Python programs for the manifest and lockfile edits. `scripts/python_runner.sh` runs them with `uv run --python 3.14` when `uv` is installed, which is the expected local setup; `.python-version` pins the same interpreter for `uv run scripts/smoke-model-picker.py`. Without `uv`, the scripts fall back to the system `python3`, which must be 3.11 or newer for `tomllib`. CI runners take that path.
+
 ## Read-only version queries
 
 ```bash
@@ -37,7 +41,7 @@ The runner updates the root `Cargo.toml` and `Cargo.lock`, then validates with:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all-features`
 - `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
-- `cargo package --allow-dirty`
+- `cargo package --workspace --allow-dirty`
 
 Then it commits the version bump, creates an annotated `vX.Y.Z` tag, pushes the branch and tag, and runs `gh release create` as the last public step. Publishing the GitHub Release starts `.github/workflows/publish.yml`, which is the only workflow that can read `CARGO_REGISTRY_TOKEN`. The same published release starts `.github/workflows/release_binary_assets.yml`, which attaches the Linux and Windows archives below. That workflow does not read `CARGO_REGISTRY_TOKEN`.
 

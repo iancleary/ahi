@@ -6,6 +6,9 @@
 # Publish modes require a tag. A pull request is a dry run and is not a tag.
 set -euo pipefail
 
+# shellcheck source=scripts/python_runner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/python_runner.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/resolve_release_identity.sh --select-ref
@@ -39,7 +42,7 @@ semver_tag() {
 }
 
 manifest_version() {
-  python3 - <<'PY'
+  run_python <<'PY'
 import pathlib
 import tomllib
 

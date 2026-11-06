@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=scripts/python_runner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/python_runner.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/cut-release.sh [--dry-run] --version <semver> [--notes-file <path>]
@@ -72,7 +75,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 current_version="$(
-  python3 - <<'PY'
+  run_python <<'PY'
 import pathlib
 import tomllib
 
@@ -153,7 +156,7 @@ if [[ "$dry_run" -eq 1 ]]; then
   trap restore_dry_run EXIT
 fi
 
-python3 - "$version" <<'PY'
+run_python "$version" <<'PY'
 import pathlib
 import re
 import sys
@@ -167,7 +170,7 @@ if updated == text:
 manifest.write_text(updated)
 PY
 
-python3 - "$package_name" "$version" <<'PY'
+run_python "$package_name" "$version" <<'PY'
 import pathlib
 import re
 import sys

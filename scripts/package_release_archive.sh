@@ -5,6 +5,9 @@
 # --source-date-epoch, members sorted by name, gzip without a timestamp.
 set -euo pipefail
 
+# shellcheck source=scripts/python_runner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/python_runner.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/package_release_archive.sh --binary <path> --version <semver> --architecture <x86_64|aarch64> --source-date-epoch <unix> --output <path>
@@ -102,7 +105,7 @@ tar --format=ustar \
   -C "$stage" \
   -cf - ahi | gzip -n -9 >"$output"
 
-python3 - "$output" "$source_date_epoch" <<'PY'
+run_python "$output" "$source_date_epoch" <<'PY'
 import sys
 import tarfile
 
