@@ -50,7 +50,7 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 
 ## Commands
 
-Typing `/` immediately opens the shared **Commands** popup, also present in Models and Catalog. **Add gateway** is first. Keep typing to filter by spelling, alias, or action label; Up/Down selects, Enter applies, and Esc dismisses. The chat draft is retained on dismissal. An unknown command is reported in the transcript as `unknown command /name` and is not sent to inference. Common entries come from [`src/commands.rs`](../src/commands.rs), not a chat-only Settings list. A short `/ commands` hint remains in the input rule.
+Typing `/` immediately opens the shared **Commands** popup, also present in Models and Catalog. **Add gateway** is first. Keep typing to filter by spelling, alias, or action label; Up/Down selects, Enter applies, and Esc dismisses. The chat draft is retained on dismissal. An unknown command is reported in the transcript as `unknown command /name` and is not sent to inference. Common entries come from [`src/tui/commands.rs`](../src/tui/commands.rs), not a chat-only Settings list. A short `/ commands` hint remains in the input rule.
 
 Non-quit command submission during an active response preserves the draft; submit again after completion. `/quit` exits immediately even during a response, without claiming upstream cancellation.
 

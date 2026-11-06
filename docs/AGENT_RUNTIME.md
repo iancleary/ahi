@@ -291,7 +291,7 @@ ahi additions, stored as documents or as entries in that same commit stream, not
 | Worker assignment | Task id, worker generation, host id, last presence | Replaces Rex's session, window, and block ids. |
 | Source admission | Provider, account, event id, version, link or dismissal reason | The cursor advances only after this commit. |
 
-Argument hashes, rule ids, and paths that are not secret belong in the receipt. Secret values, raw credentials, and full file contents do not. That continues the `audit.log` rule already implemented in `src/audit.rs`. The hook-runner `audit.log` stays the log for `ahi run`. It is not the conversation store.
+Argument hashes, rule ids, and paths that are not secret belong in the receipt. Secret values, raw credentials, and full file contents do not. That continues the `audit.log` rule already implemented in `src/hooks/audit.rs`. The hook-runner `audit.log` stays the log for `ahi run`. It is not the conversation store.
 
 **Decision:** maximum durability for the conversation database, including grants and external-effect commits. For this WAL database that setting is `PRAGMA synchronous = FULL` and `PRAGMA fullfsync = ON`.
 
@@ -608,14 +608,14 @@ Out of scope, as in the specification: a kernel exploit, and a person who alread
 
 ## Crate and workspace layout
 
-The repository is one package, `ahi`, with a library and a binary. `scripts/cut-release.sh` and the publish workflow assume that root manifest. `fuzz/` is already a detached workspace.
+The repository is one package, `ahi`, with a library and a binary, plus the dependency-free `crates/ahi-win32` workspace member. Inside the library, the pre-commit runner lives under `hooks`, the picker screens under `tui`, the chat screen under `chat`, and providers under `harness`. `scripts/cut-release.sh` and the publish workflow assume that root manifest. `fuzz/` is already a detached workspace.
 
 **Decision:** stay one crate. Add modules only when a phase implements them. A workspace, or several published crates, is not the plan. The release script publishes one package. Split later only if compile time or a real library consumer requires it.
 
 | Module | When | Responsibility |
 | --- | --- | --- |
-| `ahi::policy` | exists | Version 1 hook policy. Unchanged. |
-| `ahi::store` | exists | Hook cache. Unchanged role. |
+| `ahi::hooks::policy` | exists | Version 1 hook policy. Unchanged. |
+| `ahi::hooks::store` | exists | Hook cache. Unchanged role. |
 | `ahi::actions` | first agent phase | Parse `ahi.actions.yaml`, evaluate a verdict. |
 | `ahi::sandbox` | with v0.4, then reused | Detect an outer sandbox. Apply a host backend to a child. |
 | `ahi::conversation` | store phase | The Rust-native store. Not the hook cache. Not a Node child. |
@@ -738,7 +738,7 @@ A model selection is two layers, split on the first slash, with no alias. The st
 
 Fetched or cloned on 2026-11-03 unless noted.
 
-- This repository's contract: [docs/SPEC.md](SPEC.md), [docs/release.md](release.md), root `Cargo.toml` version `0.1.4`, `src/main.rs`, `src/policy.rs`, `src/audit.rs`, `src/harness.rs`.
+- This repository's contract: [docs/SPEC.md](SPEC.md), [docs/release.md](release.md), root `Cargo.toml` version `0.1.4`, `src/main.rs`, `src/hooks/policy.rs`, `src/hooks/audit.rs`, `src/harness/mod.rs`.
 - jessfraz/agent commit `e671f61d54ffe3b1361db79e7cc79a68ac252b23`: <https://github.com/jessfraz/agent>. Files used: `README.md`, `docs/architecture.md`, `docs/setup.md`, `docs/roadmap.md`, `ios/README.md`, `LICENSE`, `runtime/package.json`, `runtime/src/bridge.ts`, `runtime/src/conversation-database.ts`, `runtime/src/startup-diagnostics.ts`, `src/runtime.rs`, `src/protocol.rs` (`TaskRecord`, `WorkerRef`, `SourceRef`), `src/sources/mod.rs`.
 - jessfraz/agent `LICENSE` at baseline `d4ef2fb5af0b44531e771a6c3ba4bb7959caf966`: <https://github.com/jessfraz/agent/blob/d4ef2fb5af0b44531e771a6c3ba4bb7959caf966/LICENSE>. MIT, `Copyright (c) 2026 Agent contributors`.
 - Owner's comparison of the private copy, comment `6594868422`: <https://github.com/iancleary/ahi/pull/6#issuecomment-6594868422>. Design facts about `iancleary/agent` are from this comment only.

@@ -4,7 +4,7 @@ use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use super::{flag_values, Check, CheckContext, CheckOutcome, Finding};
-use crate::git;
+use crate::hooks::git;
 
 pub struct MergeConflict;
 pub struct LargeFiles;
@@ -160,7 +160,7 @@ impl Check for Symlinks {
     fn check(&self, ctx: &CheckContext<'_>, files: &[String]) -> CheckOutcome {
         let mut findings = Vec::new();
         for file in files {
-            let Ok(path) = crate::paths::join_inside(ctx.root, file) else {
+            let Ok(path) = crate::hooks::paths::join_inside(ctx.root, file) else {
                 findings.push(Finding::at(file, None, "path escapes the repository"));
                 continue;
             };

@@ -2,7 +2,7 @@
 
 ## Clipboard module structure (pi.dev-style)
 
-- [x] Split `src/clipboard.rs` into `src/clipboard/`: `mod.rs` (platform routing), `command.rs` (bounded helper execution), `osc52.rs` (terminal writes), `windows.rs` (PowerShell handoff through a private UTF-8 file). WSL detection stays in `src/wsl.rs`.
+- [x] Split `src/clipboard.rs` into `src/clipboard/`: `mod.rs` (platform routing), `command.rs` (bounded helper execution), `osc52.rs` (terminal writes), `windows.rs` (PowerShell handoff through a private UTF-8 file). WSL detection lives in `src/clipboard/wsl.rs`.
 - [x] Make routing a pure function: `Environment` → `Plan` of ordered `Step`s, so macOS, native Linux (Wayland/X11/Termux/headless), WSL (Windows Terminal vs. other emulators), native Windows, and SSH/mosh remote sessions are covered by unit tests without touching a real clipboard.
 - [x] Native Windows writes through the Win32 clipboard API (in-repo `crates/ahi-win32` workspace crate, the workspace's only `unsafe`, no registry dependency, so `ahi` keeps `unsafe_code = "forbid"`) and falls back to the private-file PowerShell handoff only if that fails.
 - [ ] Run the Windows round-trip test on a real Windows machine or CI; the code is only cross-checked from macOS so far.

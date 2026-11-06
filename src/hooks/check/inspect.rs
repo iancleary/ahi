@@ -9,7 +9,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use super::{flag_values, Check, CheckContext, CheckOutcome, Finding};
-use crate::git;
+use crate::hooks::git;
 
 pub struct ShebangExecutable;
 pub struct ExecutableShebang;

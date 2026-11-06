@@ -3,5 +3,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = ahi::config::parse_config_bytes(data);
+    let _ = ahi::hooks::config::parse_config_bytes(data);
 });

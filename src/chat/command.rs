@@ -23,7 +23,7 @@ pub(crate) enum ParsedCommand {
 }
 
 pub(crate) fn parse(text: &str) -> ParsedCommand {
-    use crate::commands::{common_action, CommonAction};
+    use crate::tui::commands::{common_action, CommonAction};
     if let Some(action) = common_action(text) {
         return match action {
             CommonAction::Models => ParsedCommand::ReopenModelPicker,

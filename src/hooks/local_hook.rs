@@ -11,8 +11,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::error::{Error, Result};
-use crate::filter::{self, command_budget};
-use crate::paths::join_inside;
+use crate::hooks::filter::{self, command_budget};
+use crate::hooks::paths::join_inside;
 use crate::shlex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

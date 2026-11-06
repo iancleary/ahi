@@ -587,7 +587,12 @@ One package, edition 2021, MSRV in `rust-version`. The package name, `[lib] name
 
 ```
 Cargo.toml                  # package ahi, lib + bin
-src/                        # library modules and src/main.rs
+src/main.rs                 # CLI entry point
+src/hooks/                  # pre-commit hook runner: config, filter, git, check, runner, output
+src/tui/                    # model picker, gateway and login screens, command palette
+src/chat/                   # chat screen, transcript, selection, provider backends
+src/harness/                # OpenAI and gateway registry, catalogs, browser login
+src/clipboard/              # platform clipboard adapters
 tests/                      # CLI and golden tests
 fuzz/                       # detached libFuzzer target
 deny.toml
@@ -601,16 +606,16 @@ Library modules:
 
 | Module | Responsibility |
 | --- | --- |
-| `ahi::config` | Parse and validate `.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`. Errors carry path, line, and column when the parser provides them. |
-| `ahi::policy` | Parse `ahi.policy.yaml`. |
-| `ahi::identify` | File-type tags. |
-| `ahi::filter` | Include/exclude/types and the xargs partition helper. |
-| `ahi::git` | Staged / all / range file lists, repo root, file mode. |
-| `ahi::check` | The `Check` trait, the builtin registry, and one submodule per check. |
-| `ahi::runner` | Select hooks for a stage, filter files, apply `SKIP` and `fail_fast`, collect a report. |
-| `ahi::store` | Content-addressed put/get/verify. No network client in this module. |
-| `ahi::output` | Text, JSON, SARIF. |
-| `ahi::audit` | Append a JSON line to the audit log. |
+| `ahi::hooks::config` | Parse and validate `.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`. Errors carry path, line, and column when the parser provides them. |
+| `ahi::hooks::policy` | Parse `ahi.policy.yaml`. |
+| `ahi::hooks::identify` | File-type tags. |
+| `ahi::hooks::filter` | Include/exclude/types and the xargs partition helper. |
+| `ahi::hooks::git` | Staged / all / range file lists, repo root, file mode. |
+| `ahi::hooks::check` | The `Check` trait, the builtin registry, and one submodule per check. |
+| `ahi::hooks::runner` | Select hooks for a stage, filter files, apply `SKIP` and `fail_fast`, collect a report. |
+| `ahi::hooks::store` | Content-addressed put/get/verify. No network client in this module. |
+| `ahi::hooks::output` | Text, JSON, SARIF. |
+| `ahi::hooks::audit` | Append a JSON line to the audit log. |
 | `ahi::harness` | Load OpenAI and `models.json` gateways, fetch a catalog, and run the browser login. |
 | `ahi::tui` | Provider and model picker. A pipe prints the same load as text. |
 
@@ -692,7 +697,7 @@ The state directory is `--state-dir`, else `AHI_STATE_DIR`, else `$XDG_STATE_HOM
 
 `load_registry` reads only local files. Refresh is explicit: `r` refreshes all providers, and `ahi tui --refresh` refreshes before the picker opens (or before printing in a non-terminal run). Each successful refresh atomically replaces `catalogs/<provider>.json` by exclusively creating `<provider>.json.tmp`, writing, syncing, and renaming. Concurrent or stale temp files cause an actionable error, not shared writes. Failed refresh leaves the old catalog untouched and records an error for the current invocation. The catalog object contains `provider`, `source`, `retrieved_at` (RFC 3339 UTC), ordered identifier `models`, and a defaultable `metadata` map keyed by model ID. Metadata includes display names, positive context/output/request capacities, modalities, reasoning, finite nonnegative per-million-token costs, and typed compatibility. Old bare arrays and identifier-only objects remain readable, with unknown metadata; bare arrays also have unknown source/retrieval time. Effective metadata merges cache, explicit local provider compatibility, and explicit local model fields in that order. Curation preserves rich fields on retained entries. The UI says `retrieval time unknown (old catalog format)`; this is not an authentication version. The UI shows catalog age and the last error.
 
-Chat, Models, and Catalog share a context-aware Commands registry and popup (`src/commands.rs`). `/` opens it, typing filters canonical names/aliases/action labels, Up/Down chooses, Enter applies, and Esc dismisses without execution. Add gateway is first; navigation, OpenAI sign-in, and application Quit are common actions, with thinking/mouse/clear limited to chat. Exact slash commands remain supported. Model-screen command paste is single-line, bounded, and never submits by itself. Human-facing empty states distinguish a new installation from an existing uncurated gateway. Back/cancel and application exit are distinct typed picker outcomes: `/quit` exits even from a nested picker, while `q` returns to chat if one exists. See [Terminal experience](TERMINAL_EXPERIENCE.md).
+Chat, Models, and Catalog share a context-aware Commands registry and popup (`src/tui/commands.rs`). `/` opens it, typing filters canonical names/aliases/action labels, Up/Down chooses, Enter applies, and Esc dismisses without execution. Add gateway is first; navigation, OpenAI sign-in, and application Quit are common actions, with thinking/mouse/clear limited to chat. Exact slash commands remain supported. Model-screen command paste is single-line, bounded, and never submits by itself. Human-facing empty states distinguish a new installation from an existing uncurated gateway. Back/cancel and application exit are distinct typed picker outcomes: `/quit` exits even from a nested picker, while `q` returns to chat if one exists. See [Terminal experience](TERMINAL_EXPERIENCE.md).
 
 `/gateway` in any of those screens opens an editable inference-base-URL field with Connect → Review → Choose models guidance. Submission explicitly requests `<origin>/agent/models.json` without credentials, using the same strict catalog validation and network bounds as refresh. A preview shows the discovered provider, base URL, authentication marker/reference, and model IDs; only a second Enter confirms registration. `openai` is reserved. Confirmation adds an absent provider with an empty curated list and then caches the catalog; same-ID/same-URL rediscovery preserves the existing entry byte-for-byte, while a different URL or stale configuration rejects the save. Registration uses the existing atomic configuration writer. Catalog persistence is separate: if it fails after registration, the success notice explicitly reports registration with a cache failure and points to `r` for recovery. Successful confirmation opens catalog curation without selecting a model or clearing chat history; the typed registration/cache result is visible there immediately, including entry from chat. Space explicitly curates a model. Enter on a checked catalog model explicitly saves and uses it; Enter on an unchecked model only explains the required Space action. Returning to Models preserves provider and highlighted checked-model focus when possible, without writing selection. Ordinary catalog browsing omits the onboarding step label. Cancellation before confirmation makes no state writes, including while a fetch is pending. See [Gateway discovery](GATEWAY_DISCOVERY.md).
 

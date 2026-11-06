@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Source layout: the pre-commit hook runner moved to `ahi::hooks` (`config`, `filter`, `git`, `identify`, `check`, `runner`, `output`, `policy`, `store`, `audit`, `migrate`), the picker, gateway, login and command-palette screens to `ahi::tui`, and WSL detection into `clipboard`. Library callers update `ahi::config` to `ahi::hooks::config` and so on; the CLI is unchanged.
+
 ## 0.5.0 (2026-11-05)
 
 ### Added

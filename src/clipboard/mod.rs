@@ -5,6 +5,7 @@
 mod command;
 mod osc52;
 mod windows;
+pub(crate) mod wsl;
 
 pub(crate) fn copy(text: &str) -> bool {
     execute(
@@ -60,7 +61,7 @@ impl Environment {
             wayland: present("WAYLAND_DISPLAY"),
             x11: present("DISPLAY"),
             termux: present("TERMUX_VERSION"),
-            wsl: crate::wsl::is_wsl(),
+            wsl: crate::clipboard::wsl::is_wsl(),
             windows_terminal: present("WT_SESSION"),
             remote: present("SSH_CONNECTION")
                 || present("SSH_CLIENT")
