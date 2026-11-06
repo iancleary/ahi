@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.5.1 (2026-11-06)
+
+### Fixed
+
+- Cancelling a chat turn during the reconnect backoff now ends the wait immediately: the worker parks for the remaining backoff and `cancel` unparks it, instead of polling the flag every 50 ms.
+- The Windows clipboard tests in `ahi-win32` no longer contend for the global clipboard with each other, and the round trip retries once after a pause when another process holds it.
+
+### Changed
+
 - Source layout: the pre-commit hook runner moved to `ahi::hooks` (`config`, `filter`, `git`, `identify`, `check`, `runner`, `output`, `policy`, `store`, `audit`, `migrate`), the picker, gateway, login and command-palette screens to `ahi::tui`, and WSL detection into `clipboard`. Library callers update `ahi::config` to `ahi::hooks::config` and so on; the CLI is unchanged.
 - Release and packaging scripts run their embedded Python through `uv run --python 3.14` when `uv` is available, falling back to the system `python3` (3.11+) otherwise. `.python-version` pins 3.14 for `uv run`.
 
