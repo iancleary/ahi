@@ -1150,7 +1150,7 @@ fn cancelling_during_the_backoff_ends_the_turn_without_another_attempt() {
         matches!(&last, ResponseEvent::Failed { message, .. } if message == "response cancelled"),
         "{last:?}"
     );
-    // Well inside the 250 ms pause: the wait polled the flag.
+    // Well inside the 250 ms pause: the cancel unparked the waiting worker.
     assert!(started.elapsed() < Duration::from_millis(200));
     fs::remove_dir_all(state).unwrap();
 }

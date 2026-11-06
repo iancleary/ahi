@@ -5,6 +5,9 @@
 # path, a clean directory, SOURCE_DATE_EPOCH, and the same rustc flags.
 set -euo pipefail
 
+# shellcheck source=scripts/python_runner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/python_runner.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/build_linux_binary.sh --target <triple> --output <path> --version <semver> --source-date-epoch <unix> --expect-commit <sha>
@@ -105,7 +108,7 @@ if [[ "$commit_epoch" != "$source_date_epoch" ]]; then
 fi
 
 manifest_version=$(
-  python3 - <<'PY'
+  run_python <<'PY'
 import pathlib
 import tomllib
 
