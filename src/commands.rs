@@ -133,6 +133,14 @@ const COMMANDS: &[CommandDefinition] = &[
         contexts: CHAT_CONTEXTS,
     },
     CommandDefinition {
+        command: "/select",
+        label: "Keyboard selection",
+        description: "Select transcript text with vi keys (Ctrl+S)",
+        aliases: &[],
+        action: None,
+        contexts: CHAT_CONTEXTS,
+    },
+    CommandDefinition {
         command: "/clear",
         label: "Clear conversation",
         description: "Remove the current transcript",

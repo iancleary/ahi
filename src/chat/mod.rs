@@ -45,6 +45,8 @@ use transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use usage::SessionMeters;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
+/// Rows per step while a drag holds a viewport edge: one row per frame.
+const AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const ACCENT: Color = Color::Cyan;
 
@@ -98,6 +100,8 @@ struct ChatScreen {
     pending_copy: Option<String>,
     copy_status: Option<(&'static str, Instant)>,
     scroll_from_bottom: usize,
+    /// Last auto-scroll step while a drag sits on a viewport edge.
+    auto_scroll_at: Option<Instant>,
     transcript_area: Rect,
     transcript_width: usize,
     transcript_height: usize,
@@ -141,6 +145,7 @@ impl ChatScreen {
             pending_copy: None,
             copy_status: None,
             scroll_from_bottom: 0,
+            auto_scroll_at: None,
             transcript_area: Rect::default(),
             transcript_width: 80,
             transcript_height: 1,
@@ -312,6 +317,12 @@ impl ChatScreen {
             }
         }
         match event {
+            // Selection mode owns every key, so nothing reaches the draft or
+            // a pending approval until Esc leaves it.
+            Event::Key(key) if self.text_selection.keyboard_active() => {
+                self.apply_selection_key(key_binding::translate_selection(key));
+                Ok(ScreenAction::Continue)
+            }
             // Approval keys apply only while the input is blank, so a draft or
             // `/quit` can still be typed; submission waits for the turn anyway.
             Event::Key(key) if self.approval.is_some() && self.input.is_blank() => {
@@ -427,6 +438,10 @@ impl ChatScreen {
                 self.copy_selection();
                 Ok(ScreenAction::Continue)
             }
+            KeyAction::EnterSelectionMode => {
+                self.enter_selection_mode();
+                Ok(ScreenAction::Continue)
+            }
             KeyAction::Submit => self.submit_input(backend),
             KeyAction::ClearInputOrExit => {
                 if self.input.is_blank() {
@@ -474,6 +489,114 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
         }
+    }
+
+    /// Transcript row shown at the top of the viewport.
+    fn visible_start(&mut self) -> usize {
+        self.row_count()
+            .saturating_sub(self.scroll_from_bottom)
+            .saturating_sub(self.transcript_height)
+    }
+
+    /// One auto-scroll step for a drag held on a viewport edge. Returns
+    /// whether the viewport moved; the selection focus follows the pointer.
+    fn auto_scroll(&mut self) -> bool {
+        let Some(direction) = self.text_selection.edge(self.transcript_area) else {
+            return false;
+        };
+        let before = self.scroll_from_bottom;
+        match direction {
+            selection::AutoScroll::Older => {
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(1);
+                self.clamp_scroll();
+            }
+            selection::AutoScroll::Newer => {
+                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(1);
+            }
+        }
+        if self.scroll_from_bottom == before {
+            return false;
+        }
+        let count = self.row_count();
+        let start = self.visible_start();
+        self.text_selection
+            .follow(self.transcript_area, start, count);
+        true
+    }
+
+    /// Per-frame work that is not driven by an event.
+    fn tick(&mut self) {
+        if self.text_selection.edge(self.transcript_area).is_none() {
+            self.auto_scroll_at = None;
+            return;
+        }
+        let due = self
+            .auto_scroll_at
+            .is_none_or(|last| last.elapsed() >= AUTO_SCROLL_INTERVAL);
+        if due && self.auto_scroll() {
+            self.auto_scroll_at = Some(Instant::now());
+        }
+    }
+
+    fn enter_selection_mode(&mut self) {
+        let count = self.row_count();
+        if count == 0 {
+            self.push_notice("nothing to select: the transcript is empty".to_string());
+            return;
+        }
+        self.settings_menu.reset();
+        self.copy_status = None;
+        // Start on the newest visible row; the draft is left untouched.
+        let last_visible = count
+            .saturating_sub(self.scroll_from_bottom)
+            .saturating_sub(1);
+        self.text_selection.enter_keyboard(last_visible);
+    }
+
+    fn apply_selection_key(&mut self, key: key_binding::SelectionKey) {
+        use key_binding::SelectionKey;
+        match key {
+            SelectionKey::Move(movement) => {
+                self.sync_layout();
+                let page = self.transcript_height.max(1);
+                self.text_selection
+                    .move_cursor(movement, self.layout.rows(), page);
+                self.scroll_to_cursor();
+            }
+            SelectionKey::Visual(mode) => {
+                self.sync_layout();
+                self.text_selection.toggle_visual(mode, self.layout.rows());
+            }
+            SelectionKey::Yank => {
+                if self.text_selection.visual_active() {
+                    // The highlight stays, as after a mouse copy, so a failed
+                    // clipboard write can be retried with Ctrl+Y.
+                    self.copy_selection();
+                    self.text_selection.leave_keyboard();
+                }
+            }
+            SelectionKey::Exit => {
+                self.text_selection.clear();
+                self.copy_status = None;
+            }
+            SelectionKey::Ignore => {}
+        }
+    }
+
+    /// Scrolls just enough to keep the keyboard cursor inside the viewport.
+    fn scroll_to_cursor(&mut self) {
+        let Some(cursor) = self.text_selection.cursor() else {
+            return;
+        };
+        let count = self.row_count();
+        let height = self.transcript_height.max(1);
+        let start = self.visible_start();
+        if cursor.row < start {
+            self.scroll_from_bottom = count.saturating_sub(height).saturating_sub(cursor.row);
+        } else if cursor.row >= start + height {
+            self.scroll_from_bottom = count.saturating_sub(cursor.row + 1);
+        }
+        self.clamp_scroll();
     }
 
     fn copy_selection(&mut self) {
@@ -577,6 +700,7 @@ impl ChatScreen {
         self.transcript_width = chunks[0].width as usize;
         self.transcript_height = chunks[0].height as usize;
         self.clamp_scroll();
+        self.text_selection.clamp_cursor(self.layout.rows());
         let row_count = self.layout.len();
         let (mut visible, visible_start) = transcript::render::visible_lines(
             self.layout.rows(),
@@ -601,6 +725,17 @@ impl ChatScreen {
             .filter(|(_, when)| when.elapsed() < Duration::from_secs(4))
         {
             format!("{status} ")
+        } else if self.text_selection.keyboard_active() {
+            let mode = match self.text_selection.visual_mode() {
+                Some(selection::VisualMode::Char) => "VISUAL",
+                Some(selection::VisualMode::Line) => "VISUAL LINE",
+                None => "SELECT",
+            };
+            if chunks[1].width < 48 {
+                format!("{mode} · Esc exits ")
+            } else {
+                format!("{mode} · h/j/k/l w/b move · v/V select · y yank · Esc exits ")
+            }
         } else if let Some(pending) = &self.approval {
             // Approval keys apply only to a blank input; say so instead of
             // advertising keys that would edit the draft.
@@ -635,7 +770,25 @@ impl ChatScreen {
         let context_rule = status::render_context_rule(header[1].width as usize, &self.meters);
         frame.render_widget(Paragraph::new(context_rule).style(accent), header[1]);
         frame.render_widget(Paragraph::new(input.lines.join("\n")), chunks[2]);
-        if chunks[2].width > 0 && chunks[2].height > 0 {
+        let selection_cursor = self
+            .text_selection
+            .cursor()
+            .filter(|cursor| {
+                cursor.row >= visible_start && cursor.row < visible_start + self.transcript_height
+            })
+            .map(|cursor| {
+                (
+                    chunks[0].x
+                        + (cursor
+                            .column
+                            .min(chunks[0].width.saturating_sub(1) as usize))
+                            as u16,
+                    chunks[0].y + (cursor.row - visible_start) as u16,
+                )
+            });
+        if let Some(position) = selection_cursor {
+            frame.set_cursor_position(position);
+        } else if chunks[2].width > 0 && chunks[2].height > 0 {
             frame.set_cursor_position((
                 chunks[2].x + input.cursor_column.min(chunks[2].width as usize - 1) as u16,
                 chunks[2].y + input.cursor_row.min(chunks[2].height as usize - 1) as u16,
@@ -776,6 +929,10 @@ impl ChatScreen {
             }
             ParsedCommand::ShowMouse => {
                 self.show_mouse_mode();
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::Select => {
+                self.enter_selection_mode();
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::ShowThinking => {
@@ -924,9 +1081,9 @@ impl ChatScreen {
 
     fn show_mouse_mode(&mut self) {
         self.push_notice(if self.mouse_capture {
-            "mouse on: wheel and jump controls enabled; drag to select/copy, Ctrl+Y copies again".to_string()
+            "mouse on: wheel and jump controls enabled; drag to select/copy, Ctrl+Y copies again, Ctrl+S selects by keyboard".to_string()
         } else {
-            "mouse off: select/copy text with your terminal; use Page Up/Page Down to scroll, /mouse on for mouse controls".to_string()
+            "mouse off: select/copy text with your terminal or Ctrl+S; use Page Up/Page Down to scroll, /mouse on for mouse controls".to_string()
         });
     }
 
@@ -1152,6 +1309,7 @@ fn session_loop(
                 ScreenAction::Gateway => return Ok(SessionEnd::Gateway),
             }
         }
+        screen.tick();
         screen.poll_clipboard();
         screen.poll_backend();
     }
@@ -1977,7 +2135,7 @@ mod tests {
         assert_eq!(screen.input_text(), "");
         assert!(!screen.mouse_capture);
         assert_eq!(screen.messages.last().unwrap().text,
-            "mouse off: select/copy text with your terminal; use Page Up/Page Down to scroll, /mouse on for mouse controls");
+            "mouse off: select/copy text with your terminal or Ctrl+S; use Page Up/Page Down to scroll, /mouse on for mouse controls");
         assert!(backend.requests.is_empty());
         fs::remove_dir_all(state).unwrap();
     }
@@ -2076,6 +2234,206 @@ mod tests {
     }
 
     #[test]
+    fn dragging_past_the_bottom_edge_auto_scrolls_and_extends_the_selection() {
+        use crossterm::event::{KeyModifiers, MouseEvent};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-autoscroll");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage {
+            role: TranscriptRole::Assistant,
+            text: (0..30)
+                .map(|n| format!("line{n:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            tool: None,
+        });
+        screen.set_input_text("keep draft");
+        draw_lines(&mut screen, 40, 12);
+        let height = screen.transcript_height;
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        // Scroll up first so the viewport can move in both directions.
+        screen
+            .apply_action(KeyAction::ScrollTowardOlder, &mut backend)
+            .unwrap();
+        assert_eq!(screen.scroll_from_bottom, height);
+        let top_row = 30 - 2 * height; // first visible transcript row
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), 0, 1),
+                &mut backend,
+            )
+            .unwrap();
+        // Dragging into the input area holds the bottom edge.
+        screen
+            .apply_terminal_event(
+                mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    5,
+                    height as u16 + 2,
+                ),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(
+            screen.text_selection.edge(screen.transcript_area),
+            Some(selection::AutoScroll::Newer)
+        );
+        let rows = transcript::render::rows(&screen.messages, 40);
+        let text_before = screen.text_selection.text(&rows).unwrap();
+        assert!(text_before.starts_with(&format!("line{:02}", top_row + 1)));
+        assert!(text_before.ends_with(&format!("line{:02}", top_row + height - 1)));
+        for step in 1..=3 {
+            assert!(screen.auto_scroll());
+            assert_eq!(screen.scroll_from_bottom, height - step);
+        }
+        // The anchor stayed on its original row; the focus followed the pointer.
+        let text_after = screen.text_selection.text(&rows).unwrap();
+        assert!(text_after.starts_with(&format!("line{:02}", top_row + 1)));
+        assert!(text_after.ends_with(&format!("line{:02}", top_row + height + 2)));
+        // Returning inside the viewport stops the scroll; so does releasing.
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Drag(MouseButton::Left), 5, 3),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.text_selection.edge(screen.transcript_area), None);
+        assert!(!screen.auto_scroll());
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Drag(MouseButton::Left), 5, 0),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(
+            screen.text_selection.edge(screen.transcript_area),
+            Some(selection::AutoScroll::Older)
+        );
+        assert!(screen.auto_scroll());
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Up(MouseButton::Left), 5, 0),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.text_selection.edge(screen.transcript_area), None);
+        assert!(!screen.auto_scroll());
+        assert!(screen.pending_copy.is_some() || screen.copy_receiver.is_some());
+        assert_eq!(screen.input_text(), "keep draft");
+        assert!(backend.requests.is_empty());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn keyboard_selection_mode_moves_selects_yanks_and_preserves_the_draft() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-vi-select");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage {
+            role: TranscriptRole::Assistant,
+            text: (0..30)
+                .map(|n| format!("line{n:02} 界🙂"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            tool: None,
+        });
+        screen.set_input_text("keep draft");
+        draw_lines(&mut screen, 40, 12);
+        let height = screen.transcript_height;
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        screen
+            .apply_terminal_event(key(KeyCode::Char('s'), KeyModifiers::CONTROL), &mut backend)
+            .unwrap();
+        assert!(screen.text_selection.keyboard_active());
+        assert_eq!(screen.text_selection.cursor().unwrap().row, 29);
+        assert!(draw_lines(&mut screen, 40, 12)[height].contains("SELECT"));
+        // Plain letters move the cursor instead of editing the draft.
+        for _ in 0..height {
+            screen
+                .apply_terminal_event(key(KeyCode::Char('k'), KeyModifiers::NONE), &mut backend)
+                .unwrap();
+        }
+        assert_eq!(screen.text_selection.cursor().unwrap().row, 29 - height);
+        assert_eq!(
+            screen.scroll_from_bottom, 1,
+            "scrolled to keep the cursor visible"
+        );
+        screen
+            .apply_terminal_event(key(KeyCode::Char('$'), KeyModifiers::SHIFT), &mut backend)
+            .unwrap();
+        // "lineNN 界🙂": the last grapheme starts after 7 narrow + 1 wide cells.
+        assert_eq!(screen.text_selection.cursor().unwrap().column, 9);
+        // `v` anchors on the emoji; `h` then `j` move only the focus.
+        screen
+            .apply_terminal_event(key(KeyCode::Char('v'), KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        screen
+            .apply_terminal_event(key(KeyCode::Char('h'), KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        screen
+            .apply_terminal_event(key(KeyCode::Char('j'), KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        assert!(screen.text_selection.visual_active());
+        assert!(draw_lines(&mut screen, 40, 12)[height].contains("VISUAL"));
+        let rows = transcript::render::rows(&screen.messages, 40);
+        assert_eq!(
+            screen.text_selection.text(&rows).as_deref(),
+            Some("🙂\nline22 界")
+        );
+        screen
+            .apply_terminal_event(key(KeyCode::Char('y'), KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        assert!(!screen.text_selection.keyboard_active());
+        assert!(screen.pending_copy.is_some() || screen.copy_receiver.is_some());
+        // The highlight stays for a retry; Esc clears it.
+        assert_eq!(
+            screen.text_selection.text(&rows).as_deref(),
+            Some("🙂\nline22 界")
+        );
+        screen
+            .apply_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        assert!(screen.text_selection.is_empty());
+        assert_eq!(screen.input_text(), "keep draft");
+        // Esc inside the mode leaves it without touching the draft either.
+        screen.set_input_text("/select");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(screen.text_selection.keyboard_active());
+        screen
+            .apply_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        assert!(!screen.text_selection.keyboard_active());
+        assert!(backend.requests.is_empty());
+        screen.messages.clear();
+        screen.dirty = transcript::render::Dirty::From(0);
+        screen
+            .apply_action(KeyAction::EnterSelectionMode, &mut backend)
+            .unwrap();
+        assert!(!screen.text_selection.keyboard_active());
+        assert!(screen
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .starts_with("nothing to select"));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn mouse_commands_restore_native_selection_and_reenable_controls() {
         use crossterm::event::{KeyModifiers, MouseEvent};
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-mouse-mode");
@@ -2101,7 +2459,7 @@ mod tests {
         assert!(draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
         assert_eq!(
             screen.messages.last().unwrap().text,
-            "mouse on: wheel and jump controls enabled; drag to select/copy, Ctrl+Y copies again"
+            "mouse on: wheel and jump controls enabled; drag to select/copy, Ctrl+Y copies again, Ctrl+S selects by keyboard"
         );
         screen.set_input_text("/mouse off");
         screen
@@ -2109,7 +2467,7 @@ mod tests {
             .unwrap();
         assert!(!draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
         assert_eq!(screen.messages.last().unwrap().text,
-            "mouse off: select/copy text with your terminal; use Page Up/Page Down to scroll, /mouse on for mouse controls");
+            "mouse off: select/copy text with your terminal or Ctrl+S; use Page Up/Page Down to scroll, /mouse on for mouse controls");
         screen.set_input_text("keep draft");
         screen
             .apply_terminal_event(

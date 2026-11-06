@@ -2,15 +2,24 @@
 
 ## Unreleased
 
+## 0.5.0 (2026-11-05)
+
+### Added
+
+- Drag-selection auto-scroll: holding a left drag on the top transcript row or below the transcript scrolls one row per frame, keeping the original anchor and extending the highlight into newly revealed rows. Returning inside the viewport or releasing stops it; release still copies the exact text across soft wraps.
+- Keyboard selection mode: `Ctrl+S` or `/select` places a cursor on the newest visible transcript row. `h`/`j`/`k`/`l` or arrows move by grapheme and row, `w`/`b` move by word with Vim's character classes, `0`/`$`, `g`/`G` and Page Up/Down jump, `v` starts a character-wise visual range and `V` a line-wise one over whole logical lines (trailing newline included, as in Vim), `y` yanks it through the shared clipboard adapters and leaves the mode with the highlight kept for a `Ctrl+Y` retry, and `Esc` leaves without copying. Selection keys never reach the draft or a tool approval, the transcript scrolls to keep the cursor visible, and the activity line shows `SELECT`/`VISUAL` hints.
+- The tool approval prompt lists the answers for the call awaiting a decision. `↑`/`↓` move the highlight and `Enter` applies it; the letter keys (`y`, `s`, `n`, `a`, `Esc`) still answer directly. `Shift+↑`/`Shift+↓` move the cursor to another numbered call, so calls can be answered in any order and a decision revised before the batch is sent; the cursor otherwise continues at the next undecided call. "Approve all remaining" and "Deny all remaining" apply to every undecided call and are offered only while more than one is undecided.
+- `ahi tui --actions <file>` uses that tool policy file instead of the working directory's `ahi.actions.yaml`. The file must exist and parse (checked at startup and on every turn); rule paths and tool confinement stay relative to the working directory. `examples/actions` holds six ready-made policies, from read-everything to deny-all plus a deliberately invalid one, with a README.
+
 ### Fixed
 
 - Native Windows clipboard copies now write `CF_UNICODETEXT` through the Win32 API (no process, no temporary file, no registry dependency), normalizing bare LF to CRLF. If the clipboard stays busy, the PowerShell fallback hands the text over through a private UTF-8 temporary file, as WSL already did. The FFI lives in the in-repo, dependency-free `crates/ahi-win32` workspace crate, so `ahi` keeps `unsafe_code = "forbid"`. Releases publish `ahi-win32` before `ahi`; `just package` verifies both. The clipboard code is split into platform routing, bounded helper execution, OSC 52, and the Windows handoff, and the routing for macOS, native Linux, WSL, Windows, and remote sessions is unit-tested.
 - Browser-login OpenAI Responses turns failed with `invalid or conflicting OpenAI response event` as soon as the model finished: the live API now sends `response.completed` with an empty `output` array (and no `Content-Type` header), and the parser required that array to list every streamed item. The finished output items now stand in for an empty terminal `output`, for text and tool-calling turns alike; a terminal event that lists items is still reconciled one for one, and an item still pending still fails.
 
+## 0.4.0 (2026-11-05)
+
 ### Added
 
-- The tool approval prompt lists the answers for the call awaiting a decision. `↑`/`↓` move the highlight and `Enter` applies it; the letter keys (`y`, `s`, `n`, `a`, `Esc`) still answer directly. `Shift+↑`/`Shift+↓` move the cursor to another numbered call, so calls can be answered in any order and a decision revised before the batch is sent; the cursor otherwise continues at the next undecided call. "Approve all remaining" and "Deny all remaining" apply to every undecided call and are offered only while more than one is undecided.
-- `ahi tui --actions <file>` uses that tool policy file instead of the working directory's `ahi.actions.yaml`. The file must exist and parse (checked at startup and on every turn); rule paths and tool confinement stay relative to the working directory. `examples/actions` holds six ready-made policies, from read-everything to deny-all plus a deliberately invalid one, with a README.
 - `models.json` `api` is a typed wire protocol: `openai-completions`, `openai-responses`, or `anthropic-messages`. Gateways may declare any of the three; `/gateway` discovery accepts and saves the declared value. The reserved `openai` id keeps its legacy `openai-completions` spelling and still means browser-login Responses. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 - Anthropic Messages transport. A built-in `anthropic` provider appears in the picker when `ANTHROPIC_API_KEY` is set (or a `providers.anthropic` entry exists); the key is sent as `x-api-key` with `anthropic-version: 2023-06-01`. Streaming text, `tool_use`/`tool_result` exchanges, extended-thinking budgets, usage with cache reads, and `GET /v1/models` catalog refresh are supported. There is no Claude subscription login; the plan records why.
 - Catalog refresh for `openai-responses` and `anthropic-messages` providers uses the provider's standard `GET <baseUrl>/models` with the configured authentication.
@@ -31,7 +40,6 @@
 - The chat transcript is laid out incrementally: only changed messages are re-wrapped, a streamed reply re-wraps only its last row plus the new text, and only the visible window is padded per frame. Git status is refreshed once per drained batch of tool returns rather than twice per call, and it runs on a worker thread so a large tree never stalls a keystroke; the footer keeps its last snapshot until the probe lands.
 - Catalog refresh (`r`, `--refresh`) runs every provider concurrently; the wait is the slowest provider, not the sum.
 - Provider metadata is merged from one catalog read per provider instead of one read per curated model.
-
 - Chat can run builtin, read-only `read_file` and `list_dir` tool calls for configured gateways. Tools are off unless the working directory's `ahi.actions.yaml` (version 1, `action: tool_call`) has an approving rule; without one, requests are unchanged and calls fail with `tool execution is disabled`. Rules match a builtin tool and an optional path prefix, deny first. `ask: true` prompts in chat: `y` once, `s` for the session under the shown directory, `n` deny, `a` approve the rest, `Esc` deny the rest. Tools are confined to the working directory, follow no symbolic links, never read the state directory, and return bounded output (64 KiB per file, 500 entries, 256 KiB and 8 rounds per turn). Every call returns a result, and tool exchanges replay on later turns. Approved file contents are sent to the selected gateway. ahi does not download or define tools from configuration.
 
 ## 0.3.2 (2026-11-04)

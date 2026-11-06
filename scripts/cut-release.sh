@@ -196,7 +196,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
-cargo package --allow-dirty
+cargo package --workspace --allow-dirty
 
 if [[ "$dry_run" -eq 1 ]]; then
   echo "Dry run succeeded for $package_name $tag."

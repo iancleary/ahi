@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::approval::ApprovalKey;
 use super::input::EditorKey;
+use super::selection::{CursorMove, VisualMode};
 
 /// What one key press asks the screen to do.
 ///
@@ -26,8 +27,50 @@ pub(crate) enum KeyAction {
     JumpToBottom,
     CycleThinkingLevel,
     CopySelection,
+    /// Ctrl+S: keyboard selection mode over the transcript.
+    EnterSelectionMode,
     Edit(EditorKey),
     Ignore,
+}
+
+/// What one key press asks of keyboard selection mode. These replace
+/// [`translate`] while the mode is active, so no key reaches the draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectionKey {
+    Move(CursorMove),
+    Visual(VisualMode),
+    Yank,
+    Exit,
+    Ignore,
+}
+
+/// vi-like movement plus the arrow and paging keys the rest of chat uses.
+pub(crate) fn translate_selection(key: KeyEvent) -> SelectionKey {
+    if key.kind != KeyEventKind::Press {
+        return SelectionKey::Ignore;
+    }
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => SelectionKey::Exit,
+        KeyCode::Char('c') if control => SelectionKey::Exit,
+        KeyCode::Char('y' | 'Y') => SelectionKey::Yank,
+        _ if control || key.modifiers.contains(KeyModifiers::ALT) => SelectionKey::Ignore,
+        KeyCode::Char('v') => SelectionKey::Visual(VisualMode::Char),
+        KeyCode::Char('V') => SelectionKey::Visual(VisualMode::Line),
+        KeyCode::Char('w') => SelectionKey::Move(CursorMove::WordForward),
+        KeyCode::Char('b') => SelectionKey::Move(CursorMove::WordBackward),
+        KeyCode::Char('h') | KeyCode::Left => SelectionKey::Move(CursorMove::Left),
+        KeyCode::Char('l') | KeyCode::Right => SelectionKey::Move(CursorMove::Right),
+        KeyCode::Char('k') | KeyCode::Up => SelectionKey::Move(CursorMove::Up),
+        KeyCode::Char('j') | KeyCode::Down => SelectionKey::Move(CursorMove::Down),
+        KeyCode::Char('0') | KeyCode::Home => SelectionKey::Move(CursorMove::LineStart),
+        KeyCode::Char('$') | KeyCode::End => SelectionKey::Move(CursorMove::LineEnd),
+        KeyCode::Char('g') => SelectionKey::Move(CursorMove::Top),
+        KeyCode::Char('G') => SelectionKey::Move(CursorMove::Bottom),
+        KeyCode::PageUp => SelectionKey::Move(CursorMove::PageOlder),
+        KeyCode::PageDown => SelectionKey::Move(CursorMove::PageNewer),
+        _ => SelectionKey::Ignore,
+    }
 }
 
 /// Keys that answer a pending tool approval. Other keys fall back to
@@ -82,6 +125,9 @@ pub(crate) fn translate(key: KeyEvent) -> KeyAction {
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::CycleThinkingLevel
+        }
+        KeyCode::Char('s' | 'S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyAction::EnterSelectionMode
         }
         KeyCode::Char('y' | 'Y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             KeyAction::CopySelection
@@ -227,6 +273,114 @@ mod tests {
         ] {
             assert_eq!(translate(press(code, modifiers)), expected);
         }
+    }
+
+    #[test]
+    fn selection_mode_keys_map_vi_and_arrow_keys_and_ignore_the_rest() {
+        assert_eq!(
+            translate(press(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            KeyAction::EnterSelectionMode
+        );
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::Char('h'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::Left),
+            ),
+            (
+                KeyCode::Left,
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::Left),
+            ),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::Down),
+            ),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::Up),
+            ),
+            (
+                KeyCode::Char('l'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::Right),
+            ),
+            (
+                KeyCode::Char('0'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::LineStart),
+            ),
+            (
+                KeyCode::Char('$'),
+                KeyModifiers::SHIFT,
+                SelectionKey::Move(CursorMove::LineEnd),
+            ),
+            (
+                KeyCode::Char('g'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::Top),
+            ),
+            (
+                KeyCode::Char('G'),
+                KeyModifiers::SHIFT,
+                SelectionKey::Move(CursorMove::Bottom),
+            ),
+            (
+                KeyCode::PageUp,
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::PageOlder),
+            ),
+            (
+                KeyCode::Char('v'),
+                KeyModifiers::NONE,
+                SelectionKey::Visual(VisualMode::Char),
+            ),
+            (
+                KeyCode::Char('V'),
+                KeyModifiers::SHIFT,
+                SelectionKey::Visual(VisualMode::Line),
+            ),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::WordForward),
+            ),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::WordBackward),
+            ),
+            (KeyCode::Char('y'), KeyModifiers::NONE, SelectionKey::Yank),
+            (
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL,
+                SelectionKey::Yank,
+            ),
+            (KeyCode::Esc, KeyModifiers::NONE, SelectionKey::Exit),
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                SelectionKey::Exit,
+            ),
+            (KeyCode::Char('x'), KeyModifiers::NONE, SelectionKey::Ignore),
+            (KeyCode::Enter, KeyModifiers::NONE, SelectionKey::Ignore),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                SelectionKey::Ignore,
+            ),
+        ] {
+            assert_eq!(
+                translate_selection(press(code, modifiers)),
+                expected,
+                "{code:?}"
+            );
+        }
+        let mut release = press(KeyCode::Char('j'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(translate_selection(release), SelectionKey::Ignore);
     }
 
     #[test]
