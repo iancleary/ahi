@@ -122,8 +122,13 @@ fn encode(text: &str) -> Vec<u16> {
 mod tests {
     use super::*;
 
+    /// The clipboard is one global resource, so tests that open it run one at
+    /// a time; otherwise they contend with each other inside the retry window.
+    static CLIPBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn stub_or_native_copy_never_panics() {
+        let _guard = CLIPBOARD.lock().unwrap();
         let _ = copy("");
     }
 
@@ -138,8 +143,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn copy_round_trips_through_the_system_clipboard() {
-        // Exercised on Windows CI only; the clipboard is global process state,
-        // so this test may observe another writer and is kept to a single call.
-        assert!(copy("ahi clipboard test 界🙂\n"));
+        // Exercised on Windows CI only. Another process can hold the clipboard
+        // past the retry window, so one failed call is retried once after a
+        // pause before the test gives up.
+        let _guard = CLIPBOARD.lock().unwrap();
+        let text = "ahi clipboard test 界🙂\n";
+        if !copy(text) {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(copy(text));
+        }
     }
 }
