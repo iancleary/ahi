@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Drag-selection auto-scroll: holding a left drag on the top transcript row or below the transcript scrolls one row per frame, keeping the original anchor and extending the highlight into newly revealed rows. Returning inside the viewport or releasing stops it; release still copies the exact text across soft wraps.
+- Keyboard selection mode: `Ctrl+S` or `/select` places a cursor on the newest visible transcript row. `h`/`j`/`k`/`l` or arrows move by grapheme and row, `0`/`$`, `g`/`G` and Page Up/Down jump, `v` starts a visual range, `y` yanks it through the shared clipboard adapters and leaves the mode with the highlight kept for a `Ctrl+Y` retry, and `Esc` leaves without copying. Selection keys never reach the draft or a tool approval, the transcript scrolls to keep the cursor visible, and the activity line shows `SELECT`/`VISUAL` hints.
+
 ### Fixed
 
 - Native Windows clipboard copies now write `CF_UNICODETEXT` through the Win32 API (no process, no temporary file, no registry dependency), normalizing bare LF to CRLF. If the clipboard stays busy, the PowerShell fallback hands the text over through a private UTF-8 temporary file, as WSL already did. The FFI lives in the in-repo, dependency-free `crates/ahi-win32` workspace crate, so `ahi` keeps `unsafe_code = "forbid"`. Releases publish `ahi-win32` before `ahi`; `just package` verifies both. The clipboard code is split into platform routing, bounded helper execution, OSC 52, and the Windows handoff, and the routing for macOS, native Linux, WSL, Windows, and remote sessions is unit-tested.

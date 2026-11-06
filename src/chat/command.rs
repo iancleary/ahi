@@ -15,6 +15,7 @@ pub(crate) enum ParsedCommand {
     Clear,
     ShowMouse,
     SetMouse(bool),
+    Select,
     ShowThinking,
     SetThinking(ThinkingLevel),
     UnknownThinkingLevel { level: String },
@@ -40,6 +41,7 @@ pub(crate) fn parse(text: &str) -> ParsedCommand {
         ("/mouse", []) => ParsedCommand::ShowMouse,
         ("/mouse", ["on"]) => ParsedCommand::SetMouse(true),
         ("/mouse", ["off"]) => ParsedCommand::SetMouse(false),
+        ("/select", []) => ParsedCommand::Select,
         ("/thinking", []) => ParsedCommand::ShowThinking,
         ("/thinking", [level]) => match ThinkingLevel::parse(level) {
             Some(level) => ParsedCommand::SetThinking(level),

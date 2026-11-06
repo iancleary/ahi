@@ -41,6 +41,8 @@ The workspace uses the colors above at normal brightness. The provider/model/thi
 | `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete` | Edit within the input. `Up` and `Down` move between visual input rows, including soft-wrapped rows. |
 | `PageUp`, `PageDown` | Scroll the transcript. |
 | `Ctrl+T` | Cycle the thinking level. |
+| `Ctrl+S` | Enter keyboard selection mode (also `/select`). While active, keys go to the transcript cursor, never to the draft or a pending approval: `h`/`j`/`k`/`l` or arrows move, `0`/`$` go to row start/end, `g`/`G` to the oldest/newest row, `PageUp`/`PageDown` by a page, `v` starts or drops a visual range, `y` (or `Ctrl+Y`) yanks the range through the shared clipboard adapters and leaves the mode with the highlight kept, `Esc` or `Ctrl+C` leaves without copying. The viewport scrolls to keep the cursor visible; a mouse click leaves the mode. The activity line shows `SELECT` or `VISUAL` with the key hints. |
+| `Ctrl+Y` | Copy the highlighted transcript selection again. |
 | `Ctrl+C` | Clear the input if it is not empty. Otherwise exit. |
 | `Ctrl+D` | Exit when the input is empty. |
 | `Esc` | Dismiss Commands while retaining the chat draft, or clear transcript selection. With neither open, cancel the streaming response: the partial reply stays in the transcript and is sent with the next message, an assistant turn that received no text is removed, and a highlighted notice records the cancellation. During a tool approval with a blank input, deny the remaining calls. |
