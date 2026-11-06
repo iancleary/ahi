@@ -15,9 +15,11 @@ All three open the same login view. Login always means **Sign in with ChatGPT fo
 The existing standalone interface remains available:
 
 ```sh
-ahi --state-dir /path/to/private/state login
-ahi --state-dir /path/to/private/state tui
+ahi login
+ahi tui
 ```
+
+The credential is written to `$XDG_DATA_HOME/ahi/credentials/openai.json` (default `~/.local/share/ahi/credentials/openai.json`). `--state-dir /path/to/private/root` keeps it, together with `models.json` and the rest of ahi's files, under one private directory instead.
 
 In the login view, the browser is attempted automatically and the authorization URL remains visible. If the browser cannot reach the local callback listener, paste the **complete final callback URL** into the view and press Enter. It must contain `code`, matching `state`, and the issued `client_id`. Bare codes, foreign origins, and missing or duplicate parameters are rejected. Invalid pasted input reports a diagnostic and leaves the browser session pending for another attempt.
 
@@ -46,7 +48,7 @@ Operational limits:
 - Waiting for browser authorization has no deadline. Cancel explicitly when abandoning the login.
 - Token exchange is synchronous, with a 15-second request timeout and 1 MiB response cap; terminal cancellation is processed during the browser wait, not during that exchange. Requests do not follow redirects.
 - Pasted callback input is limited to 8192 bytes in the terminal view.
-- Credential rotation across separate processes is not serialized. Do not log in or refresh concurrently against the same state directory.
+- Credential rotation across separate processes is not serialized. Do not log in or refresh concurrently against the same data directory.
 - Picker `auth signed-in` still means a credential file exists, not that a live request validated it. Historical catalog refresh errors remain until another explicit refresh.
 
 ## Verification and troubleshooting

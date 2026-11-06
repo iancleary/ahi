@@ -1,8 +1,8 @@
 //! Thinking level and the `<state>/thinking` file.
 
 use std::fs;
-use std::path::Path;
 
+use crate::directories::Directories;
 use crate::error::{Error, Result};
 
 /// Reasoning display level stored in `<state>/thinking`.
@@ -49,8 +49,8 @@ impl ThinkingLevel {
 }
 
 /// Read the stored level. A missing file is `medium` with no notice.
-pub(crate) fn read(state_dir: &Path) -> (ThinkingLevel, Option<String>) {
-    let path = state_dir.join("thinking");
+pub(crate) fn read(state_dir: &Directories) -> (ThinkingLevel, Option<String>) {
+    let path = state_dir.state.join("thinking");
     if !path.exists() {
         return (ThinkingLevel::Medium, None);
     }
@@ -70,14 +70,16 @@ pub(crate) fn read(state_dir: &Path) -> (ThinkingLevel, Option<String>) {
 }
 
 /// Write the level as a single line. An invalid file is left unchanged.
-pub(crate) fn write(state_dir: &Path, level: ThinkingLevel) -> Result<()> {
-    let path = state_dir.join("thinking");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| Error::new(format!("failed to create {}: {err}", parent.display())))?;
-    }
+pub(crate) fn write(state_dir: &Directories, level: ThinkingLevel) -> Result<()> {
+    let path = state_dir.state.join("thinking");
+    crate::directories::create_private_dir(&state_dir.state).map_err(|err| {
+        Error::new(format!(
+            "failed to create {}: {err}",
+            state_dir.state.display()
+        ))
+    })?;
     let level = level.as_str();
-    fs::write(&path, format!("{level}\n"))
+    crate::directories::write_private(&path, format!("{level}\n").as_bytes())
         .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))
 }
 
@@ -89,11 +91,13 @@ mod tests {
     fn thinking_level_is_persisted_and_an_invalid_file_falls_back() {
         let state = crate::fixture_directory::create_unique_fixture_directory("chat-thinking");
         fs::write(state.join("thinking"), "high\n").unwrap();
-        let screen = super::super::ChatScreen::load(&state, "openai/gpt-4.1");
+        let screen =
+            super::super::ChatScreen::load(&Directories::single_root(&state), "openai/gpt-4.1");
         assert_eq!(screen.thinking(), ThinkingLevel::High);
 
         fs::write(state.join("thinking"), "loud\n").unwrap();
-        let screen = super::super::ChatScreen::load(&state, "openai/gpt-4.1");
+        let screen =
+            super::super::ChatScreen::load(&Directories::single_root(&state), "openai/gpt-4.1");
         assert_eq!(screen.thinking(), ThinkingLevel::Medium);
         assert!(screen
             .messages()

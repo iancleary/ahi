@@ -8,18 +8,23 @@ pub(in crate::chat::backend) struct Workspace {
     root: PathBuf,
     /// ahi's own state (credentials, `models.json`, catalogs). Never readable,
     /// even when it lies inside the working directory.
-    excluded: Option<PathBuf>,
+    excluded: Vec<PathBuf>,
 }
 
 impl Workspace {
-    pub(in crate::chat::backend) fn open(directory: &Path, state: &Path) -> Result<Self> {
+    pub(in crate::chat::backend) fn open(
+        directory: &Path,
+        state: &crate::directories::Directories,
+    ) -> Result<Self> {
         let root = directory
             .canonicalize()
             .map_err(|_| Error::new("cannot resolve the working directory for tools"))?;
-        Ok(Self {
-            root,
-            excluded: state.canonicalize().ok(),
-        })
+        // Every ahi directory is off limits, whichever category it holds.
+        let excluded = [&state.config, &state.data, &state.state, &state.cache]
+            .into_iter()
+            .filter_map(|dir| dir.canonicalize().ok())
+            .collect();
+        Ok(Self { root, excluded })
     }
 
     pub(in crate::chat::backend) fn root(&self) -> &Path {
@@ -45,12 +50,8 @@ impl Workspace {
         if canonical != joined || !canonical.starts_with(&self.root) {
             return Err("path must be spelled exactly as on disk inside the working directory; symbolic links and case variants are refused");
         }
-        if self
-            .excluded
-            .as_ref()
-            .is_some_and(|state| canonical.starts_with(state))
-        {
-            return Err("path is inside ahi's state directory, which tools cannot read");
+        if self.excluded.iter().any(|dir| canonical.starts_with(dir)) {
+            return Err("path is inside ahi's own directories, which tools cannot read");
         }
         Ok(canonical)
     }

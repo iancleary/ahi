@@ -1,12 +1,13 @@
 //! Explicit models.json edits with optimistic conflict detection and atomic replacement.
 use super::*;
+use crate::directories::Directories;
 use std::collections::BTreeSet;
 
 /// Save only this provider's curated IDs/order. The caller replaces its registry
 /// only on success; browsing, refresh, and editor reload never call this writer.
 /// Explicit saves pretty-print JSON while retaining object key order.
 pub fn save_curated_models(
-    state: &Path,
+    state: &Directories,
     registry: &Registry,
     provider: &str,
     ids: &[String],
@@ -20,7 +21,7 @@ pub fn save_curated_models(
         Some(bytes) => serde_json::from_slice(bytes).map_err(|err| Error::new(err.to_string()))?,
         None => serde_json::json!({"providers": {}}),
     };
-    let path = state.join("models.json");
+    let path = state.config.join("models.json");
     let providers = document
         .as_object_mut()
         .ok_or_else(|| {
@@ -84,7 +85,7 @@ pub fn save_curated_models(
     save_document(state, registry, document)
 }
 
-pub(super) fn check_snapshot(state: &Path, registry: &Registry) -> Result<()> {
+pub(super) fn check_snapshot(state: &Directories, registry: &Registry) -> Result<()> {
     if read_models_bytes(state)? != registry.models_bytes {
         return Err(Error::new(
             "models.json changed outside this view; press e to review/reload it before saving",
@@ -95,7 +96,7 @@ pub(super) fn check_snapshot(state: &Path, registry: &Registry) -> Result<()> {
 
 /// Save provider object order without changing credentials, model lists, or settings.
 pub fn save_provider_order(
-    state: &Path,
+    state: &Directories,
     registry: &Registry,
     order: &[String],
 ) -> Result<Registry> {
@@ -143,11 +144,11 @@ pub fn save_provider_order(
 }
 
 pub(super) fn save_document(
-    state: &Path,
+    state: &Directories,
     registry: &Registry,
     document: Value,
 ) -> Result<Registry> {
-    let path = state.join("models.json");
+    let path = state.config.join("models.json");
     let mut bytes = serde_json::to_vec_pretty(&document)
         .map_err(|err| Error::new(format!("models.json serialization: {err}")))?;
     bytes.push(b'\n');
@@ -157,12 +158,15 @@ pub(super) fn save_document(
     // Retain the same strict schema and validation as a normal local load.
     let file = parse_models(state, Some(&bytes))?;
     let next = registry_from_models(state, file, Some(bytes.clone()));
-    fs::create_dir_all(state)
-        .map_err(|err| Error::new(format!("failed to create {}: {err}", state.display())))?;
-    let temp = state.join("models.json.tmp");
+    crate::directories::create_private_dir(&state.config).map_err(|err| {
+        Error::new(format!(
+            "failed to create {}: {err}",
+            state.config.display()
+        ))
+    })?;
+    let temp = state.config.join("models.json.tmp");
     // A fixed, exclusive temp also prevents two ahi writers from sharing a save.
-    let mut output = OpenOptions::new()
-        .write(true)
+    let mut output = crate::directories::private_file()
         .create_new(true)
         .open(&temp)
         .map_err(|err| {
@@ -211,10 +215,10 @@ mod tests {
             r#"["first","vendor/model/variant","unselected"]"#,
         )
         .unwrap();
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         assert!(!dir.join("models.json").exists());
         let next = save_curated_models(
-            &dir,
+            &Directories::single_root(&dir),
             &registry,
             "openai",
             &[
@@ -241,16 +245,19 @@ mod tests {
                 "models":[{"id":"missing-from-catalog"},{"id":"vendor/model/variant"},{"id":"first"}]
             }}})
         );
-        assert_eq!(load_registry(&dir).unwrap(), next);
+        assert_eq!(
+            load_registry(&Directories::single_root(&dir)).unwrap(),
+            next
+        );
         let next = save_curated_models(
-            &dir,
+            &Directories::single_root(&dir),
             &next,
             "openai",
             &["first".into(), "missing-from-catalog".into()],
         )
         .unwrap();
         assert_eq!(
-            ids(&load_registry(&dir).unwrap(), 0),
+            ids(&load_registry(&Directories::single_root(&dir)).unwrap(), 0),
             ["first", "missing-from-catalog"]
         );
         assert_eq!(ids(&next, 0), ["first", "missing-from-catalog"]);
@@ -263,8 +270,14 @@ mod tests {
         let dir = crate::fixture_directory::create_unique_fixture_directory("curation-settings");
         let before = r#"{"providers":{"z-gateway":{"headers":{"Z":"$Z_HEADER","A":"gateway"},"models":[{"id":"vendor/kept"}],"apiKey":"$GATEWAY_KEY","api":"openai-completions","baseUrl":"https://gateway.example/v1"},"openai":{"models":[{"id":"old"}],"headers":{"X":"$OPENAI_HEADER"},"apiKey":"$OPENAI_KEY","api":"openai-completions","baseUrl":"https://custom.example/v1"}}}"#;
         fs::write(dir.join("models.json"), before).unwrap();
-        let registry = load_registry(&dir).unwrap();
-        save_curated_models(&dir, &registry, "openai", &["new/id".into()]).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
+        save_curated_models(
+            &Directories::single_root(&dir),
+            &registry,
+            "openai",
+            &["new/id".into()],
+        )
+        .unwrap();
         let actual: Value =
             serde_json::from_slice(&fs::read(dir.join("models.json")).unwrap()).unwrap();
         let mut expected: Value = serde_json::from_str(before).unwrap();
@@ -297,15 +310,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Z", "A"]
         );
-        let next = load_registry(&dir).unwrap();
+        let next = load_registry(&Directories::single_root(&dir)).unwrap();
         save_curated_models(
-            &dir,
+            &Directories::single_root(&dir),
             &next,
             "z-gateway",
             &["vendor/reordered".into(), "vendor/kept".into()],
         )
         .unwrap();
-        let reloaded = load_registry(&dir).unwrap();
+        let reloaded = load_registry(&Directories::single_root(&dir)).unwrap();
         assert_eq!(
             reloaded
                 .providers
@@ -337,15 +350,15 @@ mod tests {
             ),
         ] {
             fs::write(&path, before).unwrap();
-            let registry = load_registry(&dir).unwrap();
+            let registry = load_registry(&Directories::single_root(&dir)).unwrap();
             let original = registry.clone();
             let error =
-                save_curated_models(&dir, &registry, "openai", &["fixture-model".into()])
+                save_curated_models(&Directories::single_root(&dir), &registry, "openai", &["fixture-model".into()])
                     .unwrap_err();
             assert_eq!(error.to_string(), format!("{}: {expected}", path.display()));
             assert_eq!(fs::read(&path).unwrap(), before.as_bytes());
             assert_eq!(registry, original);
-            assert_eq!(load_registry(&dir).unwrap(), original);
+            assert_eq!(load_registry(&Directories::single_root(&dir)).unwrap(), original);
             assert!(!dir.join("models.json.tmp").exists());
         }
         fs::remove_dir_all(dir).unwrap();
@@ -354,18 +367,30 @@ mod tests {
     #[test]
     fn stale_and_failed_saves_preserve_file_bytes_and_loaded_registry() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("curation-failure");
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         let external = b"{\"providers\":{}}\n";
         fs::write(dir.join("models.json"), external).unwrap();
-        let error = save_curated_models(&dir, &registry, "openai", &["new".into()]).unwrap_err();
+        let error = save_curated_models(
+            &Directories::single_root(&dir),
+            &registry,
+            "openai",
+            &["new".into()],
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("changed outside this view; press e"));
         assert_eq!(fs::read(dir.join("models.json")).unwrap(), external);
         assert_eq!(ids(&registry, 0), Vec::<&str>::new());
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         fs::write(dir.join("models.json.tmp"), "other writer").unwrap();
-        let error = save_curated_models(&dir, &registry, "openai", &["new".into()]).unwrap_err();
+        let error = save_curated_models(
+            &Directories::single_root(&dir),
+            &registry,
+            "openai",
+            &["new".into()],
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("another save or stale temp file"));
@@ -374,15 +399,32 @@ mod tests {
             fs::read_to_string(dir.join("models.json.tmp")).unwrap(),
             "other writer"
         );
-        assert_eq!(load_registry(&dir).unwrap(), registry);
+        assert_eq!(
+            load_registry(&Directories::single_root(&dir)).unwrap(),
+            registry
+        );
         fs::remove_file(dir.join("models.json.tmp")).unwrap();
-        let error =
-            save_curated_models(&dir, &registry, "openai", &["invalid id".into()]).unwrap_err();
+        let error = save_curated_models(
+            &Directories::single_root(&dir),
+            &registry,
+            "openai",
+            &["invalid id".into()],
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("invalid model id"));
         assert_eq!(fs::read(dir.join("models.json")).unwrap(), external);
-        assert_eq!(load_registry(&dir).unwrap(), registry);
+        assert_eq!(
+            load_registry(&Directories::single_root(&dir)).unwrap(),
+            registry
+        );
         fs::write(dir.join("models.json"), "{broken external edit}").unwrap();
-        assert!(save_curated_models(&dir, &registry, "openai", &["new".into()]).is_err());
+        assert!(save_curated_models(
+            &Directories::single_root(&dir),
+            &registry,
+            "openai",
+            &["new".into()]
+        )
+        .is_err());
         assert_eq!(
             fs::read_to_string(dir.join("models.json")).unwrap(),
             "{broken external edit}"

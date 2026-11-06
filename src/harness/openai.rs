@@ -130,7 +130,15 @@ fn authenticated<T>(
 }
 
 fn read_credential(state: &Path) -> Result<Credential> {
-    let file = fs::File::open(state.join("credentials/openai.json"))
+    let path = state.join("credentials/openai.json");
+    // Like an SSH private key: a credential other users can read is not used,
+    // however it got that way. The message names the fix, never the contents.
+    if crate::directories::exposed(&path) == Some(true) {
+        return Err(Error::auth(
+            "OpenAI credential is readable by other users; run `chmod 600` on it (and `chmod 700` on its directory), or run ahi login",
+        ));
+    }
+    let file = fs::File::open(&path)
         .map_err(|_| Error::auth("OpenAI credential unavailable: run ahi login"))?;
     let bytes = bounded_read(file)?;
     // Never propagate serde errors: they can contain secret values.
@@ -351,18 +359,13 @@ fn renew_token(url: &str, credential: &Credential) -> Result<Credential> {
 
 fn write_credential(state: &Path, credential: &Credential) -> Result<()> {
     let dir = state.join("credentials");
-    fs::create_dir_all(&dir)
+    crate::directories::create_private_dir(state)
+        .and_then(|()| crate::directories::create_private_dir(&dir))
         .map_err(|_| Error::new("cannot create OpenAI credential directory"))?;
     let path = dir.join("openai.json");
     let temporary = dir.join("openai.json.tmp");
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
+    let mut file = crate::directories::private_file()
+        .create_new(true)
         .open(&temporary)
         .map_err(|_| Error::new("cannot create temporary OpenAI credential"))?;
     let result = (|| {
@@ -380,9 +383,13 @@ fn write_credential(state: &Path, credential: &Credential) -> Result<()> {
 }
 
 fn device_id(state: &Path) -> Result<String> {
-    fs::create_dir_all(state).map_err(|_| Error::new("cannot create OpenAI state directory"))?;
+    crate::directories::create_private_dir(state)
+        .map_err(|_| Error::new("cannot create OpenAI data directory"))?;
     let path = state.join("openai-device-id");
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
+    match crate::directories::private_file()
+        .create_new(true)
+        .open(&path)
+    {
         Ok(mut file) => {
             let mut bytes = [0_u8; 16];
             getrandom::getrandom(&mut bytes)
@@ -845,6 +852,13 @@ mod tests {
         assert_eq!(device_id(&dir).unwrap(), id);
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            // The fixture directory already exists, so only the file is ahi's.
+            assert_eq!(mode(&dir.join("openai-device-id")), 0o600);
+        }
         fs::write(dir.join("openai-device-id"), "malformed fixture").unwrap();
         assert!(device_id(&dir).is_err());
         assert_eq!(
@@ -1006,16 +1020,27 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(dir.join("credentials/openai.json"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
+            let mode =
+                |path: &str| fs::metadata(dir.join(path)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode("credentials/openai.json"), 0o600);
+            assert_eq!(mode("credentials"), 0o700);
+            // A credential other users can read is refused, whoever loosened it.
+            let credential = dir.join("credentials/openai.json");
+            fs::set_permissions(&credential, fs::Permissions::from_mode(0o644)).unwrap();
+            let error = match read_credential(&dir) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("an exposed credential was accepted"),
+            };
+            assert!(error.contains("readable by other users"), "{error}");
+            assert!(error.contains("chmod 600"), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+            fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(read_credential(&dir).is_ok());
         }
-        assert!(!render_text(&load_registry(&dir).unwrap()).contains("secret"));
+        assert!(
+            !render_text(&load_registry(&Directories::single_root(&dir)).unwrap())
+                .contains("secret")
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1025,7 +1050,8 @@ mod tests {
         fs::create_dir_all(dir.join("credentials")).unwrap();
         let legacy =
             r#"{"access_token":"old-secret","refresh_token":"old-refresh","expires_in":3600}"#;
-        fs::write(dir.join("credentials/openai.json"), legacy).unwrap();
+        crate::directories::write_private(&dir.join("credentials/openai.json"), legacy.as_bytes())
+            .unwrap();
         assert_eq!(
             refresh_at(&dir, "http://127.0.0.1:1", "http://127.0.0.1:1")
                 .unwrap_err()
@@ -1337,7 +1363,11 @@ mod tests {
                 b"[\"cached\"]\n"
             );
             assert_eq!(
-                load_registry(&dir).unwrap().providers[0].models[0].id,
+                load_registry(&Directories::single_root(&dir))
+                    .unwrap()
+                    .providers[0]
+                    .models[0]
+                    .id,
                 "curated"
             );
         }

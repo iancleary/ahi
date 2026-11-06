@@ -83,11 +83,11 @@ fn harmless_local_hook_runs_without_cargo() {
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
-    let cache = dir.join("cache");
+    let cache = dir.join("state");
     let output = run(
         &dir,
         &[
-            "--cache-dir",
+            "--state-dir",
             cache.to_str().unwrap(),
             "run",
             "--all-files",
@@ -341,7 +341,7 @@ fn toolchain_passthrough_is_names_only_and_drops_unlisted_vars() {
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
-    let cache = dir.join("cache");
+    let cache = dir.join("state");
     let output = Command::new(env!("CARGO_BIN_EXE_ahi"))
         .current_dir(&dir)
         .env("CARGO_HOME", "/usr/local/cargo")
@@ -350,7 +350,7 @@ fn toolchain_passthrough_is_names_only_and_drops_unlisted_vars() {
         .env("SECRET_TOKEN", "should-not-pass")
         .env("GITHUB_TOKEN", "should-not-pass")
         .args([
-            "--cache-dir",
+            "--state-dir",
             cache.to_str().unwrap(),
             "run",
             "--all-files",
@@ -417,11 +417,11 @@ fn ians_config_runs_where_cargo_is_available() {
     write(&dir.join("src/main.rs"), b"fn main() {}\n");
     write(&dir.join("notes.txt"), b"hello \nworld");
     git(&dir, &["add", "-A"]);
-    let cache = dir.join("cache");
+    let cache = dir.join("state");
     let output = run(
         &dir,
         &[
-            "--cache-dir",
+            "--state-dir",
             cache.to_str().unwrap(),
             "run",
             "--all-files",

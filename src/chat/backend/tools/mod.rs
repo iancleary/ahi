@@ -229,7 +229,11 @@ mod tests {
         }
         fs::create_dir(root.join("state")).unwrap();
         fs::write(root.join("state/models.json"), "{}").unwrap();
-        let workspace = Workspace::open(&root, &root.join("state")).unwrap();
+        let workspace = Workspace::open(
+            &root,
+            &crate::directories::Directories::single_root(root.join("state")),
+        )
+        .unwrap();
         let run = |tool, path: &str| {
             execute(
                 &PreparedCall {
@@ -245,7 +249,7 @@ mod tests {
         assert!(big.starts_with(&"x".repeat(1000)));
         assert!(big.ends_with("\n[truncated at 65536 bytes]"));
         assert_eq!(run(READ_FILE, "src"), Err("not a regular file"));
-        let state = Err("path is inside ahi's state directory, which tools cannot read");
+        let state = Err("path is inside ahi's own directories, which tools cannot read");
         assert_eq!(run(READ_FILE, "state/models.json"), state);
         assert_eq!(run(LIST_DIR, "state"), state);
         // Case variants resolve to the same directory on case-insensitive

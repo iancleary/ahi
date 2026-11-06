@@ -160,7 +160,7 @@ fn write_models(state: &Path, url: &str, model: serde_json::Value) {
 fn backend(state: &Path) -> HttpBackend {
     let workspace = state.join("empty-workspace");
     fs::create_dir_all(&workspace).unwrap();
-    HttpBackend::with_workspace(state.to_path_buf(), workspace)
+    HttpBackend::with_workspace(Directories::single_root(state.to_path_buf()), workspace)
 }
 
 fn responses_fixture(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
@@ -180,11 +180,11 @@ fn responses_fixture_with_refresh(
     let (url, server) = server("200 OK", content_type, body);
     let state = state_for(&url);
     fs::create_dir(state.join("credentials")).unwrap();
-    fs::write(state.join("credentials/openai.json"), json!({
+    crate::directories::write_private(&state.join("credentials/openai.json"), json!({
         "access_token":"disposable-browser-token", "refresh_token":"disposable-refresh-token",
         "expires_in":3600, "expires_at":if refresh {0} else {i64::MAX}, "client_id":"fixture-client",
         "resource":"https://api.openai.com/v1", "scopes":["chatgpt.tokens.use.direct"], "flow":"chatgpt-direct"
-    }).to_string()).unwrap();
+    }).to_string().as_bytes()).unwrap();
     let mut input = request();
     input.selection = parse_selection("openai/curated-model");
     let metadata = crate::harness::ModelMetadata::default();
@@ -878,9 +878,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
         )]
     );
     fs::create_dir(state.join("credentials")).unwrap();
-    fs::write(
-        state.join("credentials/openai.json"),
-        "{\"flow\":\"legacy\"}",
+    crate::directories::write_private(
+        &state.join("credentials/openai.json"),
+        b"{\"flow\":\"legacy\"}",
     )
     .unwrap();
     assert_eq!(
@@ -945,7 +945,10 @@ impl ToolFixture {
     }
 
     fn backend(&self) -> HttpBackend {
-        HttpBackend::with_workspace(self.state.clone(), self.workspace.clone())
+        HttpBackend::with_workspace(
+            Directories::single_root(self.state.clone()),
+            self.workspace.clone(),
+        )
     }
 }
 
@@ -1634,14 +1637,15 @@ fn tools_never_read_the_state_directory_inside_the_workspace() {
     // Run with the state directory nested inside an approved prefix.
     let nested = fixture.workspace.join("src/state");
     fs::rename(&fixture.state, &nested).unwrap();
-    let mut backend = HttpBackend::with_workspace(nested, fixture.workspace.clone());
+    let mut backend =
+        HttpBackend::with_workspace(Directories::single_root(nested), fixture.workspace.clone());
     let (events, _) = collect_answering(&mut backend, request(), vec![]);
     assert_eq!(
         results(&events),
         vec![(
             "c1".into(),
             1,
-            "error: path is inside ahi's state directory, which tools cannot read".into()
+            "error: path is inside ahi's own directories, which tools cannot read".into()
         )]
     );
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));

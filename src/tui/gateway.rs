@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
@@ -10,6 +9,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::chat::input::{EditorKey, InputEditor};
+use crate::directories::Directories;
 use crate::error::{Error, Result};
 use crate::harness::{self, DiscoveredGateway, GatewayRegistration};
 
@@ -19,7 +19,7 @@ enum DiscoveryState {
     Preview(DiscoveredGateway),
 }
 
-pub(crate) fn run(state: &Path) -> Result<Option<GatewayRegistration>> {
+pub(crate) fn run(state: &Directories) -> Result<Option<GatewayRegistration>> {
     let registry = harness::load_registry(state)?;
     let mut terminal = ratatui::try_init().map_err(|error| Error::new(error.to_string()))?;
     let result = crossterm::execute!(std::io::stdout(), EnableBracketedPaste)
@@ -33,7 +33,7 @@ pub(crate) fn run(state: &Path) -> Result<Option<GatewayRegistration>> {
 
 fn discovery_loop(
     terminal: &mut ratatui::DefaultTerminal,
-    state: &Path,
+    state: &Directories,
     registry: &harness::Registry,
 ) -> Result<Option<GatewayRegistration>> {
     let mut input = InputEditor::new();

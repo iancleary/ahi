@@ -3,6 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use ahi::directories::Directories;
 use ahi::harness;
 use ahi::hooks::audit::AuditEvent;
 use ahi::hooks::check::{all_checks, builtin_by_id};
@@ -22,12 +23,13 @@ struct Cli {
     #[arg(long, short = 'c', global = true)]
     config: Option<PathBuf>,
 
-    /// Cache directory. Overrides AHI_HOME. There is no home-directory fallback.
+    /// Cache directory for catalogs and objects. Overrides AHI_HOME and
+    /// XDG_CACHE_HOME.
     #[arg(long, global = true)]
     cache_dir: Option<PathBuf>,
 
-    /// State directory for models.json and the OpenAI credential.
-    /// Overrides AHI_STATE_DIR.
+    /// Keep config, data, state, and cache under one directory instead of the
+    /// XDG layout. Overrides AHI_STATE_DIR.
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
 
@@ -178,10 +180,8 @@ fn main() -> ExitCode {
             }
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
-        Command::Tui { refresh, actions } => {
-            tui(cli.state_dir.as_deref(), *refresh, actions.as_deref())
-        }
-        Command::Login => login(cli.state_dir.as_deref()),
+        Command::Tui { refresh, actions } => tui(&cli, *refresh, actions.as_deref()),
+        Command::Login => login(&cli),
     }
 }
 
@@ -253,7 +253,6 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
     } else {
         Selection::Staged
     };
-    let cache = store::cache_dir(cli.cache_dir.as_deref());
     let stage_fixes = matches!(selection, Selection::Staged);
     let mut skip = BTreeSet::new();
     if let Ok(raw) = env::var("SKIP") {
@@ -291,7 +290,7 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
         }
     };
     print!("{rendered}");
-    if let Ok(store) = Store::open(&cache) {
+    {
         let ids: Vec<String> = report.hooks.iter().map(|hook| hook.id.clone()).collect();
         let findings = report.hooks.iter().map(|hook| hook.findings.len()).sum();
         let outcome = match report.result {
@@ -307,19 +306,23 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
                 names: &item.names,
             })
             .collect();
-        if let Err(err) = ahi::hooks::audit::append(
-            store.root(),
-            &AuditEvent {
-                command: "run",
-                repo: &root,
-                hook_ids: &ids,
-                outcome,
-                finding_count: findings,
-                local_hooks: &report.local_hooks,
-                local_env: &local_env,
-            },
-        ) {
-            eprintln!("warning: {err}");
+        // The log is persistent state, not cache; a missing location only warns.
+        let appended = directories(cli).and_then(|dirs| {
+            ahi::hooks::audit::append(
+                &dirs.state,
+                &AuditEvent {
+                    command: "run",
+                    repo: &root,
+                    hook_ids: &ids,
+                    outcome,
+                    finding_count: findings,
+                    local_hooks: &report.local_hooks,
+                    local_env: &local_env,
+                },
+            )
+        });
+        if let Err(err) = appended {
+            eprintln!("warning: audit log not written: {err}");
         }
     }
     if report.result == runner::Outcome::Failed {
@@ -471,23 +474,32 @@ fn doctor(
         }
         Err(err) => println!("root: {err}"),
     }
-    let cache = store::cache_dir(cache);
-    match Store::open(&cache) {
-        Ok(store) => {
-            let mode = if store.is_writable() {
-                "writable"
-            } else {
-                "read-only"
-            };
-            println!("cache: {} ({mode})", store.root().display());
+    match Directories::resolve(state, cache) {
+        Ok(dirs) => {
+            println!("models.json: {}", dirs.config.display());
+            println!("data: {}", dirs.data.display());
+            println!("state: {}", dirs.state.display());
+            match Store::open(&dirs.cache) {
+                Ok(store) => {
+                    let mode = if store.is_writable() {
+                        "writable"
+                    } else {
+                        "read-only"
+                    };
+                    println!("cache: {} ({mode})", store.root().display());
+                }
+                Err(err) => println!("cache: {} ({err})", dirs.cache.display()),
+            }
+            for path in ahi::directories::exposed_paths(&dirs) {
+                println!(
+                    "warning: {} is readable by other users; ahi expects 0700 directories and 0600 files",
+                    path.display()
+                );
+            }
         }
-        Err(err) => println!("cache: {} ({err})", cache.display()),
+        Err(err) => println!("directories: {err}"),
     }
     println!("scratch: {}", store::scratch_dir().display());
-    match harness::state_dir(state) {
-        Ok(dir) => println!("state: {}", dir.display()),
-        Err(err) => println!("state: {err}"),
-    }
     println!("sandbox: not probed in this version");
     println!(
         "network: not enforced in this version (no sandbox); local hook environments are scrubbed"
@@ -530,13 +542,13 @@ fn doctor(
     ExitCode::from(0)
 }
 
-fn tui(
-    state: Option<&std::path::Path>,
-    refresh: bool,
-    actions: Option<&std::path::Path>,
-) -> ExitCode {
-    let state = match harness::state_dir(state) {
-        Ok(dir) => dir,
+fn directories(cli: &Cli) -> ahi::Result<Directories> {
+    Directories::resolve(cli.state_dir.as_deref(), cli.cache_dir.as_deref())
+}
+
+fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode {
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
         Err(err) => {
             eprintln!("error: {err}");
             return ExitCode::from(1);
@@ -556,9 +568,9 @@ fn tui(
     }
 }
 
-fn login(state: Option<&std::path::Path>) -> ExitCode {
-    let state = match harness::state_dir(state) {
-        Ok(dir) => dir,
+fn login(cli: &Cli) -> ExitCode {
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
         Err(err) => {
             eprintln!("error: {err}");
             return ExitCode::from(1);

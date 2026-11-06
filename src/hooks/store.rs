@@ -113,36 +113,6 @@ impl Store {
     }
 }
 
-/// Cache location. Order: `--cache-dir`, `AHI_HOME`, `$XDG_CACHE_HOME/ahi`
-/// when that variable is set, then `std::env::temp_dir()/ahi`. No home-directory
-/// fallback. `temp_dir` follows `TMPDIR`.
-pub fn cache_dir(explicit: Option<&Path>) -> PathBuf {
-    resolve_cache_dir(
-        explicit,
-        std::env::var_os("AHI_HOME"),
-        std::env::var_os("XDG_CACHE_HOME"),
-        std::env::temp_dir(),
-    )
-}
-
-pub fn resolve_cache_dir(
-    explicit: Option<&Path>,
-    ahi_home: Option<std::ffi::OsString>,
-    xdg_cache_home: Option<std::ffi::OsString>,
-    temp: PathBuf,
-) -> PathBuf {
-    if let Some(dir) = explicit {
-        return dir.to_path_buf();
-    }
-    if let Some(dir) = ahi_home {
-        return PathBuf::from(dir);
-    }
-    if let Some(xdg) = xdg_cache_home {
-        return PathBuf::from(xdg).join("ahi");
-    }
-    temp.join("ahi")
-}
-
 /// Directory for hook scratch files. `std::env::temp_dir` honors `TMPDIR`.
 pub fn scratch_dir() -> PathBuf {
     std::env::temp_dir()
@@ -217,35 +187,5 @@ mod tests {
         assert!(!writable);
         assert_eq!(got.unwrap(), b"cached");
         assert!(put_err.unwrap_err().to_string().contains("read-only"));
-    }
-
-    #[test]
-    fn cache_dir_prefers_explicit_then_home_then_xdg_then_temp() {
-        use std::ffi::OsString;
-        let explicit = PathBuf::from("/cache/explicit");
-        let home = OsString::from("/cache/ahi-home");
-        let xdg = OsString::from("/cache/xdg");
-        let temp = PathBuf::from("/cache/tmp");
-        assert_eq!(
-            resolve_cache_dir(
-                Some(&explicit),
-                Some(home.clone()),
-                Some(xdg.clone()),
-                temp.clone()
-            ),
-            explicit
-        );
-        assert_eq!(
-            resolve_cache_dir(None, Some(home.clone()), Some(xdg.clone()), temp.clone()),
-            PathBuf::from("/cache/ahi-home")
-        );
-        assert_eq!(
-            resolve_cache_dir(None, None, Some(xdg), temp.clone()),
-            PathBuf::from("/cache/xdg/ahi")
-        );
-        assert_eq!(
-            resolve_cache_dir(None, None, None, temp.clone()),
-            temp.join("ahi")
-        );
     }
 }
