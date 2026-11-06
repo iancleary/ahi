@@ -351,18 +351,13 @@ fn renew_token(url: &str, credential: &Credential) -> Result<Credential> {
 
 fn write_credential(state: &Path, credential: &Credential) -> Result<()> {
     let dir = state.join("credentials");
-    fs::create_dir_all(&dir)
+    crate::directories::create_private_dir(state)
+        .and_then(|()| crate::directories::create_private_dir(&dir))
         .map_err(|_| Error::new("cannot create OpenAI credential directory"))?;
     let path = dir.join("openai.json");
     let temporary = dir.join("openai.json.tmp");
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
+    let mut file = crate::directories::private_file()
+        .create_new(true)
         .open(&temporary)
         .map_err(|_| Error::new("cannot create temporary OpenAI credential"))?;
     let result = (|| {
@@ -380,9 +375,13 @@ fn write_credential(state: &Path, credential: &Credential) -> Result<()> {
 }
 
 fn device_id(state: &Path) -> Result<String> {
-    fs::create_dir_all(state).map_err(|_| Error::new("cannot create OpenAI state directory"))?;
+    crate::directories::create_private_dir(state)
+        .map_err(|_| Error::new("cannot create OpenAI data directory"))?;
     let path = state.join("openai-device-id");
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
+    match crate::directories::private_file()
+        .create_new(true)
+        .open(&path)
+    {
         Ok(mut file) => {
             let mut bytes = [0_u8; 16];
             getrandom::getrandom(&mut bytes)
@@ -845,6 +844,13 @@ mod tests {
         assert_eq!(device_id(&dir).unwrap(), id);
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            // The fixture directory already exists, so only the file is ahi's.
+            assert_eq!(mode(&dir.join("openai-device-id")), 0o600);
+        }
         fs::write(dir.join("openai-device-id"), "malformed fixture").unwrap();
         assert!(device_id(&dir).is_err());
         assert_eq!(
@@ -1006,14 +1012,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(dir.join("credentials/openai.json"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
+            let mode =
+                |path: &str| fs::metadata(dir.join(path)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode("credentials/openai.json"), 0o600);
+            assert_eq!(mode("credentials"), 0o700);
         }
         assert!(
             !render_text(&load_registry(&Directories::single_root(&dir)).unwrap())

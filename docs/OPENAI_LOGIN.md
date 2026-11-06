@@ -48,7 +48,7 @@ Operational limits:
 - Waiting for browser authorization has no deadline. Cancel explicitly when abandoning the login.
 - Token exchange is synchronous, with a 15-second request timeout and 1 MiB response cap; terminal cancellation is processed during the browser wait, not during that exchange. Requests do not follow redirects.
 - Pasted callback input is limited to 8192 bytes in the terminal view.
-- Credential rotation across separate processes is not serialized. Do not log in or refresh concurrently against the same state directory.
+- Credential rotation across separate processes is not serialized. Do not log in or refresh concurrently against the same data directory.
 - Picker `auth signed-in` still means a credential file exists, not that a live request validated it. Historical catalog refresh errors remain until another explicit refresh.
 
 ## Verification and troubleshooting

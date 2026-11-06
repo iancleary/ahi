@@ -851,7 +851,8 @@ fn http_get_with_headers(url: &str, headers: &BTreeMap<String, String>) -> Resul
 
 fn write_last_good(state: &Directories, catalog: &CatalogSnapshot) -> Result<()> {
     let dir = state.cache.join("catalogs");
-    fs::create_dir_all(&dir)
+    crate::directories::create_private_dir(&state.cache)
+        .and_then(|()| crate::directories::create_private_dir(&dir))
         .map_err(|err| Error::new(format!("failed to create {}: {err}", dir.display())))?;
     let path = dir.join(format!("{}.json", catalog.provider));
     let temp = path.with_extension("json.tmp");

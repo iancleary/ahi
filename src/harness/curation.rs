@@ -158,7 +158,7 @@ pub(super) fn save_document(
     // Retain the same strict schema and validation as a normal local load.
     let file = parse_models(state, Some(&bytes))?;
     let next = registry_from_models(state, file, Some(bytes.clone()));
-    fs::create_dir_all(&state.config).map_err(|err| {
+    crate::directories::create_private_dir(&state.config).map_err(|err| {
         Error::new(format!(
             "failed to create {}: {err}",
             state.config.display()
@@ -166,8 +166,7 @@ pub(super) fn save_document(
     })?;
     let temp = state.config.join("models.json.tmp");
     // A fixed, exclusive temp also prevents two ahi writers from sharing a save.
-    let mut output = OpenOptions::new()
-        .write(true)
+    let mut output = crate::directories::private_file()
         .create_new(true)
         .open(&temp)
         .map_err(|err| {

@@ -72,12 +72,14 @@ pub(crate) fn read(state_dir: &Directories) -> (ThinkingLevel, Option<String>) {
 /// Write the level as a single line. An invalid file is left unchanged.
 pub(crate) fn write(state_dir: &Directories, level: ThinkingLevel) -> Result<()> {
     let path = state_dir.state.join("thinking");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| Error::new(format!("failed to create {}: {err}", parent.display())))?;
-    }
+    crate::directories::create_private_dir(&state_dir.state).map_err(|err| {
+        Error::new(format!(
+            "failed to create {}: {err}",
+            state_dir.state.display()
+        ))
+    })?;
     let level = level.as_str();
-    fs::write(&path, format!("{level}\n"))
+    crate::directories::write_private(&path, format!("{level}\n").as_bytes())
         .map_err(|err| Error::new(format!("failed to write {}: {err}", path.display())))
 }
 

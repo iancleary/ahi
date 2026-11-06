@@ -935,10 +935,10 @@ fn pick_loop(
     }
     picker.registration = None;
     if let Some(selection) = &selection {
-        std::fs::create_dir_all(&state.state)
+        crate::directories::create_private_dir(&state.state)
             .map_err(|err| Error::new(format!("{}: {err}", state.state.display())))?;
         let path = state.state.join("selection");
-        std::fs::write(&path, format!("{selection}\n"))
+        crate::directories::write_private(&path, format!("{selection}\n").as_bytes())
             .map_err(|err| Error::new(format!("{}: {err}", path.display())))?;
         picker.print_on_exit.push(format!(
             "Selected {selection}; saved to {}.",
@@ -1009,7 +1009,7 @@ fn run_editor(state: &Directories, command: Option<&str>) -> Result<std::process
         None => return Err(Error::new("set VISUAL or EDITOR to edit models.json")),
     };
     let args = crate::shlex::split(command)?;
-    std::fs::create_dir_all(&state.config)
+    crate::directories::create_private_dir(&state.config)
         .map_err(|err| Error::new(format!("{}: {err}", state.config.display())))?;
     let path = state.config.join("models.json");
     Command::new(&args[0])

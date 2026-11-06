@@ -1,6 +1,5 @@
 //! Append-only JSON lines. No file contents and no environment values.
 
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
@@ -25,8 +24,10 @@ pub struct HookEnv<'a> {
     pub names: &'a [String],
 }
 
-pub fn append(cache_dir: &Path, event: &AuditEvent<'_>) -> Result<()> {
-    fs::create_dir_all(cache_dir)
+/// Append one line to `audit.log` in the state directory. The directory and
+/// the log are owner-only on Unix: the log names repositories and hooks.
+pub fn append(state_dir: &Path, event: &AuditEvent<'_>) -> Result<()> {
+    crate::directories::create_private_dir(state_dir)
         .map_err(|err| Error::new(format!("failed to create audit directory: {err}")))?;
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -45,10 +46,10 @@ pub fn append(cache_dir: &Path, event: &AuditEvent<'_>) -> Result<()> {
             "names": item.names,
         })).collect::<Vec<_>>(),
     });
-    let mut file = OpenOptions::new()
+    let mut file = crate::directories::private_file()
         .create(true)
         .append(true)
-        .open(cache_dir.join("audit.log"))
+        .open(state_dir.join("audit.log"))
         .map_err(|err| Error::new(format!("failed to open audit log: {err}")))?;
     writeln!(file, "{line}")
         .map_err(|err| Error::new(format!("failed to write audit log: {err}")))?;

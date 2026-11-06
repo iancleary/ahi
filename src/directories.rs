@@ -6,6 +6,7 @@
 //! single-root layout for portable or sandboxed setups and is never chosen
 //! implicitly. Nothing here reads or migrates files from older locations.
 use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -69,6 +70,51 @@ impl Directories {
             },
         })
     }
+}
+
+/// Create one of ahi's own directories. Missing parents (an XDG base such as
+/// `~/.config`) are created with the process defaults; the ahi directory and
+/// anything below it are owner-only on Unix, since credentials, the audit log,
+/// and configuration naming credential variables live there. An existing
+/// directory keeps the mode its owner chose.
+pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
+}
+
+/// `OpenOptions` for a file only its owner may read: `write` is set, and on
+/// Unix the mode is 0600 at creation. Callers add `create`, `create_new`, or
+/// `append` as the write pattern requires.
+pub(crate) fn private_file() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Replace a small owner-only file in one of ahi's directories.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = private_file().create(true).truncate(true).open(path)?;
+    file.write_all(bytes)
 }
 
 fn non_empty(value: Option<OsString>) -> Option<PathBuf> {

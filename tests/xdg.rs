@@ -194,3 +194,60 @@ fn the_hook_audit_log_is_state_not_cache() {
     assert_eq!(record["outcome"], "passed");
     assert!(!root.join("cache").exists());
 }
+
+#[test]
+#[cfg(unix)]
+fn created_directories_and_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("xdg-modes");
+    let root = &fixture.0;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let dirs = fixture.directories();
+    let registry = ahi::harness::load_registry(&dirs).unwrap();
+    ahi::harness::save_curated_models(&dirs, &registry, "openai", &["m".into()]).unwrap();
+    assert_eq!(mode(&dirs.config), 0o700);
+    assert_eq!(mode(&dirs.config.join("models.json")), 0o600);
+
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    for args in [&["init", "-q", "--template="][..], &["add", "-A"][..]] {
+        if args[0] == "add" {
+            write(
+                &repo.join(".pre-commit-config.yaml"),
+                b"repos:\n- repo: builtin\n  hooks:\n  - id: ahi/trailing-whitespace\n",
+            );
+        }
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let output = fixture
+        .ahi()
+        .current_dir(&repo)
+        .args(["run", "--all-files"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = root.join("state/ahi");
+    assert_eq!(mode(&state), 0o700);
+    assert_eq!(mode(&state.join("audit.log")), 0o600);
+    // The XDG base itself is not ahi's to lock down.
+    assert_eq!(mode(&root.join("state")), 0o755 & !umask());
+}
+
+#[cfg(unix)]
+fn umask() -> u32 {
+    // Read the umask without changing it: set it to itself.
+    let mut command = Command::new("sh");
+    command.arg("-c").arg("umask");
+    let text = String::from_utf8(command.output().unwrap().stdout).unwrap();
+    u32::from_str_radix(text.trim(), 8).unwrap()
+}
