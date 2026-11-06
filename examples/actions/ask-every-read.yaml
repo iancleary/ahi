@@ -1,0 +1,14 @@
+# Every read and listing shows an approval prompt in chat.
+version: 1
+default: deny
+rules:
+  - id: ask-list
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+    ask: true
+  - id: ask-read
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
+    ask: true

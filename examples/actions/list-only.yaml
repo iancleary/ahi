@@ -1,0 +1,8 @@
+# The model may list directories but every read is denied.
+version: 1
+default: deny
+rules:
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve

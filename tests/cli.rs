@@ -572,3 +572,46 @@ fn remote_and_language_hooks_are_not_skipped() {
     assert!(!text.contains("Skipped"));
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn tui_actions_requires_a_valid_policy_file() {
+    let dir = fixture();
+    write(
+        &dir.join("models.json"),
+        br#"{"providers":{"lab":{"baseUrl":"http://127.0.0.1:9/v1","api":"openai-completions","models":[{"id":"qwen-3.5"}]}}}"#,
+    );
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/actions");
+    let state = dir.to_str().unwrap();
+    // A valid file: the pipe output is unchanged.
+    let output = ahi()
+        .args(["--state-dir", state, "tui", "--actions"])
+        .arg(examples.join("read-all.yaml"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("provider lab"));
+    // An invalid or missing file fails before anything opens, naming the file.
+    for (file, expected) in [
+        ("invalid-version.yaml", "version 2 is not supported"),
+        ("missing.yaml", "failed to read"),
+    ] {
+        let output = ahi()
+            .args(["--state-dir", state, "tui", "--actions"])
+            .arg(examples.join(file))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{file}: {stderr}");
+        assert!(
+            stderr.contains(expected) && stderr.contains(file),
+            "{file}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{file}");
+    }
+    let _ = fs::remove_dir_all(dir);
+}

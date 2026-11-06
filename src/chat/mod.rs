@@ -1039,10 +1039,19 @@ fn rule_line(width: usize) -> String {
     )
 }
 
+/// Validate an explicit `--actions` policy file before any screen opens, so
+/// a typo fails at startup instead of on every chat turn.
+pub(crate) fn check_actions_file(path: &Path) -> Result<()> {
+    crate::actions::load_file(path, &backend::tools::BUILTIN).map(drop)
+}
+
 /// Run the chat screen until the operator exits or asks for the model picker.
+/// `actions` is the operator's explicit policy file, used for every turn in
+/// place of the working directory's `ahi.actions.yaml`.
 pub(crate) fn interact(
     state_dir: &Path,
     selection: &str,
+    actions: Option<&Path>,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -1050,7 +1059,8 @@ pub(crate) fn interact(
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
-    let mut backend = HttpBackend::new(state_dir.to_path_buf());
+    let mut backend =
+        HttpBackend::new(state_dir.to_path_buf()).with_actions(actions.map(Path::to_path_buf));
     loop {
         let mut terminal =
             ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
@@ -2405,11 +2415,13 @@ mod tests {
         assert!(!screen.apply_event(event));
         assert_eq!(
             screen.messages.last().unwrap().text,
-            "Tool approval · 3 calls\n› 1. read_file src/a.rs\n  2. read_file top.rs\n  3. read_file b"
+            "Tool approval · 3 calls\n› 1. read_file src/a.rs\n  2. read_file top.rs\n  3. read_file b\n  ▸ Approve once · y\n    Approve for session under src/ · s\n    Deny · n\n    Approve all 3 remaining · a\n    Deny all 3 remaining · Esc"
         );
-        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        let hint = draw_lines(&mut screen, 100, 16).join("\n");
         assert!(
-            hint.contains("Approve read_file? y once · s session under src/"),
+            hint.contains(
+                "Approve read_file? ↑/↓ choose · Enter apply · Shift+↑/↓ call · y once · s session under src/"
+            ),
             "{hint}"
         );
         press(
@@ -2424,7 +2436,7 @@ mod tests {
             crossterm::event::KeyCode::Char('s'),
         );
         assert!(decisions.try_recv().is_err());
-        let hint = draw_lines(&mut screen, 100, 12).join("\n");
+        let hint = draw_lines(&mut screen, 100, 16).join("\n");
         assert!(!hint.contains("s session"), "{hint}");
         press(
             &mut screen,
@@ -2449,6 +2461,140 @@ mod tests {
         assert_eq!(
             screen.messages.last().unwrap().text,
             "Tool approval · 3 calls\n✓ 1. read_file src/a.rs · approved for session under src/\n✗ 2. read_file top.rs · denied\n✓ 3. read_file b · approved once"
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn arrow_keys_highlight_an_option_and_enter_applies_it() {
+        let state =
+            crate::fixture_directory::create_unique_fixture_directory("chat-approval-arrows");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.response_in_progress = true;
+        let (event, decisions) = approval(&[("src/a.rs", "src"), ("b", "")]);
+        assert!(!screen.apply_event(event));
+        use crossterm::event::KeyCode;
+        // Up at the first option stays there; Down moves to the session grant.
+        press(&mut screen, &mut backend, KeyCode::Up);
+        press(&mut screen, &mut backend, KeyCode::Down);
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.contains(
+                "    Approve once · y\n  ▸ Approve for session under src/ · s\n    Deny · n"
+            ),
+            "{text}"
+        );
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        assert!(decisions.try_recv().is_err());
+        // The last call offers no session grant and no "all remaining"; the
+        // highlight starts over and Down clamps at the final option.
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.ends_with("› 2. read_file b\n  ▸ Approve once · y\n    Deny · n"),
+            "{text}"
+        );
+        press(&mut screen, &mut backend, KeyCode::Down);
+        press(&mut screen, &mut backend, KeyCode::Down);
+        press(&mut screen, &mut backend, KeyCode::Down);
+        assert!(screen
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .ends_with("    Approve once · y\n  ▸ Deny · n"));
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        assert_eq!(
+            decisions.try_recv().unwrap(),
+            vec![
+                backend::ToolDecision::ApproveForSession,
+                backend::ToolDecision::Deny,
+            ]
+        );
+        assert!(screen.approval.is_none());
+        // Decided: the option list is gone and nothing was submitted.
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "Tool approval · 2 calls\n✓ 1. read_file src/a.rs · approved for session under src/\n✗ 2. read_file b · denied"
+        );
+        assert!(backend.requests.is_empty());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn shift_arrows_move_between_calls_and_answers_can_be_revised() {
+        let state =
+            crate::fixture_directory::create_unique_fixture_directory("chat-approval-calls");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.response_in_progress = true;
+        let (event, decisions) = approval(&[("src/a.rs", "src"), ("b", ""), ("c", "")]);
+        assert!(!screen.apply_event(event));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let shift = |screen: &mut ChatScreen, backend: &mut RecordingBackend, code| {
+            screen
+                .apply_terminal_event(
+                    Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT)),
+                    backend,
+                )
+                .unwrap();
+        };
+        // Shift+Down moves the cursor to call 2; Shift+Up from call 1 wraps to 3.
+        shift(&mut screen, &mut backend, KeyCode::Down);
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.contains("  1. read_file src/a.rs\n› 2. read_file b\n  3. read_file c"),
+            "{text}"
+        );
+        shift(&mut screen, &mut backend, KeyCode::Up);
+        shift(&mut screen, &mut backend, KeyCode::Up);
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.contains("  2. read_file b\n› 3. read_file c\n"),
+            "{text}"
+        );
+        // Deny call 3; the cursor continues at the next undecided call, 1.
+        press(&mut screen, &mut backend, KeyCode::Char('n'));
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.contains("› 1. read_file src/a.rs\n  2. read_file b\n✗ 3. read_file c · denied"),
+            "{text}"
+        );
+        // Approve call 1 (cursor → 2), go back and revise it to a session grant.
+        press(&mut screen, &mut backend, KeyCode::Char('y'));
+        shift(&mut screen, &mut backend, KeyCode::Up);
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.contains("› 1. read_file src/a.rs · approved once\n"),
+            "{text}"
+        );
+        press(&mut screen, &mut backend, KeyCode::Char('s'));
+        assert!(decisions.try_recv().is_err());
+        // Only call 2 is undecided: the cursor is there, with no "all" options.
+        let text = screen.messages.last().unwrap().text.clone();
+        assert!(
+            text.ends_with(
+                "› 2. read_file b\n✗ 3. read_file c · denied\n  ▸ Approve once · y\n    Deny · n"
+            ),
+            "{text}"
+        );
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        assert_eq!(
+            decisions.try_recv().unwrap(),
+            vec![
+                backend::ToolDecision::ApproveForSession,
+                backend::ToolDecision::Approve,
+                backend::ToolDecision::Deny,
+            ]
+        );
+        assert!(screen.approval.is_none());
+        assert_eq!(
+            screen.messages.last().unwrap().text,
+            "Tool approval · 3 calls\n✓ 1. read_file src/a.rs · approved for session under src/\n✓ 2. read_file b · approved once\n✗ 3. read_file c · denied"
         );
         fs::remove_dir_all(state).unwrap();
     }

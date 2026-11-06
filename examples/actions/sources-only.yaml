@@ -1,0 +1,24 @@
+# List anywhere; read only src and docs. Deny rules win over approvals.
+version: 1
+default: deny
+rules:
+  - id: no-env
+    action: tool_call
+    match: {tool: read_file, path: .env}
+    effect: deny
+  - id: no-build-output
+    action: tool_call
+    match: {tool: read_file, path: target}
+    effect: deny
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: read-sources
+    action: tool_call
+    match: {tool: read_file, path: src}
+    effect: approve
+  - id: read-docs
+    action: tool_call
+    match: {tool: read_file, path: docs}
+    effect: approve

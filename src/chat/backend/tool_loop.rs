@@ -75,14 +75,22 @@ enum Plan {
 impl ToolRuntime {
     /// `None` when no `ahi.actions.yaml` rule can approve a builtin tool, in
     /// which case no tool is advertised and the request is unchanged.
+    /// `policy_file` is the operator's explicit `--actions` file; it replaces
+    /// the working-directory lookup and must exist. Rule paths and tool
+    /// confinement stay relative to `directory` either way.
     pub(super) fn load(
         directory: &Path,
         state: &Path,
         gateway: &str,
         destination: &str,
         grants: SessionGrants,
+        policy_file: Option<&Path>,
     ) -> Result<Option<Self>> {
-        let Some(policy) = actions::load(directory, &tools::BUILTIN)? else {
+        let policy = match policy_file {
+            Some(path) => Some(actions::load_file(path, &tools::BUILTIN)?),
+            None => actions::load(directory, &tools::BUILTIN)?,
+        };
+        let Some(policy) = policy else {
             return Ok(None);
         };
         let advertised = policy.advertised_tools();
