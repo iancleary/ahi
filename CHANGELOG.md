@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Release and packaging scripts run their embedded Python through `uv run --python 3.14` when `uv` is available, falling back to the system `python3` (3.11+) otherwise. `.python-version` pins 3.14 for `uv run`.
+
 ## 0.5.0 (2026-11-05)
 
 ### Added
