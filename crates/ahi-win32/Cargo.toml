@@ -1,0 +1,19 @@
+[package]
+name = "ahi-win32"
+description = "Win32 clipboard write for ahi. In-repo so ahi can forbid unsafe code."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/iancleary/ahi"
+publish = false
+
+# No dependencies, by design: this crate is the workspace's only unsafe code.
+[dependencies]
+
+[lints.rust]
+# The whole purpose of this crate; every unsafe block carries a SAFETY comment.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -4,7 +4,8 @@
 
 - [x] Split `src/clipboard.rs` into `src/clipboard/`: `mod.rs` (platform routing), `command.rs` (bounded helper execution), `osc52.rs` (terminal writes), `windows.rs` (PowerShell handoff through a private UTF-8 file). WSL detection stays in `src/wsl.rs`.
 - [x] Make routing a pure function: `Environment` → `Plan` of ordered `Step`s, so macOS, native Linux (Wayland/X11/Termux/headless), WSL (Windows Terminal vs. other emulators), native Windows, and SSH/mosh remote sessions are covered by unit tests without touching a real clipboard.
-- [x] Native Windows uses the same private-file PowerShell handoff as WSL instead of piping text through PowerShell stdin, so console code pages cannot re-encode it.
+- [x] Native Windows writes through the Win32 clipboard API (in-repo `crates/ahi-win32` workspace crate, the workspace's only `unsafe`, no registry dependency, so `ahi` keeps `unsafe_code = "forbid"`) and falls back to the private-file PowerShell handoff only if that fails.
+- [ ] Run the Windows round-trip test on a real Windows machine or CI; the code is only cross-checked from macOS so far.
 - [ ] Add clipboard read (paste) adapters when an image or file paste feature needs them; pi.dev reads via `wl-paste`/`xclip`/PowerShell on WSL, which this module does not yet do.
 
 ## Drag-selection auto-scroll

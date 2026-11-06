@@ -143,7 +143,7 @@ That was the original screen-development baseline, not current production behavi
 - Read the Git branch from `HEAD`, following `gitdir:` indirection for worktrees. Read worktree counts with read-only porcelain status. Refresh at chat load, normal message submission, and each `ToolCallReturned` event, never on frame ticks.
 - Keep the screen state in a plain struct (`ChatScreen`) separate from drawing, so key handling and layout are testable without a terminal.
 - Names follow the project naming rule: precise, descriptive, no slang (`CompletionBackend`, `EchoBackend`, `ThinkingLevel`, `render_session_row`).
-- `unsafe_code` stays forbidden. Clippy must pass with the existing lint set.
+- `unsafe_code` stays forbidden in `ahi`; the in-repo `ahi-win32` crate holds the Win32 clipboard FFI. Clippy must pass with the existing lint set.
 
 ## Module layout
 

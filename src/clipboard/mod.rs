@@ -1,5 +1,6 @@
 //! Shared clipboard adapters: platform routing here, process execution in
-//! `command`, terminal writes in `osc52`, PowerShell handoff in `windows`.
+//! `command`, terminal writes in `osc52`, PowerShell handoff in `windows`,
+//! and the native Win32 write in the in-repo `ahi-win32` crate (Windows only).
 //! Never interpolate selected text into a command or error.
 mod command;
 mod osc52;
@@ -12,6 +13,10 @@ pub(crate) fn copy(text: &str) -> bool {
         &mut |step| match step {
             Step::Command(args) => command::copy_with_commands(text, &[args]),
             Step::WindowsHandoff { translate_path } => windows::copy(text, *translate_path),
+            #[cfg(windows)]
+            Step::WindowsNative => ahi_win32::copy(text),
+            #[cfg(not(windows))]
+            Step::WindowsNative => false,
             Step::Osc52 => osc52::emit(text),
         },
     )
@@ -69,6 +74,8 @@ impl Environment {
 pub(crate) enum Step {
     /// A local helper that reads the text from stdin.
     Command(&'static [&'static str]),
+    /// Win32 `SetClipboardData` with `CF_UNICODETEXT`; native Windows only.
+    WindowsNative,
     /// PowerShell `Set-Clipboard` reading a private file; `translate_path` under WSL.
     WindowsHandoff { translate_path: bool },
     /// Base64 escape sequence to the terminal; unverifiable.
@@ -87,9 +94,14 @@ pub(crate) struct Plan {
 pub(crate) fn plan(env: &Environment) -> Plan {
     let mut attempts = Vec::new();
     match env.platform {
-        Platform::Windows => attempts.push(Step::WindowsHandoff {
-            translate_path: false,
-        }),
+        Platform::Windows => {
+            // The API write is instant; PowerShell covers a clipboard another
+            // process keeps open longer than the retry window.
+            attempts.push(Step::WindowsNative);
+            attempts.push(Step::WindowsHandoff {
+                translate_path: false,
+            });
+        }
         Platform::MacOs => attempts.push(Step::Command(&["pbcopy"])),
         Platform::Linux | Platform::Other => {
             if env.termux {
@@ -179,9 +191,12 @@ mod tests {
         assert_eq!(
             plan(&windows),
             Plan {
-                attempts: vec![Step::WindowsHandoff {
-                    translate_path: false
-                }],
+                attempts: vec![
+                    Step::WindowsNative,
+                    Step::WindowsHandoff {
+                        translate_path: false
+                    },
+                ],
                 always_osc52: true,
             }
         );
