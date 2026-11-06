@@ -490,6 +490,12 @@ fn doctor(
                 }
                 Err(err) => println!("cache: {} ({err})", dirs.cache.display()),
             }
+            for path in ahi::directories::exposed_paths(&dirs) {
+                println!(
+                    "warning: {} is readable by other users; ahi expects 0700 directories and 0600 files",
+                    path.display()
+                );
+            }
         }
         Err(err) => println!("directories: {err}"),
     }

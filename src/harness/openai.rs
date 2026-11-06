@@ -130,7 +130,15 @@ fn authenticated<T>(
 }
 
 fn read_credential(state: &Path) -> Result<Credential> {
-    let file = fs::File::open(state.join("credentials/openai.json"))
+    let path = state.join("credentials/openai.json");
+    // Like an SSH private key: a credential other users can read is not used,
+    // however it got that way. The message names the fix, never the contents.
+    if crate::directories::exposed(&path) == Some(true) {
+        return Err(Error::auth(
+            "OpenAI credential is readable by other users; run `chmod 600` on it (and `chmod 700` on its directory), or run ahi login",
+        ));
+    }
+    let file = fs::File::open(&path)
         .map_err(|_| Error::auth("OpenAI credential unavailable: run ahi login"))?;
     let bytes = bounded_read(file)?;
     // Never propagate serde errors: they can contain secret values.
@@ -1016,6 +1024,18 @@ mod tests {
                 |path: &str| fs::metadata(dir.join(path)).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode("credentials/openai.json"), 0o600);
             assert_eq!(mode("credentials"), 0o700);
+            // A credential other users can read is refused, whoever loosened it.
+            let credential = dir.join("credentials/openai.json");
+            fs::set_permissions(&credential, fs::Permissions::from_mode(0o644)).unwrap();
+            let error = match read_credential(&dir) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("an exposed credential was accepted"),
+            };
+            assert!(error.contains("readable by other users"), "{error}");
+            assert!(error.contains("chmod 600"), "{error}");
+            assert!(!error.contains("secret"), "{error}");
+            fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(read_credential(&dir).is_ok());
         }
         assert!(
             !render_text(&load_registry(&Directories::single_root(&dir)).unwrap())
@@ -1030,7 +1050,8 @@ mod tests {
         fs::create_dir_all(dir.join("credentials")).unwrap();
         let legacy =
             r#"{"access_token":"old-secret","refresh_token":"old-refresh","expires_in":3600}"#;
-        fs::write(dir.join("credentials/openai.json"), legacy).unwrap();
+        crate::directories::write_private(&dir.join("credentials/openai.json"), legacy.as_bytes())
+            .unwrap();
         assert_eq!(
             refresh_at(&dir, "http://127.0.0.1:1", "http://127.0.0.1:1")
                 .unwrap_err()

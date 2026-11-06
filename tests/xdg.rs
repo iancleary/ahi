@@ -251,3 +251,28 @@ fn umask() -> u32 {
     let text = String::from_utf8(command.output().unwrap().stdout).unwrap();
     u32::from_str_radix(text.trim(), 8).unwrap()
 }
+
+#[test]
+#[cfg(unix)]
+fn doctor_warns_about_paths_other_users_can_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("xdg-exposed");
+    let root = &fixture.0;
+    let credential = root.join("data/ahi/credentials/openai.json");
+    write(&credential, b"presence only");
+    fs::set_permissions(&credential, fs::Permissions::from_mode(0o644)).unwrap();
+    let output = fixture.ahi().arg("doctor").output().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let warning = format!(
+        "warning: {} is readable by other users",
+        credential.display()
+    );
+    assert!(text.contains(&warning), "{text}");
+    fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+    for dir in ["data/ahi/credentials", "data/ahi"] {
+        fs::set_permissions(root.join(dir), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let output = fixture.ahi().arg("doctor").output().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(!text.contains("readable by other users"), "{text}");
+}

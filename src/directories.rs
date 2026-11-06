@@ -117,6 +117,44 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
+/// Whether a path is readable or writable by anyone but its owner. `None`
+/// when the path does not exist or the platform has no Unix modes.
+pub fn exposed(path: &Path) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).ok()?.permissions().mode();
+        Some(mode & 0o077 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// The paths under `dirs` that other users can reach, for `ahi doctor`. The
+/// XDG bases are not listed: they are the user's, not ahi's.
+pub fn exposed_paths(dirs: &Directories) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        dirs.config.clone(),
+        dirs.config.join("models.json"),
+        dirs.data.clone(),
+        dirs.data.join("credentials"),
+        dirs.data.join("credentials/openai.json"),
+        dirs.data.join("openai-device-id"),
+        dirs.state.clone(),
+        dirs.state.join("audit.log"),
+        dirs.state.join("selection"),
+        dirs.state.join("thinking"),
+    ];
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter(|path| exposed(path) == Some(true))
+        .collect()
+}
+
 fn non_empty(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }

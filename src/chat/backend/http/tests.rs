@@ -180,11 +180,11 @@ fn responses_fixture_with_refresh(
     let (url, server) = server("200 OK", content_type, body);
     let state = state_for(&url);
     fs::create_dir(state.join("credentials")).unwrap();
-    fs::write(state.join("credentials/openai.json"), json!({
+    crate::directories::write_private(&state.join("credentials/openai.json"), json!({
         "access_token":"disposable-browser-token", "refresh_token":"disposable-refresh-token",
         "expires_in":3600, "expires_at":if refresh {0} else {i64::MAX}, "client_id":"fixture-client",
         "resource":"https://api.openai.com/v1", "scopes":["chatgpt.tokens.use.direct"], "flow":"chatgpt-direct"
-    }).to_string()).unwrap();
+    }).to_string().as_bytes()).unwrap();
     let mut input = request();
     input.selection = parse_selection("openai/curated-model");
     let metadata = crate::harness::ModelMetadata::default();
@@ -878,9 +878,9 @@ fn openai_credentials_and_stale_selections_fail_before_network() {
         )]
     );
     fs::create_dir(state.join("credentials")).unwrap();
-    fs::write(
-        state.join("credentials/openai.json"),
-        "{\"flow\":\"legacy\"}",
+    crate::directories::write_private(
+        &state.join("credentials/openai.json"),
+        b"{\"flow\":\"legacy\"}",
     )
     .unwrap();
     assert_eq!(
