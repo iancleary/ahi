@@ -1,0 +1,17 @@
+# Builtin read-only tools for chat in this repository (see README "Tools").
+# Rules are deny-first; only tools an approve rule names are advertised.
+version: 1
+default: deny
+rules:
+  - id: no-env
+    action: tool_call
+    match: {tool: read_file, path: .env}
+    effect: deny
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: read-sources
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
