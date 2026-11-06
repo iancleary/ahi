@@ -16,6 +16,7 @@ use super::protocol::{self, RequestContext, StreamOutcome};
 use super::tool_loop::{SessionGrants, ToolRuntime};
 use super::{ChatRequest, CompletionBackend, ResponseEvent};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
+use crate::directories::Directories;
 use crate::error::{Error, ErrorKind, Result};
 use crate::harness::{CompletionConnection, CompletionTransport, Credential, Protocol};
 
@@ -29,7 +30,7 @@ const CONNECT_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::fr
 mod tests;
 
 pub(crate) struct HttpBackend {
-    state: PathBuf,
+    state: Directories,
     /// Tool root and `ahi.actions.yaml` location; `None` is the process's
     /// working directory at each submission.
     workspace: Option<PathBuf>,
@@ -47,7 +48,7 @@ pub(crate) struct HttpBackend {
 }
 
 impl HttpBackend {
-    pub(crate) fn new(state: PathBuf) -> Self {
+    pub(crate) fn new(state: Directories) -> Self {
         Self {
             state,
             workspace: None,
@@ -70,7 +71,7 @@ impl HttpBackend {
     }
 
     #[cfg(test)]
-    fn with_workspace(state: PathBuf, workspace: PathBuf) -> Self {
+    fn with_workspace(state: Directories, workspace: PathBuf) -> Self {
         Self {
             workspace: Some(workspace),
             ..Self::new(state)
@@ -172,7 +173,7 @@ struct ToolSource<'a> {
 }
 
 fn complete(
-    state: &Path,
+    state: &Directories,
     source: ToolSource<'_>,
     grants: SessionGrants,
     agent: &ureq::Agent,
@@ -292,7 +293,7 @@ fn with_credential_hint(error: Error, connection: &CompletionConnection) -> Erro
 /// handles one bounded refresh; a gateway gets its resolved headers.
 fn send(
     agent: &ureq::Agent,
-    state: &Path,
+    state: &Directories,
     connection: &CompletionConnection,
     body: &[u8],
     sender: &Sender<ResponseEvent>,
@@ -300,7 +301,7 @@ fn send(
 ) -> Result<ureq::Response> {
     match &connection.transport {
         CompletionTransport::OpenAiResponses => {
-            crate::harness::inference_response(state, body, agent)
+            crate::harness::inference_response(&state.data, body, agent)
         }
         CompletionTransport::Gateway { url, headers } => {
             let mut attempt = 1;

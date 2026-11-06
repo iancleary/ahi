@@ -22,6 +22,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::chat;
 use crate::chat::input::{EditorKey, InputEditor};
+use crate::directories::Directories;
 use crate::error::{Error, Result};
 use crate::harness::{self, Registry};
 use commands::{CommandContext, CommandMenu, CommonAction, PickerOutcome};
@@ -34,7 +35,7 @@ pub struct RunOutput {
 /// `actions` names a tool policy file to use instead of the working
 /// directory's `ahi.actions.yaml`. It is read once here, so an invalid or
 /// missing file fails before the picker opens, and again on every chat turn.
-pub fn run(state: &Path, refresh: bool, actions: Option<&Path>) -> Result<RunOutput> {
+pub fn run(state: &Directories, refresh: bool, actions: Option<&Path>) -> Result<RunOutput> {
     let actions =
         match actions {
             Some(path) => {
@@ -100,7 +101,7 @@ pub fn run(state: &Path, refresh: bool, actions: Option<&Path>) -> Result<RunOut
     })
 }
 
-fn pick(state: &Path, picker: &mut Picker, refresh: bool) -> Result<PickerOutcome> {
+fn pick(state: &Directories, picker: &mut Picker, refresh: bool) -> Result<PickerOutcome> {
     let mut terminal = ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
     let result =
         enable_command_paste().and_then(|()| pick_loop(&mut terminal, state, picker, refresh));
@@ -240,7 +241,7 @@ impl Picker {
         self.cursor.select(Some(next));
     }
 
-    fn navigate(&mut self, state: &Path, key: KeyEvent) -> bool {
+    fn navigate(&mut self, state: &Directories, key: KeyEvent) -> bool {
         match key.code {
             // Legacy terminals send uppercase letters; enhanced keyboard
             // protocols can send lowercase letters with a Shift modifier.
@@ -263,7 +264,7 @@ impl Picker {
         true
     }
 
-    fn reorder_provider(&mut self, state: &Path, provider: usize, delta: isize) {
+    fn reorder_provider(&mut self, state: &Directories, provider: usize, delta: isize) {
         let target = provider as isize + delta;
         if target < 0 || target >= self.registry.providers.len() as isize {
             return;
@@ -339,7 +340,13 @@ impl Picker {
         }
     }
 
-    fn save_curated(&mut self, state: &Path, provider: usize, ids: &[String], focus: &str) -> bool {
+    fn save_curated(
+        &mut self,
+        state: &Directories,
+        provider: usize,
+        ids: &[String],
+        focus: &str,
+    ) -> bool {
         match harness::save_curated_models(
             state,
             &self.registry,
@@ -368,7 +375,7 @@ impl Picker {
         }
     }
 
-    fn toggle(&mut self, state: &Path) {
+    fn toggle(&mut self, state: &Directories) {
         let Row::Model { provider, model } = self.selected() else {
             return;
         };
@@ -383,7 +390,7 @@ impl Picker {
         self.save_curated(state, provider, &ids, &id);
     }
 
-    fn reorder(&mut self, state: &Path, delta: isize) {
+    fn reorder(&mut self, state: &Directories, delta: isize) {
         if matches!(self.screen, Screen::Picker) {
             if let Row::Header(provider) = self.selected() {
                 self.reorder_provider(state, provider, delta);
@@ -412,7 +419,11 @@ impl Picker {
         }
     }
 
-    fn refresh(&mut self, terminal: &mut ratatui::DefaultTerminal, state: &Path) -> Result<()> {
+    fn refresh(
+        &mut self,
+        terminal: &mut ratatui::DefaultTerminal,
+        state: &Directories,
+    ) -> Result<()> {
         let provider_id = self.registry.providers[self.selected().provider()]
             .id
             .clone();
@@ -670,11 +681,11 @@ impl Picker {
 
 fn pick_loop(
     terminal: &mut ratatui::DefaultTerminal,
-    state: &Path,
+    state: &Directories,
     picker: &mut Picker,
     refresh: bool,
 ) -> Result<PickerOutcome> {
-    picker.new_installation = !state.join("models.json").exists();
+    picker.new_installation = !state.config.join("models.json").exists();
     if refresh {
         picker.refresh(terminal, state)?;
     }
@@ -924,9 +935,9 @@ fn pick_loop(
     }
     picker.registration = None;
     if let Some(selection) = &selection {
-        std::fs::create_dir_all(state)
-            .map_err(|err| Error::new(format!("{}: {err}", state.display())))?;
-        let path = state.join("selection");
+        std::fs::create_dir_all(&state.state)
+            .map_err(|err| Error::new(format!("{}: {err}", state.state.display())))?;
+        let path = state.state.join("selection");
         std::fs::write(&path, format!("{selection}\n"))
             .map_err(|err| Error::new(format!("{}: {err}", path.display())))?;
         picker.print_on_exit.push(format!(
@@ -941,7 +952,11 @@ fn pick_loop(
 }
 
 /// Commit the new registry only after the complete local load succeeds.
-fn reload(registry: &mut Registry, state: &Path, errors: &BTreeMap<String, String>) -> Result<()> {
+fn reload(
+    registry: &mut Registry,
+    state: &Directories,
+    errors: &BTreeMap<String, String>,
+) -> Result<()> {
     let mut next = harness::load_registry(state)?;
     apply_refresh_errors(&mut next, errors);
     *registry = next;
@@ -975,7 +990,7 @@ fn catalog_ids(provider: &harness::LoadedProvider) -> Vec<&str> {
     ids
 }
 
-fn edit_models(state: &Path) -> Result<std::process::ExitStatus> {
+fn edit_models(state: &Directories) -> Result<std::process::ExitStatus> {
     let command = std::env::var("VISUAL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -987,16 +1002,16 @@ fn edit_models(state: &Path) -> Result<std::process::ExitStatus> {
     run_editor(state, command.as_deref())
 }
 
-fn run_editor(state: &Path, command: Option<&str>) -> Result<std::process::ExitStatus> {
+fn run_editor(state: &Directories, command: Option<&str>) -> Result<std::process::ExitStatus> {
     let command = match command {
         Some(command) => command,
         None if cfg!(windows) => "notepad",
         None => return Err(Error::new("set VISUAL or EDITOR to edit models.json")),
     };
     let args = crate::shlex::split(command)?;
-    std::fs::create_dir_all(state)
-        .map_err(|err| Error::new(format!("{}: {err}", state.display())))?;
-    let path = state.join("models.json");
+    std::fs::create_dir_all(&state.config)
+        .map_err(|err| Error::new(format!("{}: {err}", state.config.display())))?;
+    let path = state.config.join("models.json");
     Command::new(&args[0])
         .args(&args[1..])
         .arg(&path)
@@ -1015,7 +1030,8 @@ mod tests {
         std::fs::write(&path, r#"{"providers":{"home":{"baseUrl":"http://127.0.0.1:1234/v1","api":"openai-completions","apiKey":"gateway","models":[{"id":"local/model"}]},"work":{"baseUrl":"https://work.example/v1","api":"openai-completions","models":[{"id":"work/model"}]}}}"#).unwrap();
         let before: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let mut picker = Picker::new(harness::load_registry(&dir).unwrap());
+        let mut picker =
+            Picker::new(harness::load_registry(&Directories::single_root(&dir)).unwrap());
         assert_eq!(
             picker
                 .registry
@@ -1027,7 +1043,10 @@ mod tests {
         );
         // The empty built-in contributes a header and an empty row.
         picker.cursor.select(Some(2));
-        picker.navigate(&dir, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        picker.navigate(
+            &Directories::single_root(&dir),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+        );
         assert_eq!(
             picker
                 .registry
@@ -1038,7 +1057,7 @@ mod tests {
             ["home", "openai", "work"]
         );
         assert!(matches!(picker.selected(), Row::Header(0)));
-        let reloaded = harness::load_registry(&dir).unwrap();
+        let reloaded = harness::load_registry(&Directories::single_root(&dir)).unwrap();
         assert_eq!(
             reloaded
                 .providers
@@ -1056,7 +1075,10 @@ mod tests {
         let mut edited = std::fs::read(&path).unwrap();
         edited.push(b'\n');
         std::fs::write(&path, &edited).unwrap();
-        picker.navigate(&dir, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        picker.navigate(
+            &Directories::single_root(&dir),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        );
         assert_eq!(picker.registry, original);
         assert_eq!(std::fs::read(&path).unwrap(), edited);
         assert!(picker.status.contains("changed outside this view"));
@@ -1070,7 +1092,8 @@ mod tests {
         let catalog = r#"["reference-only","vendor/one/two","first"]"#;
         std::fs::write(dir.join("catalogs/openai.json"), catalog).unwrap();
         std::fs::write(dir.join("models.json"), r#"{"providers":{"openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-completions","models":[{"id":"missing"},{"id":"first"}]}}}"#).unwrap();
-        let mut picker = Picker::new(harness::load_registry(&dir).unwrap());
+        let mut picker =
+            Picker::new(harness::load_registry(&Directories::single_root(&dir)).unwrap());
         picker.screen = Screen::Catalog { provider: 0 };
         assert_eq!(
             catalog_ids(&picker.registry.providers[0]),
@@ -1090,24 +1113,24 @@ mod tests {
         assert!(text.contains("[x] missing  [absent from catalog]"));
         assert!(text.contains("[ ] reference-only"));
         assert!(text.contains("retrieval time unknown (old catalog format)"));
-        picker.reorder(&dir, 1);
+        picker.reorder(&Directories::single_root(&dir), 1);
         assert_eq!(
             catalog_ids(&picker.registry.providers[0]),
             ["first", "missing", "reference-only", "vendor/one/two"]
         );
         assert_eq!(picker.cursor.selected(), Some(1));
         picker.cursor.select(Some(3));
-        picker.toggle(&dir);
+        picker.toggle(&Directories::single_root(&dir));
         assert_eq!(
             catalog_ids(&picker.registry.providers[0]),
             ["first", "missing", "vendor/one/two", "reference-only"]
         );
-        picker.reorder(&dir, -1);
+        picker.reorder(&Directories::single_root(&dir), -1);
         assert_eq!(
             catalog_ids(&picker.registry.providers[0]),
             ["first", "vendor/one/two", "missing", "reference-only"]
         );
-        let fresh = harness::load_registry(&dir).unwrap();
+        let fresh = harness::load_registry(&Directories::single_root(&dir)).unwrap();
         assert_eq!(fresh, picker.registry);
         assert_eq!(
             fresh.providers[0]
@@ -1122,7 +1145,7 @@ mod tests {
             catalog
         );
         picker.cursor.select(Some(2));
-        picker.toggle(&dir);
+        picker.toggle(&Directories::single_root(&dir));
         assert_eq!(
             catalog_ids(&picker.registry.providers[0]),
             ["first", "vendor/one/two", "reference-only"]
@@ -1153,10 +1176,11 @@ mod tests {
             ),
         ] {
             std::fs::write(dir.join("models.json"), config).unwrap();
-            let mut picker = Picker::new(harness::load_registry(&dir).unwrap());
+            let mut picker =
+                Picker::new(harness::load_registry(&Directories::single_root(&dir)).unwrap());
             picker.screen = Screen::Catalog { provider: 0 };
-            assert!(picker.navigate(&dir, down));
-            let fresh = harness::load_registry(&dir).unwrap();
+            assert!(picker.navigate(&Directories::single_root(&dir), down));
+            let fresh = harness::load_registry(&Directories::single_root(&dir)).unwrap();
             assert_eq!(
                 fresh.providers[0]
                     .models
@@ -1166,8 +1190,8 @@ mod tests {
                 ["second", "first"]
             );
             assert_eq!(picker.cursor.selected(), Some(1));
-            assert!(picker.navigate(&dir, up));
-            let fresh = harness::load_registry(&dir).unwrap();
+            assert!(picker.navigate(&Directories::single_root(&dir), up));
+            let fresh = harness::load_registry(&Directories::single_root(&dir)).unwrap();
             assert_eq!(
                 fresh.providers[0]
                     .models
@@ -1178,9 +1202,15 @@ mod tests {
             );
             assert_eq!(picker.cursor.selected(), Some(0));
             let before = std::fs::read(dir.join("models.json")).unwrap();
-            assert!(picker.navigate(&dir, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+            assert!(picker.navigate(
+                &Directories::single_root(&dir),
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)
+            ));
             assert_eq!(picker.cursor.selected(), Some(1));
-            assert!(picker.navigate(&dir, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)));
+            assert!(picker.navigate(
+                &Directories::single_root(&dir),
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)
+            ));
             assert_eq!(picker.cursor.selected(), Some(0));
             assert_eq!(std::fs::read(dir.join("models.json")).unwrap(), before);
         }
@@ -1192,23 +1222,24 @@ mod tests {
         let dir = crate::fixture_directory::create_unique_fixture_directory("catalog-save-error");
         std::fs::create_dir_all(dir.join("catalogs")).unwrap();
         std::fs::write(dir.join("catalogs/openai.json"), r#"["check/me"]"#).unwrap();
-        let mut picker = Picker::new(harness::load_registry(&dir).unwrap());
+        let mut picker =
+            Picker::new(harness::load_registry(&Directories::single_root(&dir)).unwrap());
         picker.screen = Screen::Catalog { provider: 0 };
         let previous = picker.registry.clone();
         assert_eq!(catalog_ids(&picker.registry.providers[0]), ["check/me"]);
         assert!(!dir.join("models.json").exists());
         std::fs::write(dir.join("models.json.tmp"), "busy").unwrap();
-        picker.toggle(&dir);
+        picker.toggle(&Directories::single_root(&dir));
         assert_eq!(picker.registry, previous);
         assert!(picker.status.contains("Save failed: cannot create"));
         assert!(!dir.join("models.json").exists());
         std::fs::remove_file(dir.join("models.json.tmp")).unwrap();
-        picker.toggle(&dir);
+        picker.toggle(&Directories::single_root(&dir));
         assert_eq!(picker.registry.providers[0].models[0].id, "check/me");
         let previous = picker.registry.clone();
         let external = "{\n  \"providers\": {}\n}\n";
         std::fs::write(dir.join("models.json"), external).unwrap();
-        picker.toggle(&dir);
+        picker.toggle(&Directories::single_root(&dir));
         assert_eq!(picker.registry, previous);
         assert!(picker.status.contains("changed outside this view; press e"));
         assert!(picker.status.contains("loaded selection unchanged"));
@@ -1222,14 +1253,14 @@ mod tests {
     #[test]
     fn invalid_edit_preserves_registry_and_reports_file_and_line() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("editor-reload");
-        let mut registry = harness::load_registry(&dir).unwrap();
+        let mut registry = harness::load_registry(&Directories::single_root(&dir)).unwrap();
         let previous = registry.clone();
         for broken in [
             "{\ninvalid\n}",
             "{\"providers\": {\n\"openai\": {\"baseUrl\":\"https://api.openai.com/v1\",\"api\":\"unsupported\"}}}",
         ] {
             std::fs::write(dir.join("models.json"), broken).unwrap();
-            let error = reload(&mut registry, &dir, &BTreeMap::new())
+            let error = reload(&mut registry, &Directories::single_root(&dir), &BTreeMap::new())
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(&dir.join("models.json").display().to_string()), "{error}");
@@ -1251,9 +1282,18 @@ mod tests {
             format!("#!/bin/sh\nprintf '%s' '{body}' > \"$1\"\n"),
         )
         .unwrap();
-        run_editor(&dir, Some(&format!("sh '{}'", script.display()))).unwrap();
-        let mut registry = harness::load_registry(&dir).unwrap();
-        reload(&mut registry, &dir, &BTreeMap::new()).unwrap();
+        run_editor(
+            &Directories::single_root(&dir),
+            Some(&format!("sh '{}'", script.display())),
+        )
+        .unwrap();
+        let mut registry = harness::load_registry(&Directories::single_root(&dir)).unwrap();
+        reload(
+            &mut registry,
+            &Directories::single_root(&dir),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("models.json")).unwrap(),
             body
@@ -1274,12 +1314,16 @@ mod tests {
     fn no_editor_does_not_create_models_json() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("editor-unset");
         assert_eq!(
-            run_editor(&dir, None).unwrap_err().to_string(),
+            run_editor(&Directories::single_root(&dir), None)
+                .unwrap_err()
+                .to_string(),
             "set VISUAL or EDITOR to edit models.json"
         );
         assert!(!dir.join("models.json").exists());
         assert_eq!(
-            harness::load_registry(&dir).unwrap().providers[0]
+            harness::load_registry(&Directories::single_root(&dir))
+                .unwrap()
+                .providers[0]
                 .empty_reason
                 .as_deref(),
             Some("no models in models.json: press e to edit, c to browse the catalog")
@@ -1290,7 +1334,7 @@ mod tests {
     #[test]
     fn picker_draws_empty_reasons_and_catalog_membership() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("picker-render");
-        let registry = harness::load_registry(&dir).unwrap();
+        let registry = harness::load_registry(&Directories::single_root(&dir)).unwrap();
         let mut picker = Picker::new(registry);
         let backend = ratatui::backend::TestBackend::new(120, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();

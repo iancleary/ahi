@@ -92,13 +92,20 @@ CI and the release asset workflows build with a pinned recent stable. Each workf
 
 Because ordinary CI builds a recent stable, the MSRV is exercised in exactly one place: the publish workflow checks the declared floor with `cargo +1.88.0 check --all-features --locked` immediately before `cargo publish`. Bump the MSRV only when a security-forced dependency floor or ahi's own code requires it, never because a new stable shipped. A bump is one commit: change `rust-version` in `Cargo.toml`, verify the new floor builds, extend the chain in `docs/SPEC.md`, and record the raise in `CHANGELOG.md` with the next version.
 
-The cache directory is `--cache-dir`, else `AHI_HOME`, else `$XDG_CACHE_HOME/ahi` when that variable is set, else the temporary directory joined with `ahi`. The hook cache does not fall back to a home directory. A store whose `objects/sha256` directory already exists can be opened read-only.
+ahi keeps its own files in the XDG base directories, each with an `ahi` child:
 
-The harness state directory is `--state-dir`, else `AHI_STATE_DIR`, else `$XDG_STATE_HOME/ahi`, else `%LOCALAPPDATA%\ahi` on Windows, else `$HOME/.local/share/ahi`. `models.json` and the OpenAI credential live there. ahi does not read `~/.pi`.
+| Files | Directory | Default |
+| --- | --- | --- |
+| `models.json` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
+| `credentials/openai.json`, `openai-device-id` | `$XDG_DATA_HOME/ahi` | `~/.local/share/ahi` |
+| `selection`, `thinking`, `audit.log` | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
+| `catalogs/`, `objects/sha256/` | `$XDG_CACHE_HOME/ahi` | `~/.cache/ahi` |
+
+An XDG variable counts only when it is an absolute path, as the specification requires. On Windows without XDG variables the categories live under `%LOCALAPPDATA%\ahi\{config,data,state,cache}`. `--state-dir`, or `AHI_STATE_DIR`, puts every category under one directory for portable or sandboxed setups; `--cache-dir`, or `AHI_HOME`, moves the cache alone. Without a home directory, set the XDG variables or `--state-dir`. ahi never reads `~/.pi`, and it does not move files from older locations: `ahi doctor` prints the directories in use. A store whose `objects/sha256` directory already exists can be opened read-only.
 
 ## Commands in this version
 
-Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR`, and `--color auto|always|never` is validated but this version prints plain text either way.
+Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME` and `XDG_CACHE_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR` and keeps every ahi directory under one root, and `--color auto|always|never` is validated but this version prints plain text either way.
 
 | Command | Behavior |
 | --- | --- |

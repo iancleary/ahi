@@ -18,10 +18,11 @@ mod thinking;
 mod transcript;
 mod usage;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use crate::directories::Directories;
 use crate::error::{Error, Result};
 use crate::tui::commands::{CommandContext, CommandMenu, PickerOutcome};
 
@@ -79,7 +80,7 @@ enum SessionEnd {
 
 /// Screen state, independent of the terminal.
 struct ChatScreen {
-    state_dir: PathBuf,
+    state_dir: Directories,
     selection: Selection,
     thinking: ThinkingLevel,
     messages: Vec<ChatMessage>,
@@ -121,10 +122,10 @@ struct ChatScreen {
 }
 
 impl ChatScreen {
-    fn load(state_dir: &Path, selection: &str) -> Self {
+    fn load(state_dir: &Directories, selection: &str) -> Self {
         let (thinking, notice) = thinking::read(state_dir);
         let mut screen = Self {
-            state_dir: state_dir.to_path_buf(),
+            state_dir: state_dir.clone(),
             selection: parse_selection(selection),
             thinking,
             messages: Vec::new(),
@@ -1206,7 +1207,7 @@ pub(crate) fn check_actions_file(path: &Path) -> Result<()> {
 /// `actions` is the operator's explicit policy file, used for every turn in
 /// place of the working directory's `ahi.actions.yaml`.
 pub(crate) fn interact(
-    state_dir: &Path,
+    state_dir: &Directories,
     selection: &str,
     actions: Option<&Path>,
     mut reopen_picker: impl FnMut(
@@ -1217,7 +1218,7 @@ pub(crate) fn interact(
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
     let mut backend =
-        HttpBackend::new(state_dir.to_path_buf()).with_actions(actions.map(Path::to_path_buf));
+        HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf));
     loop {
         let mut terminal =
             ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
@@ -1581,7 +1582,7 @@ mod tests {
     }
 
     fn screen_in(state: &Path) -> ChatScreen {
-        ChatScreen::load(state, "openai/gpt-4.1")
+        ChatScreen::load(&Directories::single_root(state), "openai/gpt-4.1")
     }
 
     #[test]

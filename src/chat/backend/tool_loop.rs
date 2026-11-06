@@ -80,7 +80,7 @@ impl ToolRuntime {
     /// confinement stay relative to `directory` either way.
     pub(super) fn load(
         directory: &Path,
-        state: &Path,
+        state: &crate::directories::Directories,
         gateway: &str,
         destination: &str,
         grants: SessionGrants,

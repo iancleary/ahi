@@ -8,6 +8,7 @@
 mod actions;
 pub mod chat;
 mod clipboard;
+pub mod directories;
 pub mod error;
 pub mod harness;
 pub mod hooks;

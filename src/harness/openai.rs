@@ -1015,7 +1015,10 @@ mod tests {
                 0o600
             );
         }
-        assert!(!render_text(&load_registry(&dir).unwrap()).contains("secret"));
+        assert!(
+            !render_text(&load_registry(&Directories::single_root(&dir)).unwrap())
+                .contains("secret")
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1337,7 +1340,11 @@ mod tests {
                 b"[\"cached\"]\n"
             );
             assert_eq!(
-                load_registry(&dir).unwrap().providers[0].models[0].id,
+                load_registry(&Directories::single_root(&dir))
+                    .unwrap()
+                    .providers[0]
+                    .models[0]
+                    .id,
                 "curated"
             );
         }

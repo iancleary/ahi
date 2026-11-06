@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -7,10 +6,11 @@ use crossterm::event::{
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use crate::directories::Directories;
 use crate::error::{Error, Result};
 use crate::harness::OpenAiLogin;
 
-pub(crate) fn run(state: &Path) -> Result<()> {
+pub(crate) fn run(state: &Directories) -> Result<()> {
     let mut terminal = ratatui::try_init().map_err(|error| Error::new(error.to_string()))?;
     let result = crossterm::execute!(std::io::stdout(), EnableBracketedPaste)
         .map_err(|error| Error::new(error.to_string()))
@@ -21,8 +21,8 @@ pub(crate) fn run(state: &Path) -> Result<()> {
     result
 }
 
-fn login_loop(terminal: &mut ratatui::DefaultTerminal, state: &Path) -> Result<()> {
-    let mut login = OpenAiLogin::start(state)?;
+fn login_loop(terminal: &mut ratatui::DefaultTerminal, state: &Directories) -> Result<()> {
+    let mut login = OpenAiLogin::start(&state.data)?;
     let mut callback = String::new();
     let mut status =
         "Waiting for browser login. Paste the full callback URL if needed.".to_string();

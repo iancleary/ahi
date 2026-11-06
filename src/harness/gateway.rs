@@ -104,7 +104,7 @@ impl DiscoveredGateway {
 
     pub(crate) fn register(
         &self,
-        state: &Path,
+        state: &crate::directories::Directories,
         registry: &Registry,
     ) -> Result<GatewayRegistration> {
         curation::check_snapshot(state, registry)?;

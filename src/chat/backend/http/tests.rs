@@ -160,7 +160,7 @@ fn write_models(state: &Path, url: &str, model: serde_json::Value) {
 fn backend(state: &Path) -> HttpBackend {
     let workspace = state.join("empty-workspace");
     fs::create_dir_all(&workspace).unwrap();
-    HttpBackend::with_workspace(state.to_path_buf(), workspace)
+    HttpBackend::with_workspace(Directories::single_root(state.to_path_buf()), workspace)
 }
 
 fn responses_fixture(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
@@ -945,7 +945,10 @@ impl ToolFixture {
     }
 
     fn backend(&self) -> HttpBackend {
-        HttpBackend::with_workspace(self.state.clone(), self.workspace.clone())
+        HttpBackend::with_workspace(
+            Directories::single_root(self.state.clone()),
+            self.workspace.clone(),
+        )
     }
 }
 
@@ -1634,14 +1637,15 @@ fn tools_never_read_the_state_directory_inside_the_workspace() {
     // Run with the state directory nested inside an approved prefix.
     let nested = fixture.workspace.join("src/state");
     fs::rename(&fixture.state, &nested).unwrap();
-    let mut backend = HttpBackend::with_workspace(nested, fixture.workspace.clone());
+    let mut backend =
+        HttpBackend::with_workspace(Directories::single_root(nested), fixture.workspace.clone());
     let (events, _) = collect_answering(&mut backend, request(), vec![]);
     assert_eq!(
         results(&events),
         vec![(
             "c1".into(),
             1,
-            "error: path is inside ahi's state directory, which tools cannot read".into()
+            "error: path is inside ahi's own directories, which tools cannot read".into()
         )]
     );
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));

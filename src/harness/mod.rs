@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::directories::Directories;
 use crate::error::{Error, Result};
 
 mod curation;
@@ -88,7 +89,7 @@ pub(crate) use openai::fixture_inference_response;
 pub(crate) use openai::inference_response;
 
 pub(crate) fn completion_connection(
-    state: &Path,
+    state: &Directories,
     provider: &str,
     model: &str,
 ) -> Result<CompletionConnection> {
@@ -317,50 +318,24 @@ pub struct Registry {
     models_bytes: Option<Vec<u8>>,
 }
 
-pub fn state_dir(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
-    }
-    if let Some(path) = std::env::var_os("AHI_STATE_DIR") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-    if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path).join("ahi"));
-        }
-    }
-    #[cfg(windows)]
-    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path).join("ahi"));
-        }
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path).join(".local").join("share").join("ahi"));
-        }
-    }
-    Err(Error::new(
-        "no state directory: pass --state-dir, or set AHI_STATE_DIR, XDG_STATE_HOME, or HOME",
-    ))
-}
-
-pub fn load_registry(state: &Path) -> Result<Registry> {
+pub fn load_registry(state: &Directories) -> Result<Registry> {
     let models_bytes = read_models_bytes(state)?;
     let file = parse_models(state, models_bytes.as_deref())?;
     Ok(registry_from_models(state, file, models_bytes))
 }
 
-fn registry_from_models(state: &Path, file: ModelsFile, models_bytes: Option<Vec<u8>>) -> Registry {
+fn registry_from_models(
+    state: &Directories,
+    file: ModelsFile,
+    models_bytes: Option<Vec<u8>>,
+) -> Registry {
     let mut providers = Vec::new();
     let openai = file.entry(OPENAI_ID).expect("openai is always implicit");
     providers.push(load_provider(
         state,
         OPENAI_ID,
         &openai,
-        if state.join("credentials/openai.json").is_file() {
+        if state.data.join("credentials/openai.json").is_file() {
             "signed-in"
         } else {
             "signed-out"
@@ -449,12 +424,12 @@ pub fn render_text(registry: &Registry) -> String {
     lines.join("\n")
 }
 
-fn read_models(state: &Path) -> Result<ModelsFile> {
+fn read_models(state: &Directories) -> Result<ModelsFile> {
     parse_models(state, read_models_bytes(state)?.as_deref())
 }
 
-fn read_models_bytes(state: &Path) -> Result<Option<Vec<u8>>> {
-    let path = state.join("models.json");
+fn read_models_bytes(state: &Directories) -> Result<Option<Vec<u8>>> {
+    let path = state.config.join("models.json");
     let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -475,20 +450,29 @@ fn read_models_bytes(state: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-fn parse_models(state: &Path, bytes: Option<&[u8]>) -> Result<ModelsFile> {
+fn parse_models(state: &Directories, bytes: Option<&[u8]>) -> Result<ModelsFile> {
     match bytes {
         None => Ok(ModelsFile {
             _schema: None,
             providers: BTreeMap::new(),
         }),
-        Some(bytes) => serde_json::from_slice(bytes)
-            .map_err(|err| Error::new(format!("{}: {err}", state.join("models.json").display()))),
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|err| {
+            Error::new(format!(
+                "{}: {err}",
+                state.config.join("models.json").display()
+            ))
+        }),
     }
 }
 
 /// Load one provider from its entry and its last-good catalog. The catalog is
 /// read once here; every curated model's metadata is merged from that one copy.
-fn load_provider(state: &Path, id: &str, entry: &ProviderEntry, auth: &str) -> LoadedProvider {
+fn load_provider(
+    state: &Directories,
+    id: &str,
+    entry: &ProviderEntry,
+    auth: &str,
+) -> LoadedProvider {
     let (catalog, catalog_error) = match read_last_good(state, id) {
         Ok(catalog) => (catalog, None),
         Err(err) => (None, Some(err.to_string())),
@@ -520,7 +504,7 @@ fn load_provider(state: &Path, id: &str, entry: &ProviderEntry, auth: &str) -> L
 }
 
 /// Explicitly refresh one reference catalog. Never edits models.json.
-pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
+pub fn refresh_provider(state: &Directories, id: &str) -> Result<()> {
     check_id(id)?;
     let file = read_models(state)?;
     let entry = file
@@ -529,7 +513,7 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
     let (source, models, metadata) = if id == OPENAI_ID {
         (
             openai::catalog_source(&entry.base_url)?,
-            openai::refresh(state, &entry.base_url)?,
+            openai::refresh(&state.data, &entry.base_url)?,
             BTreeMap::new(),
         )
     } else {
@@ -582,7 +566,7 @@ pub fn refresh_provider(state: &Path, id: &str) -> Result<()> {
 
 /// Refresh every provider, continuing after failures. Errors are for this refresh,
 /// not persisted in the catalog (a failed refresh leaves that file untouched).
-pub fn refresh_all(state: &Path) -> Result<BTreeMap<String, String>> {
+pub fn refresh_all(state: &Directories) -> Result<BTreeMap<String, String>> {
     let registry = load_registry(state)?;
     // Providers refresh concurrently: each writes only its own catalog file,
     // so N providers take one round trip, not N in sequence.
@@ -865,8 +849,8 @@ fn http_get_with_headers(url: &str, headers: &BTreeMap<String, String>) -> Resul
     Ok(buf)
 }
 
-fn write_last_good(state: &Path, catalog: &CatalogSnapshot) -> Result<()> {
-    let dir = state.join("catalogs");
+fn write_last_good(state: &Directories, catalog: &CatalogSnapshot) -> Result<()> {
+    let dir = state.cache.join("catalogs");
     fs::create_dir_all(&dir)
         .map_err(|err| Error::new(format!("failed to create {}: {err}", dir.display())))?;
     let path = dir.join(format!("{}.json", catalog.provider));
@@ -898,8 +882,8 @@ fn write_last_good(state: &Path, catalog: &CatalogSnapshot) -> Result<()> {
     result.map_err(|err| Error::new(format!("failed to replace {}: {err}", path.display())))
 }
 
-fn read_last_good(state: &Path, id: &str) -> Result<Option<CatalogSnapshot>> {
-    let path = state.join("catalogs").join(format!("{id}.json"));
+fn read_last_good(state: &Directories, id: &str) -> Result<Option<CatalogSnapshot>> {
+    let path = state.cache.join("catalogs").join(format!("{id}.json"));
     let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1108,8 +1092,8 @@ fn origin_of(base_url: &str) -> Result<String> {
 
 pub(crate) use openai::OpenAiLogin;
 
-pub fn login(state: &Path) -> Result<()> {
-    openai::login(state)
+pub fn login(state: &Directories) -> Result<()> {
+    openai::login(&state.data)
 }
 
 fn try_open_browser(url: &str) {
@@ -1492,7 +1476,8 @@ mod tests {
             }}"#,
         )
         .unwrap();
-        let claude = completion_connection(&dir, "claude", "claude-x").unwrap();
+        let claude =
+            completion_connection(&Directories::single_root(&dir), "claude", "claude-x").unwrap();
         assert_eq!(claude.protocol, Protocol::AnthropicMessages);
         assert!(!claude.browser_token());
         let CompletionTransport::Gateway { url, headers } = &claude.transport else {
@@ -1504,7 +1489,8 @@ mod tests {
         assert_eq!(headers["anthropic-version"], "2023-06-01");
         assert!(!headers.contains_key("authorization"));
 
-        let proxy = completion_connection(&dir, "proxy", "gpt-x").unwrap();
+        let proxy =
+            completion_connection(&Directories::single_root(&dir), "proxy", "gpt-x").unwrap();
         assert_eq!(proxy.protocol, Protocol::OpenAiResponses);
         let CompletionTransport::Gateway { url, headers } = &proxy.transport else {
             panic!("gateway transport");
@@ -1513,7 +1499,7 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer gateway");
         assert_eq!(headers["x-team"], "gateway");
 
-        let home = completion_connection(&dir, "home", "qwen").unwrap();
+        let home = completion_connection(&Directories::single_root(&dir), "home", "qwen").unwrap();
         assert_eq!(home.protocol, Protocol::OpenAiCompletions);
         assert_eq!(
             home.destination(),
@@ -1526,14 +1512,18 @@ mod tests {
             r#"{"providers":{"openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-responses","models":[{"id":"m"}]}}}"#,
         )
         .unwrap();
-        let error = load_registry(&dir).unwrap_err().to_string();
+        let error = load_registry(&Directories::single_root(&dir))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("api must be openai-completions"), "{error}");
         fs::write(
             dir.join("models.json"),
             r#"{"providers":{"lab":{"baseUrl":"https://lab.example/v1","api":"grpc","models":[]}}}"#,
         )
         .unwrap();
-        let error = load_registry(&dir).unwrap_err().to_string();
+        let error = load_registry(&Directories::single_root(&dir))
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains(
                 "api must be one of openai-completions, openai-responses, anthropic-messages"
@@ -1558,9 +1548,12 @@ mod tests {
                 .map(|provider| provider.id.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(&load_registry(&dir).unwrap()), ["openai", "lab"]);
+        assert_eq!(
+            ids(&load_registry(&Directories::single_root(&dir)).unwrap()),
+            ["openai", "lab"]
+        );
         test_set_anthropic_key(true);
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         assert_eq!(ids(&registry), ["openai", "anthropic", "lab"]);
         let anthropic = provider(&registry, ANTHROPIC_ID);
         assert_eq!(anthropic.auth, "env");
@@ -1568,8 +1561,13 @@ mod tests {
         assert!(anthropic.models.is_empty());
         // Curating a model materializes the entry at the front, with the
         // environment reference and protocol, leaving saved order alone.
-        let saved =
-            save_curated_models(&dir, &registry, ANTHROPIC_ID, &["claude-x".to_string()]).unwrap();
+        let saved = save_curated_models(
+            &Directories::single_root(&dir),
+            &registry,
+            ANTHROPIC_ID,
+            &["claude-x".to_string()],
+        )
+        .unwrap();
         assert_eq!(ids(&saved), ["openai", "anthropic", "lab"]);
         let document: Value =
             serde_json::from_slice(&fs::read(dir.join("models.json")).unwrap()).unwrap();
@@ -1584,7 +1582,7 @@ mod tests {
             "anthropic-messages"
         );
         // The key is resolved from the real environment only at submission.
-        match completion_connection(&dir, ANTHROPIC_ID, "claude-x") {
+        match completion_connection(&Directories::single_root(&dir), ANTHROPIC_ID, "claude-x") {
             Ok(connection) => {
                 assert!(std::env::var_os(ANTHROPIC_KEY_ENV).is_some());
                 assert_eq!(connection.protocol, Protocol::AnthropicMessages);
@@ -1602,7 +1600,7 @@ mod tests {
         }
         test_set_anthropic_key(false);
         assert_eq!(
-            ids(&load_registry(&dir).unwrap()),
+            ids(&load_registry(&Directories::single_root(&dir)).unwrap()),
             ["openai", "anthropic", "lab"]
         );
         fs::remove_dir_all(dir).unwrap();
@@ -1620,8 +1618,8 @@ mod tests {
             ),
         )
         .unwrap();
-        refresh_provider(&dir, "claude").unwrap();
-        let registry = load_registry(&dir).unwrap();
+        refresh_provider(&Directories::single_root(&dir), "claude").unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         let claude = registry
             .providers
             .iter()
@@ -1660,9 +1658,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = refresh_provider(&dir, "lab").unwrap_err().to_string();
+        let error = refresh_provider(&Directories::single_root(&dir), "lab")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("redirects are not followed"), "{error}");
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         let lab = provider(&registry, "lab");
         assert_eq!(
             lab.models,
@@ -1682,11 +1682,11 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(refresh_provider(&dir, "lab")
+        assert!(refresh_provider(&Directories::single_root(&dir), "lab")
             .unwrap_err()
             .to_string()
             .contains("does not match"));
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(
@@ -1708,9 +1708,9 @@ mod tests {
             ),
         )
         .unwrap();
-        refresh_provider(&dir, "lab").unwrap();
+        refresh_provider(&Directories::single_root(&dir), "lab").unwrap();
         let saved = fs::read(dir.join("catalogs/lab.json")).unwrap();
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
@@ -1728,9 +1728,9 @@ mod tests {
             r#"{"providers":{"lab":{"baseUrl":"http://127.0.0.1:1/v1","api":"openai-completions"}}}"#,
         )
         .unwrap();
-        assert!(refresh_provider(&dir, "lab").is_err());
+        assert!(refresh_provider(&Directories::single_root(&dir), "lab").is_err());
         assert_eq!(fs::read(dir.join("catalogs/lab.json")).unwrap(), saved);
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         let lab = provider(&registry, "lab");
         assert!(lab.models.is_empty());
         assert_eq!(lab.catalog.as_ref().unwrap().models, ["qwen-3.5"]);
@@ -1755,7 +1755,7 @@ mod tests {
         }});
         fs::write(dir.join("models.json"), config.to_string()).unwrap();
         let start = std::time::Instant::now();
-        let registry = load_registry(&dir).unwrap();
+        let registry = load_registry(&Directories::single_root(&dir)).unwrap();
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "local load must not wait on unreachable gateway"
@@ -1814,7 +1814,7 @@ mod tests {
             models: vec!["new".to_string()],
             metadata: BTreeMap::new(),
         };
-        assert!(write_last_good(&dir, &catalog).is_err());
+        assert!(write_last_good(&Directories::single_root(&dir), &catalog).is_err());
         assert_eq!(
             fs::read(dir.join("catalogs/lab.json")).unwrap(),
             b"[\"old\"]\n"
@@ -1824,8 +1824,11 @@ mod tests {
             b"other writer"
         );
         fs::remove_file(dir.join("catalogs/lab.json.tmp")).unwrap();
-        write_last_good(&dir, &catalog).unwrap();
-        assert_eq!(read_last_good(&dir, "lab").unwrap(), Some(catalog));
+        write_last_good(&Directories::single_root(&dir), &catalog).unwrap();
+        assert_eq!(
+            read_last_good(&Directories::single_root(&dir), "lab").unwrap(),
+            Some(catalog)
+        );
         assert!(!dir.join("catalogs/lab.json.tmp").exists());
         fs::remove_dir_all(dir).unwrap();
     }
