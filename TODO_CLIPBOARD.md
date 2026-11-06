@@ -1,5 +1,12 @@
 # Clipboard and text selection TODO
 
+## Clipboard module structure (pi.dev-style)
+
+- [x] Split `src/clipboard.rs` into `src/clipboard/`: `mod.rs` (platform routing), `command.rs` (bounded helper execution), `osc52.rs` (terminal writes), `windows.rs` (PowerShell handoff through a private UTF-8 file). WSL detection stays in `src/wsl.rs`.
+- [x] Make routing a pure function: `Environment` → `Plan` of ordered `Step`s, so macOS, native Linux (Wayland/X11/Termux/headless), WSL (Windows Terminal vs. other emulators), native Windows, and SSH/mosh remote sessions are covered by unit tests without touching a real clipboard.
+- [x] Native Windows uses the same private-file PowerShell handoff as WSL instead of piping text through PowerShell stdin, so console code pages cannot re-encode it.
+- [ ] Add clipboard read (paste) adapters when an image or file paste feature needs them; pi.dev reads via `wl-paste`/`xclip`/PowerShell on WSL, which this module does not yet do.
+
 ## Drag-selection auto-scroll
 
 - [ ] Allow the chat transcript to scroll while the user holds the mouse button and drags a text selection toward or beyond the top or bottom edge of the transcript viewport.
