@@ -6,6 +6,7 @@ Only loopback HTTP and disposable credential fixtures are used.
 No external requests, real credentials, clipboard, or editor configuration is used.
 """
 import argparse
+import base64
 import errno
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -50,8 +52,12 @@ def main() -> None:
             self.pid, self.fd = pty.fork()
             if self.pid == 0:
                 env = os.environ.copy()
-                # Hide installed clipboard programs, and do not inherit an editor.
-                env.update(TERM="xterm-256color", PATH=str(executable_dir) if executable_dir else "/nonexistent")
+                # Hide real clipboard programs and make copy routing deterministic.
+                # A dummy display prevents headless OSC 52 from masking adapter failures.
+                env.update(TERM="xterm-256color", PATH=str(executable_dir) if executable_dir else "/nonexistent",
+                           DISPLAY=":ahi-test", WAYLAND_DISPLAY="", TERMUX_VERSION="",
+                           WT_SESSION="", SSH_CONNECTION="", SSH_CLIENT="",
+                           MOSH_CONNECTION="", AHI_CLIPBOARD_OSC52="")
                 env.update(environment or {})
                 if cwd:
                     os.chdir(cwd)
@@ -302,7 +308,78 @@ def main() -> None:
             helper = clipboard_bin / name
             helper.write_text("#!/bin/sh\n/bin/cat > " + shlex.quote(str(copied_text)) + "\n")
             helper.chmod(0o700)
-        session = Session(state, executable_dir=clipboard_bin)
+        # Match Pi's Linux -> Windows Terminal OSC 52 -> UTF-8-file interop routing.
+        if sys.platform.startswith("linux"):
+            wsl_state = state / "wsl-copy"
+            (wsl_state / "catalogs").mkdir(parents=True)
+            private_tmp = wsl_state / "private'tmp"
+            private_tmp.mkdir()
+            wsl_id = "vendor/界e\u0301🙂"
+            (wsl_state / "models.json").write_text(json.dumps({"providers": {"openai": {
+                "baseUrl": "https://api.openai.com/v1", "api": "openai-completions",
+                "models": [{"id": wsl_id}],
+            }}}))
+            (wsl_state / "catalogs/openai.json").write_text(json.dumps([wsl_id]))
+            windows_copy = wsl_state / "windows-copy.txt"
+            powershell = clipboard_bin / "powershell.exe"
+            powershell.write_text(
+                f"#!{sys.executable}\nimport pathlib, re, sys\n"
+                "script = sys.argv[-1]\n"
+                "path = re.search(r\"ReadAllText\\('((?:[^']|'')*)'\", script)[1].replace(\"''\", \"'\")\n"
+                "source = pathlib.Path(path)\n"
+                "assert source.stat().st_mode & 0o777 == 0o600\n"
+                f"pathlib.Path({str(windows_copy)!r}).write_bytes(source.read_bytes())\n"
+            )
+            powershell.chmod(0o700)
+            wslpath = clipboard_bin / "wslpath"
+            wslpath.write_text('#!/bin/sh\n/bin/printf "%s\\n" "$2"\n')
+            wslpath.chmod(0o700)
+            try:
+                for mode in ("linux", "powershell", "terminal", "remote", "forced", "failure"):
+                    environment = {"WSL_DISTRO_NAME": "ahi-test", "TMPDIR": str(private_tmp)}
+                    if mode != "linux":
+                        environment["DISPLAY"] = ""
+                    if mode == "terminal":
+                        environment["WT_SESSION"] = "ahi-test"
+                    if mode == "remote":
+                        environment.update(DISPLAY=":ahi-test", SSH_CONNECTION="ahi-test")
+                    if mode == "forced":
+                        environment.update(DISPLAY=":ahi-test", AHI_CLIPBOARD_OSC52="1")
+                    if mode == "failure":
+                        # Disable interop and fail X11 helpers; a desktop must
+                        # report failure rather than assume OSC 52 was accepted.
+                        environment["DISPLAY"] = ":ahi-test"
+                        powershell.write_text("#!/bin/sh\nexit 1\n")
+                        for name in ("xclip", "xsel"):
+                            (clipboard_bin / name).write_text("#!/bin/sh\nexit 1\n")
+                    session = Session(wsl_state, executable_dir=clipboard_bin, environment=environment)
+                    try:
+                        session.expect("Models · Enter use model")
+                        session.send("cy")
+                        session.expect("No clipboard available" if mode == "failure" else "Copied")
+                        sequence = b"\x1b]52;c;" + base64.b64encode(wsl_id.encode()) + b"\x07"
+                        assert (sequence in session.output) == (mode in ("terminal", "remote", "forced"))
+                        assert copied_text.exists() == (mode in ("linux", "remote", "forced"))
+                        assert windows_copy.exists() == (mode == "powershell")
+                        if copied_text.exists():
+                            assert copied_text.read_text() == wsl_id
+                        if windows_copy.exists():
+                            assert windows_copy.read_text() == wsl_id
+                        assert not list(private_tmp.iterdir()), "temporary clipboard file leaked"
+                        session.send("q")
+                        session.finish()
+                    finally:
+                        session.close()
+                        copied_text.unlink(missing_ok=True)
+                        windows_copy.unlink(missing_ok=True)
+            finally:
+                powershell.unlink()
+                wslpath.unlink()
+                for name in ("xclip", "xsel"):
+                    (clipboard_bin / name).write_text("#!/bin/sh\n/bin/cat > " + shlex.quote(str(copied_text)) + "\n")
+
+        session = Session(state, executable_dir=clipboard_bin,
+                          environment={"AHI_CLIPBOARD_OSC52": "1"})
         try:
             session.expect("vendor/model/variant")
             session.send("j\r")
@@ -335,6 +412,7 @@ def main() -> None:
             session.send("\x1b[<0;1;1M\x1b[<32;5;1M\x1b[<0;5;1m")
             session.expect("Selection copied")
             assert copied_text.read_text() == "merge"
+            assert b"\x1b]52;c;bWVyZ2U=\x07" in session.output
             copied_text.write_text("retry-marker")
             session.send("\x19")  # Ctrl+Y copies the retained selection again.
             end = time.monotonic() + 10
@@ -1417,7 +1495,7 @@ def main() -> None:
         "invalid-edit retention, missing editor, explicit config creation, Enter-to-chat, "
         "OpenAI missing/legacy credential errors, /model local reload/switch/cancel, transcript retention, clean chat exit, "
         "real Git counts and branch/status refresh on message submission, "
-        "default mouse controls, managed drag-selection and exact clipboard payload, native text-selection mode via /mouse off, slash commands/filter/dismiss, /catalog, /models, /quit, "
+        "default mouse controls, managed drag-selection and exact clipboard payload, WSL Linux/OSC52/UTF-8-file routing and cleanup, remote/forced OSC52, native text-selection mode via /mouse off, slash commands/filter/dismiss, /catalog, /models, /quit, "
         "single-row footer, context in the input rule, and pre-submit draft wrapping/growth"
     )
 

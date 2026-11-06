@@ -1120,9 +1120,15 @@ fn session_loop(
             .map_err(|err| Error::new(format!("mouse mode: {err}")))?;
             mouse_capture = screen.mouse_capture;
         }
-        terminal
-            .draw(|frame| screen.draw(frame))
-            .map_err(|err| Error::new(format!("terminal draw: {err}")))?;
+        {
+            // Clipboard workers may emit OSC 52. Keep complete render sequences
+            // together so a copy cannot split an ANSI command mid-frame.
+            let stdout = std::io::stdout();
+            let _output = stdout.lock();
+            terminal
+                .draw(|frame| screen.draw(frame))
+                .map_err(|err| Error::new(format!("terminal draw: {err}")))?;
+        }
         if crossterm::event::poll(FRAME_INTERVAL).map_err(|err| Error::new(err.to_string()))? {
             let event = crossterm::event::read().map_err(|err| Error::new(err.to_string()))?;
             match screen.apply_terminal_event(event, backend)? {

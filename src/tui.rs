@@ -436,6 +436,9 @@ impl Picker {
     }
 
     fn draw(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        // A chat copy may still be completing after switching to the picker.
+        let stdout = io::stdout();
+        let _output = stdout.lock();
         terminal
             .draw(|frame| self.draw_frame(frame))
             .map_err(|err| Error::new(format!("terminal draw: {err}")))?;

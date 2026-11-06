@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 # Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
+base64 = "=0.22.1"
 clap = { version = "=4.5.23", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.10"
