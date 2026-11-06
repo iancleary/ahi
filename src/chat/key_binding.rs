@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::approval::ApprovalKey;
 use super::input::EditorKey;
-use super::selection::CursorMove;
+use super::selection::{CursorMove, VisualMode};
 
 /// What one key press asks the screen to do.
 ///
@@ -38,7 +38,7 @@ pub(crate) enum KeyAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelectionKey {
     Move(CursorMove),
-    ToggleVisual,
+    Visual(VisualMode),
     Yank,
     Exit,
     Ignore,
@@ -55,7 +55,10 @@ pub(crate) fn translate_selection(key: KeyEvent) -> SelectionKey {
         KeyCode::Char('c') if control => SelectionKey::Exit,
         KeyCode::Char('y' | 'Y') => SelectionKey::Yank,
         _ if control || key.modifiers.contains(KeyModifiers::ALT) => SelectionKey::Ignore,
-        KeyCode::Char('v') => SelectionKey::ToggleVisual,
+        KeyCode::Char('v') => SelectionKey::Visual(VisualMode::Char),
+        KeyCode::Char('V') => SelectionKey::Visual(VisualMode::Line),
+        KeyCode::Char('w') => SelectionKey::Move(CursorMove::WordForward),
+        KeyCode::Char('b') => SelectionKey::Move(CursorMove::WordBackward),
         KeyCode::Char('h') | KeyCode::Left => SelectionKey::Move(CursorMove::Left),
         KeyCode::Char('l') | KeyCode::Right => SelectionKey::Move(CursorMove::Right),
         KeyCode::Char('k') | KeyCode::Up => SelectionKey::Move(CursorMove::Up),
@@ -332,7 +335,22 @@ mod tests {
             (
                 KeyCode::Char('v'),
                 KeyModifiers::NONE,
-                SelectionKey::ToggleVisual,
+                SelectionKey::Visual(VisualMode::Char),
+            ),
+            (
+                KeyCode::Char('V'),
+                KeyModifiers::SHIFT,
+                SelectionKey::Visual(VisualMode::Line),
+            ),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::WordForward),
+            ),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::NONE,
+                SelectionKey::Move(CursorMove::WordBackward),
             ),
             (KeyCode::Char('y'), KeyModifiers::NONE, SelectionKey::Yank),
             (

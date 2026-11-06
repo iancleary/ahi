@@ -563,7 +563,10 @@ impl ChatScreen {
                     .move_cursor(movement, self.layout.rows(), page);
                 self.scroll_to_cursor();
             }
-            SelectionKey::ToggleVisual => self.text_selection.toggle_visual(),
+            SelectionKey::Visual(mode) => {
+                self.sync_layout();
+                self.text_selection.toggle_visual(mode, self.layout.rows());
+            }
             SelectionKey::Yank => {
                 if self.text_selection.visual_active() {
                     // The highlight stays, as after a mouse copy, so a failed
@@ -723,15 +726,15 @@ impl ChatScreen {
         {
             format!("{status} ")
         } else if self.text_selection.keyboard_active() {
-            let mode = if self.text_selection.visual_active() {
-                "VISUAL"
-            } else {
-                "SELECT"
+            let mode = match self.text_selection.visual_mode() {
+                Some(selection::VisualMode::Char) => "VISUAL",
+                Some(selection::VisualMode::Line) => "VISUAL LINE",
+                None => "SELECT",
             };
             if chunks[1].width < 48 {
                 format!("{mode} · Esc exits ")
             } else {
-                format!("{mode} · h/j/k/l move · v select · y yank · Esc exits ")
+                format!("{mode} · h/j/k/l w/b move · v/V select · y yank · Esc exits ")
             }
         } else if let Some(pending) = &self.approval {
             // Approval keys apply only to a blank input; say so instead of

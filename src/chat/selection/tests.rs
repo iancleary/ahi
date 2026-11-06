@@ -116,7 +116,7 @@ fn keyboard_cursor_snaps_to_graphemes_and_visual_range_yanks_exact_text() {
     assert_eq!(selection.cursor().unwrap(), Cell { row: 0, column: 4 });
     selection.move_cursor(CursorMove::Left, &rows, 2);
     assert_eq!(columns(&selection), 2);
-    selection.toggle_visual();
+    selection.toggle_visual(VisualMode::Char, &rows);
     assert!(selection.visual_active());
     assert_eq!(selection.text(&rows).as_deref(), Some("界"));
     selection.move_cursor(CursorMove::Down, &rows, 2);
@@ -140,10 +140,10 @@ fn keyboard_cursor_snaps_to_graphemes_and_visual_range_yanks_exact_text() {
         .spans
         .iter()
         .any(|span| span.style.add_modifier.contains(Modifier::REVERSED)));
-    selection.toggle_visual();
+    selection.toggle_visual(VisualMode::Char, &rows);
     assert!(!selection.visual_active());
     assert_eq!(selection.text(&rows), None);
-    selection.toggle_visual();
+    selection.toggle_visual(VisualMode::Char, &rows);
     selection.leave_keyboard();
     assert!(!selection.keyboard_active());
     assert_eq!(selection.text(&rows).as_deref(), Some("a"));
@@ -153,4 +153,115 @@ fn keyboard_cursor_snaps_to_graphemes_and_visual_range_yanks_exact_text() {
     assert_eq!(selection.cursor().unwrap().row, 1);
     selection.clamp_cursor(&[]);
     assert!(selection.is_empty());
+}
+
+#[test]
+fn word_motions_follow_vi_character_classes_and_cross_rows() {
+    // "foo.bar  界界x" then an empty row, then "  z".
+    // Vim classes: Latin and CJK are different words; emoji are their own.
+    let messages = messages("foo.bar  界界x🙂\n\n  z");
+    let rows = render::rows(&messages, 40);
+    let mut selection = Selection::default();
+    selection.enter_keyboard(0);
+    let at = |selection: &Selection| {
+        let cursor = selection.cursor().unwrap();
+        (cursor.row, cursor.column)
+    };
+    // w: foo -> . -> bar -> 界界 (one run) -> x -> 🙂 -> empty row -> z -> stays
+    let forward = [
+        (0, 3),
+        (0, 4),
+        (0, 9),
+        (0, 13),
+        (0, 14),
+        (1, 0),
+        (2, 2),
+        (2, 2),
+    ];
+    for expected in forward {
+        selection.move_cursor(CursorMove::WordForward, &rows, 1);
+        assert_eq!(at(&selection), expected);
+    }
+    // b retraces the same stops back to the first column.
+    let backward = [
+        (1, 0),
+        (0, 14),
+        (0, 13),
+        (0, 9),
+        (0, 4),
+        (0, 3),
+        (0, 0),
+        (0, 0),
+    ];
+    for expected in backward {
+        selection.move_cursor(CursorMove::WordBackward, &rows, 1);
+        assert_eq!(at(&selection), expected);
+    }
+    // b from inside a word goes to its start, w from inside skips to the next.
+    selection.move_cursor(CursorMove::Right, &rows, 1);
+    selection.move_cursor(CursorMove::WordBackward, &rows, 1);
+    assert_eq!(at(&selection), (0, 0));
+    selection.move_cursor(CursorMove::Right, &rows, 1);
+    selection.move_cursor(CursorMove::WordForward, &rows, 1);
+    assert_eq!(at(&selection), (0, 3));
+}
+
+#[test]
+fn linewise_visual_selects_whole_logical_lines_with_trailing_newline() {
+    // Width 5 soft-wraps "abcdefgh" into "abcde" + "fgh".
+    let messages = messages("abcdefgh\nij\nkl");
+    let rows = render::rows(&messages, 5);
+    assert_eq!(rows.len(), 4);
+    let mut selection = Selection::default();
+    selection.enter_keyboard(1); // on the soft-wrapped tail "fgh"
+    selection.move_cursor(CursorMove::Right, &rows, 1);
+    selection.toggle_visual(VisualMode::Line, &rows);
+    assert_eq!(selection.visual_mode(), Some(VisualMode::Line));
+    // The whole logical line, soft wrap rejoined, newline included.
+    assert_eq!(selection.text(&rows).as_deref(), Some("abcdefgh\n"));
+    selection.move_cursor(CursorMove::Down, &rows, 1);
+    assert_eq!(selection.text(&rows).as_deref(), Some("abcdefgh\nij\n"));
+    let mut lines = render::wrapped_lines(&messages, 5);
+    selection.highlight(&mut lines, 0);
+    let highlighted_rows = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.bg == Some(Color::Rgb(55, 85, 120)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(highlighted_rows, [true, true, true, false]);
+    // v switches to character-wise from the same anchor; V again leaves visual.
+    selection.toggle_visual(VisualMode::Char, &rows);
+    assert_eq!(selection.visual_mode(), Some(VisualMode::Char));
+    assert_eq!(selection.text(&rows).as_deref(), Some("gh\nij"));
+    selection.toggle_visual(VisualMode::Line, &rows);
+    assert_eq!(selection.text(&rows).as_deref(), Some("abcdefgh\nij\n"));
+    selection.toggle_visual(VisualMode::Line, &rows);
+    assert_eq!(selection.visual_mode(), None);
+    assert_eq!(selection.text(&rows), None);
+    // The last row has no following newline in the transcript.
+    selection.move_cursor(CursorMove::Bottom, &rows, 1);
+    selection.toggle_visual(VisualMode::Line, &rows);
+    assert_eq!(selection.text(&rows).as_deref(), Some("kl\n"));
+}
+
+#[test]
+fn vim_character_classes_match_utf_class() {
+    assert_eq!(vim_class(' '), 0);
+    assert_eq!(vim_class('\u{3000}'), 0); // ideographic space
+    assert_eq!(vim_class('a'), 2);
+    assert_eq!(vim_class('_'), 2);
+    assert_eq!(vim_class('é'), 2); // 192-255 are keyword by default
+    assert_eq!(vim_class('.'), 1);
+    assert_eq!(vim_class('«'), 1); // 0xab, below 192
+    assert_eq!(vim_class('—'), 1); // general punctuation
+    assert_eq!(vim_class('、'), 1); // ideographic comma
+    assert_eq!(vim_class('界'), 0x4e00);
+    assert_eq!(vim_class('あ'), 0x3040);
+    assert_eq!(vim_class('ア'), 0x30a0);
+    assert_eq!(vim_class('한'), 0xac00);
+    assert_eq!(vim_class('🙂'), 3);
+    assert_eq!(vim_class('Ж'), 2); // Cyrillic: plain word character
 }

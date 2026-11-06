@@ -21,9 +21,9 @@
 
 - [x] Add an explicit keyboard-driven selection mode for selecting transcript text without a mouse.
 - [x] Define discoverable controls to enter and exit the mode, move a transcript cursor, start or extend a selection, and yank the selected text. (`Ctrl+S` or `/select` in the Commands popup; the activity line shows `SELECT`/`VISUAL` with key hints.)
-- [x] Support vi-like navigation (`h`/`j`/`k`/`l`), visual selection (`v`), yank (`y`), and Escape to leave selection mode. Final bindings: `h`/`j`/`k`/`l` and arrows, `0`/`$`, `g`/`G`, Page Up/Down, `v`, `y` or `Ctrl+Y`, `Esc` or `Ctrl+C`. Not bound: `w`/`b`, counts, `V` line-wise, search.
+- [x] Support vi-like navigation (`h`/`j`/`k`/`l`), visual selection (`v`), yank (`y`), and Escape to leave selection mode. Final bindings: `h`/`j`/`k`/`l` and arrows, `w`/`b`, `0`/`$`, `g`/`G`, Page Up/Down, `v`/`V`, `y` or `Ctrl+Y`, `Esc` or `Ctrl+C`. Not bound: counts, `e`/`W`/`B`, search.
 - [x] Scroll the transcript as the selection cursor moves outside the visible viewport, preserving its anchor and highlight.
 - [x] Keep selection-mode keys separate from draft editing and preserve the draft when entering or leaving the mode. (Selection mode is matched before approval and editing keys in `apply_terminal_event`.)
 - [x] Reuse the shared clipboard adapters and existing copy feedback, retaining the selection if copying fails. (`y` calls the same `copy_selection`; the highlight is kept after yank so `Ctrl+Y` retries.)
 - [x] Verify keyboard-only selection, scrolling, yank, and cancellation, including Unicode and soft-wrapped text. (`keyboard_cursor_snaps_to_graphemes_and_visual_range_yanks_exact_text`, `keyboard_selection_mode_moves_selects_yanks_and_preserves_the_draft`.)
-- [ ] Consider `w`/`b` word motions and `V` line-wise visual once the basic mode has been used for a while.
+- [x] `w`/`b` word motions and `V` line-wise visual, matching Vim/Neovim: word classes follow `utf_class` (keyword per default `iskeyword`, punctuation, emoji, one class per CJK script block), `V` selects whole logical lines with soft wraps rejoined and a trailing newline on yank, `v`/`V` switch kinds and repeat to leave.

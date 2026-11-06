@@ -41,6 +41,140 @@ pub(super) enum CursorMove {
     Bottom,
     PageOlder,
     PageNewer,
+    /// `w`: start of the next word, crossing row ends like vi.
+    WordForward,
+    /// `b`: start of the current or previous word.
+    WordBackward,
+}
+
+/// `v` selects cells; `V` selects whole logical lines, soft wraps included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VisualMode {
+    Char,
+    Line,
+}
+
+/// Vim's character class for word motions (`utf_class` in `mbyte.c`, with the
+/// default `iskeyword=@,48-57,_,192-255`): 0 blank, 1 punctuation, 2 keyword,
+/// 3 emoji, and one class per script block for CJK, Hiragana, Katakana and
+/// Hangul so each script is its own word. A word is a run of one class.
+type CharClass = u32;
+const BLANK: CharClass = 0;
+
+fn class_of(grapheme: &str) -> CharClass {
+    let Some(first) = grapheme.chars().next() else {
+        return BLANK;
+    };
+    vim_class(first)
+}
+
+fn vim_class(ch: char) -> CharClass {
+    let code = ch as u32;
+    if code < 0x100 {
+        return if ch == ' ' || ch == '\t' || ch == '\0' || ch == '\u{a0}' {
+            BLANK
+        } else if ch.is_ascii_alphanumeric() || ch == '_' || (0xc0..=0xff).contains(&code) {
+            2
+        } else {
+            1
+        };
+    }
+    if is_emoji(code) {
+        return 3;
+    }
+    // Vim's class table: (first, last, class). Sorted by `first`.
+    const CLASSES: &[(u32, u32, CharClass)] = &[
+        (0x037e, 0x037e, 1),
+        (0x0387, 0x0387, 1),
+        (0x055a, 0x055f, 1),
+        (0x0589, 0x0589, 1),
+        (0x05be, 0x05be, 1),
+        (0x05c0, 0x05c0, 1),
+        (0x05c3, 0x05c3, 1),
+        (0x05f3, 0x05f4, 1),
+        (0x060c, 0x060c, 1),
+        (0x061b, 0x061b, 1),
+        (0x061f, 0x061f, 1),
+        (0x066a, 0x066d, 1),
+        (0x06d4, 0x06d4, 1),
+        (0x0700, 0x070d, 1),
+        (0x0964, 0x0965, 1),
+        (0x0970, 0x0970, 1),
+        (0x0df4, 0x0df4, 1),
+        (0x0e4f, 0x0e4f, 1),
+        (0x0e5a, 0x0e5b, 1),
+        (0x0f04, 0x0f12, 1),
+        (0x0f3a, 0x0f3d, 1),
+        (0x0f85, 0x0f85, 1),
+        (0x104a, 0x104f, 1),
+        (0x10fb, 0x10fb, 1),
+        (0x1361, 0x1368, 1),
+        (0x166d, 0x166e, 1),
+        (0x1680, 0x1680, 0),
+        (0x169b, 0x169c, 1),
+        (0x16eb, 0x16ed, 1),
+        (0x1735, 0x1736, 1),
+        (0x17d4, 0x17dc, 1),
+        (0x1800, 0x180a, 1),
+        (0x2000, 0x200b, 0),
+        (0x200c, 0x2027, 1),
+        (0x2028, 0x2029, 0),
+        (0x202a, 0x202e, 1),
+        (0x202f, 0x202f, 0),
+        (0x2030, 0x205e, 1),
+        (0x205f, 0x205f, 0),
+        (0x2060, 0x206f, 1),
+        (0x2070, 0x207f, 0x2070),
+        (0x2080, 0x2094, 0x2080),
+        (0x20a0, 0x27ff, 1),
+        (0x2800, 0x28ff, 0x2800),
+        (0x2900, 0x2998, 1),
+        (0x29d8, 0x29db, 1),
+        (0x29fc, 0x29fd, 1),
+        (0x2e00, 0x2e7f, 1),
+        (0x3000, 0x3000, 0),
+        (0x3001, 0x3020, 1),
+        (0x3030, 0x3030, 1),
+        (0x303d, 0x303d, 1),
+        (0x3040, 0x309f, 0x3040),
+        (0x30a0, 0x30ff, 0x30a0),
+        (0x3300, 0x9fff, 0x4e00),
+        (0xac00, 0xd7a3, 0xac00),
+        (0xf900, 0xfaff, 0x4e00),
+        (0xfd3e, 0xfd3f, 1),
+        (0xfe30, 0xfe6b, 1),
+        (0xff00, 0xff0f, 1),
+        (0xff1a, 0xff20, 1),
+        (0xff3b, 0xff40, 1),
+        (0xff5b, 0xff65, 1),
+        (0x1d000, 0x1d24f, 1),
+        (0x1d400, 0x1d7ff, 1),
+        (0x1f000, 0x1f2ff, 1),
+        (0x1f300, 0x1f9ff, 1),
+        (0x20000, 0x2a6df, 0x4e00),
+        (0x2a700, 0x2b73f, 0x4e00),
+        (0x2b740, 0x2b81f, 0x4e00),
+        (0x2f800, 0x2fa1f, 0x4e00),
+    ];
+    let index = CLASSES.partition_point(|&(first, _, _)| first <= code);
+    match index.checked_sub(1).map(|i| CLASSES[i]) {
+        Some((_, last, class)) if code <= last => class,
+        // Everything else is a word character, as in Vim.
+        _ => 2,
+    }
+}
+
+/// Vim's `emoji_all` table, reduced to the blocks that are entirely emoji.
+fn is_emoji(code: u32) -> bool {
+    matches!(
+        code,
+        0x1f1e6..=0x1f1ff
+            | 0x1f300..=0x1f64f
+            | 0x1f680..=0x1f6ff
+            | 0x1f900..=0x1f9ff
+            | 0x1fa70..=0x1faff
+            | 0x2600..=0x27bf
+    )
 }
 
 #[derive(Default)]
@@ -56,7 +190,10 @@ pub(super) struct Selection {
     cursor: Option<Cell>,
     /// Column the cursor wants on vertical moves, as in vi.
     goal_column: usize,
-    visual: bool,
+    visual: Option<VisualMode>,
+    /// Row span of the logical lines a line-wise range covers, kept current
+    /// on every cursor move so highlighting needs no row data.
+    line_span: Option<(usize, usize)>,
 }
 
 impl Selection {
@@ -136,7 +273,11 @@ impl Selection {
     }
 
     pub(super) fn visual_active(&self) -> bool {
-        self.cursor.is_some() && self.visual
+        self.cursor.is_some() && self.visual.is_some()
+    }
+
+    pub(super) fn visual_mode(&self) -> Option<VisualMode> {
+        self.cursor.and(self.visual)
     }
 
     pub(super) fn cursor(&self) -> Option<Cell> {
@@ -155,7 +296,7 @@ impl Selection {
         }
         let row = cursor.row.min(rows.len() - 1);
         let column = snap(&rows[row].text, cursor.column);
-        self.place_cursor(Cell { row, column });
+        self.place_cursor(Cell { row, column }, rows);
     }
 
     pub(super) fn move_cursor(
@@ -208,47 +349,69 @@ impl Selection {
             CursorMove::PageNewer => vertical((cursor.row + page.max(1)).min(last_row)),
             CursorMove::Top => vertical(0),
             CursorMove::Bottom => vertical(last_row),
+            CursorMove::WordForward => word_forward(cursor, rows),
+            CursorMove::WordBackward => word_backward(cursor, rows),
         };
-        if matches!(
+        if !matches!(
             movement,
-            CursorMove::Left | CursorMove::Right | CursorMove::LineStart | CursorMove::LineEnd
+            CursorMove::Up
+                | CursorMove::Down
+                | CursorMove::PageOlder
+                | CursorMove::PageNewer
+                | CursorMove::Top
+                | CursorMove::Bottom
         ) {
             self.goal_column = next.column;
         }
-        self.place_cursor(next);
+        self.place_cursor(next, rows);
     }
 
-    fn place_cursor(&mut self, cell: Cell) {
+    fn place_cursor(&mut self, cell: Cell, rows: &[TranscriptRow]) {
         self.cursor = Some(cell);
-        if self.visual {
+        if self.visual.is_some() {
             self.focus = Some(cell);
             self.moved = true;
+            self.update_line_span(rows);
         }
     }
 
-    /// `v`: starts a visual range at the cursor, or drops the range again.
-    pub(super) fn toggle_visual(&mut self) {
+    /// `v` or `V`: starts a visual range at the cursor, switches between the
+    /// two kinds, or, for the kind already active, drops the range again.
+    pub(super) fn toggle_visual(&mut self, mode: VisualMode, rows: &[TranscriptRow]) {
         let Some(cursor) = self.cursor else {
             return;
         };
-        if self.visual {
-            self.visual = false;
+        if self.visual == Some(mode) {
+            self.visual = None;
             self.anchor = None;
             self.focus = None;
             self.moved = false;
-        } else {
-            self.visual = true;
+            self.line_span = None;
+            return;
+        }
+        if self.visual.is_none() {
             self.anchor = Some(cursor);
             self.focus = Some(cursor);
             self.moved = true;
         }
+        self.visual = Some(mode);
+        self.update_line_span(rows);
+    }
+
+    fn update_line_span(&mut self, rows: &[TranscriptRow]) {
+        self.line_span = match (self.visual, self.range()) {
+            (Some(VisualMode::Line), Some((start, end))) => {
+                Some((line_start(rows, start.row), line_end(rows, end.row)))
+            }
+            _ => None,
+        };
     }
 
     /// Leaves keyboard selection but keeps the highlighted range, so a
     /// yank that fails can be retried with Ctrl+Y and Esc still clears it.
     pub(super) fn leave_keyboard(&mut self) {
         self.cursor = None;
-        self.visual = false;
+        self.visual = None;
         self.goal_column = 0;
     }
 
@@ -262,6 +425,9 @@ impl Selection {
     }
 
     fn columns(&self, row: usize) -> Option<(usize, usize)> {
+        if let Some((first, last)) = self.line_span {
+            return (first..=last).contains(&row).then_some((0, usize::MAX));
+        }
         let (start, end) = self.range()?;
         if !(start.row..=end.row).contains(&row) {
             return None;
@@ -278,8 +444,9 @@ impl Selection {
 
     pub(super) fn text(&self, rows: &[TranscriptRow]) -> Option<String> {
         let (start, end) = self.range()?;
+        let (first, last) = self.line_span.unwrap_or((start.row, end.row));
         let mut result = String::new();
-        for (index, row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
+        for (index, row) in rows.iter().enumerate().take(last + 1).skip(first) {
             let (left, right) = self.columns(index)?;
             let mut column = 0;
             for grapheme in row.text.graphemes(true) {
@@ -290,7 +457,8 @@ impl Selection {
                 column = next;
             }
             // Rejoin soft wraps; only original newlines and message gaps survive.
-            if index < end.row && row.break_after {
+            // A line-wise yank ends with its newline, as in vi.
+            if (index < last || self.line_span.is_some()) && row.break_after {
                 result.push('\n');
             }
         }
@@ -329,6 +497,107 @@ impl Selection {
             }
             line.spans = spans;
         }
+    }
+}
+
+/// First row of the logical line containing `row`: soft wraps are rejoined.
+fn line_start(rows: &[TranscriptRow], row: usize) -> usize {
+    (0..row)
+        .rev()
+        .find(|&previous| rows[previous].break_after)
+        .map_or(0, |previous| previous + 1)
+}
+
+/// Last row of the logical line containing `row`.
+fn line_end(rows: &[TranscriptRow], row: usize) -> usize {
+    (row..rows.len())
+        .find(|&next| rows[next].break_after)
+        .unwrap_or(rows.len().saturating_sub(1))
+}
+
+/// Graphemes of a row with their start columns and classes.
+fn classified(text: &str) -> Vec<(usize, CharClass)> {
+    let mut column = 0;
+    text.graphemes(true)
+        .map(|grapheme| {
+            let start = column;
+            column += grapheme.width();
+            (start, class_of(grapheme))
+        })
+        .collect()
+}
+
+/// vi `w`: skip the rest of the current word, then blanks, crossing rows.
+/// An empty row counts as a word; the last row's end is the final stop.
+fn word_forward(cursor: Cell, rows: &[TranscriptRow]) -> Cell {
+    let cells = classified(&rows[cursor.row].text);
+    let mut index = cells
+        .iter()
+        .position(|&(start, _)| start >= cursor.column)
+        .unwrap_or(cells.len());
+    if let Some(&(_, class)) = cells.get(index) {
+        if class != BLANK {
+            while cells.get(index).is_some_and(|&(_, next)| next == class) {
+                index += 1;
+            }
+        }
+    }
+    while cells.get(index).is_some_and(|&(_, class)| class == BLANK) {
+        index += 1;
+    }
+    if let Some(&(start, _)) = cells.get(index) {
+        return Cell {
+            row: cursor.row,
+            column: start,
+        };
+    }
+    // Continue on following rows: the first non-blank grapheme, or an empty row.
+    for (row, next) in rows.iter().enumerate().skip(cursor.row + 1) {
+        let cells = classified(&next.text);
+        if cells.is_empty() {
+            return Cell { row, column: 0 };
+        }
+        if let Some(&(start, _)) = cells.iter().find(|&&(_, class)| class != BLANK) {
+            return Cell { row, column: start };
+        }
+    }
+    Cell {
+        row: cursor.row,
+        column: cells.last().map_or(0, |&(start, _)| start),
+    }
+}
+
+/// vi `b`: step back over blanks, then to the start of that word, crossing rows.
+fn word_backward(cursor: Cell, rows: &[TranscriptRow]) -> Cell {
+    let mut row = cursor.row;
+    let mut cells = classified(&rows[row].text);
+    // Index of the grapheme before the cursor, if any on this row.
+    let mut index = cells.iter().rposition(|&(start, _)| start < cursor.column);
+    loop {
+        // Skip blanks backward, moving to earlier rows as needed.
+        while index.is_some_and(|i| cells[i].1 == BLANK) {
+            index = index.and_then(|i| i.checked_sub(1));
+        }
+        if let Some(i) = index {
+            let class = cells[i].1;
+            let mut first = i;
+            while first > 0 && cells[first - 1].1 == class {
+                first -= 1;
+            }
+            return Cell {
+                row,
+                column: cells[first].0,
+            };
+        }
+        if row == 0 {
+            return Cell { row: 0, column: 0 };
+        }
+        row -= 1;
+        cells = classified(&rows[row].text);
+        if cells.is_empty() {
+            return Cell { row, column: 0 };
+        }
+        index = Some(cells.len() - 1);
     }
 }
 
