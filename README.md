@@ -2,60 +2,65 @@
 
 `ahi` is a Rust library and command-line tool with two jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration files (`.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model call read-only workspace tools only where an `ahi.actions.yaml` rule approves them.
 
-Ian floated "agent hook interface" as an expansion. That expansion is not confirmed. The package, the library target, and the binary are all named `ahi`.
-
-The design, the compatibility matrix, and the open decisions are in [docs/SPEC.md](docs/SPEC.md). The release script is described in [docs/release.md](docs/release.md) and is not run by ordinary development.
-
-A proposal to grow ahi from the hook runner into a public agent runtime and coordinator is in [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md). That document is for review. It is not the design of record, and it does not change the v0.1 through v0.4 contract.
-
 ## Installation
 
-### Linux
-
-Prebuilt, statically linked archives are available for **x86_64** and **aarch64** on the [latest release](https://github.com/iancleary/ahi/releases/latest). Cargo is not required.
-
-1. Download the matching `ahi-<version>-linux-<architecture>.tar.gz` and `ahi-<version>-sha256sums.txt`.
-2. [Verify the archive's checksum and GitHub build-provenance attestation](#release-assets) before extracting it.
-3. Extract the archive and install `ahi` in a directory on your `PATH`, for example:
-
-   ```sh
-   tar -xzf ahi-0.3.3-linux-x86_64.tar.gz
-   mkdir -p "$HOME/.local/bin"
-   install -m 755 ahi "$HOME/.local/bin/ahi"
-   ahi --version
-   ```
-
-Ensure `$HOME/.local/bin` is on your `PATH`. Substitute `aarch64` for `x86_64` on ARM64 Linux, and the downloaded version for `0.3.3`.
-
-For subsequent releases, run `ahi update`. It requires the [GitHub CLI (`gh`)](https://cli.github.com/) to verify attestations, but does not require Cargo. If upgrading from v0.3.1, install the new archive manually once: that version's updater refuses the newer checksum manifest.
-
-### Windows
-
-A prebuilt **x86_64** archive is available on the [latest release](https://github.com/iancleary/ahi/releases/latest). Cargo is not required.
-
-1. Download `ahi-<version>-windows-x86_64.tar.gz` and `ahi-<version>-sha256sums.txt`.
-2. [Verify the archive's checksum and GitHub build-provenance attestation](#release-assets) before extracting it. In PowerShell, `Get-FileHash <archive> -Algorithm SHA256` computes the checksum to compare with the archive's entry in the sums file; use `gh attestation verify` for provenance verification.
-3. Extract the archive in PowerShell:
-
-   ```powershell
-   tar -xzf ahi-0.3.3-windows-x86_64.tar.gz
-   .\ahi.exe --version
-   ```
-
-   Substitute the downloaded version for `0.3.3`. Move `ahi.exe` into a directory on your user `PATH` to run `ahi` from any terminal. The binary is unsigned; Windows SmartScreen may prompt on first run.
-
-For subsequent releases, run `ahi update`. It requires the [GitHub CLI (`gh`)](https://cli.github.com/) to verify attestations, but does not require Cargo.
-
-### macOS
-
-Install Rust and Cargo using [rustup](https://rustup.rs/), then install the latest published version:
+Every platform can install from crates.io with Rust 1.88 or newer from [rustup](https://rustup.rs/):
 
 ```sh
 cargo install ahi --locked
 ahi --version
 ```
 
-Run `cargo install ahi --locked` again to update. Rust 1.88 or newer is required. Prebuilt macOS archives and `ahi update` support are deferred while GitHub-hosted ARM64 runners lack capacity; `ahi update` currently refuses macOS with a Cargo installation pointer. See the [restoration checklist](docs/macos-update-follow-up.md).
+Run the same command again to update. Linux and Windows can skip Cargo and use the prebuilt, attested archives below; macOS cannot yet.
+
+### Linux
+
+Statically linked archives for **x86_64** and **aarch64** are on the [latest release](https://github.com/iancleary/ahi/releases/latest).
+
+1. Download `ahi-<version>-linux-<architecture>.tar.gz` and `ahi-<version>-sha256sums.txt`.
+2. [Verify the checksum and the GitHub build-provenance attestation](#release-assets) before extracting.
+3. Extract and install `ahi` somewhere on your `PATH`:
+
+   ```sh
+   VERSION=0.6.0 ARCH=x86_64   # or aarch64
+   tar -xzf "ahi-$VERSION-linux-$ARCH.tar.gz"
+   install -D -m 755 ahi "$HOME/.local/bin/ahi"
+   ahi --version
+   ```
+
+Afterwards `ahi update` replaces the binary with the next release's archive, verifying the checksum file and the archive with the [GitHub CLI (`gh`)](https://cli.github.com/) before touching anything. It does not need Cargo.
+
+### Windows
+
+An **x86_64** archive is on the [latest release](https://github.com/iancleary/ahi/releases/latest).
+
+1. Download `ahi-<version>-windows-x86_64.tar.gz` and `ahi-<version>-sha256sums.txt`.
+2. [Verify the checksum and attestation](#release-assets). In PowerShell, `Get-FileHash <archive> -Algorithm SHA256` gives the checksum to compare with the sums file, and `gh attestation verify` checks provenance.
+3. Extract in PowerShell and put `ahi.exe` on your user `PATH`:
+
+   ```powershell
+   tar -xzf ahi-0.6.0-windows-x86_64.tar.gz
+   .\ahi.exe --version
+   ```
+
+   The binary is unsigned, so SmartScreen may prompt on first run.
+
+`ahi update` works here too and requires `gh`.
+
+### macOS
+
+Use `cargo install ahi --locked`, above. Prebuilt macOS archives and `ahi update` are deferred while GitHub-hosted ARM64 runners lack capacity; `ahi update` on macOS prints that pointer and makes no network request. See the [restoration checklist](docs/macos-update-follow-up.md).
+
+### First run
+
+```sh
+ahi doctor          # versions, the config, data, state and cache directories, and any mode warnings
+ahi login           # sign in to OpenAI in the browser (optional)
+ahi tui             # register a gateway with /gateway, curate models, chat
+ahi run --all-files # in a repository with .pre-commit-config.yaml
+```
+
+Where ahi keeps `models.json`, the credential, and its logs is in [Directories](#directories). Installs older than 0.6.0 kept everything in `~/.local/share/ahi`; that section says what to move.
 
 ## Build
 
@@ -91,6 +96,8 @@ Three toolchain numbers are decoupled on purpose.
 CI and the release asset workflows build with a pinned recent stable. Each workflow installs it with the runners' preinstalled rustup and no third-party action, and selects it with a top-level `RUSTUP_TOOLCHAIN`. Local development floats to the latest stable through `rust-toolchain.toml` (`channel = "stable"`). `RUSTUP_TOOLCHAIN` outranks `rust-toolchain.toml` in rustup's precedence, which keeps CI pinned while local floats. Bump the pin and the install steps together when adopting a new stable.
 
 Because ordinary CI builds a recent stable, the MSRV is exercised in exactly one place: the publish workflow checks the declared floor with `cargo +1.88.0 check --all-features --locked` immediately before `cargo publish`. Bump the MSRV only when a security-forced dependency floor or ahi's own code requires it, never because a new stable shipped. A bump is one commit: change `rust-version` in `Cargo.toml`, verify the new floor builds, extend the chain in `docs/SPEC.md`, and record the raise in `CHANGELOG.md` with the next version.
+
+## Directories
 
 ahi keeps its own files in the XDG base directories, each with an `ahi` child:
 
@@ -243,7 +250,7 @@ exec ahi run --fix
 
 ## Release assets
 
-A published GitHub release for tag `v<version>` carries four assets. `<version>` is the SemVer string without the leading `v` (tag `v0.1.1` uses `0.1.1`).
+A published GitHub release for tag `v<version>` carries four assets. `<version>` is the SemVer string without the leading `v` (tag `v0.6.0` uses `0.6.0`).
 
 - `ahi-<version>-linux-x86_64.tar.gz`
 - `ahi-<version>-linux-aarch64.tar.gz`
@@ -252,25 +259,15 @@ A published GitHub release for tag `v<version>` carries four assets. `<version>`
 
 Each archive contains one `ahi` executable at the archive root (`ahi.exe` on Windows) and no other members. The Linux archives are statically linked and bit-reproducible on their runner; the Windows archive is built natively and is not promised to be bit-reproducible. On macOS use `cargo install ahi` until [native updates are restored](docs/macos-update-follow-up.md). The sums file is `sha256sum` output for those three archives in the order listed above.
 
-From the directory that contains the downloaded files, for release `0.1.1`:
+From the directory that contains the downloaded files, for release `0.6.0`:
 
 ```sh
-sha256sum --check ahi-0.1.1-sha256sums.txt
-gh attestation verify ahi-0.1.1-linux-x86_64.tar.gz --repo iancleary/ahi
-gh attestation verify ahi-0.1.1-linux-aarch64.tar.gz --repo iancleary/ahi
-gh attestation verify ahi-0.1.1-windows-x86_64.tar.gz --repo iancleary/ahi
-gh attestation verify ahi-0.1.1-sha256sums.txt --repo iancleary/ahi
+sha256sum --check --ignore-missing ahi-0.6.0-sha256sums.txt
+gh attestation verify ahi-0.6.0-linux-x86_64.tar.gz --repo iancleary/ahi
+gh attestation verify ahi-0.6.0-sha256sums.txt --repo iancleary/ahi
 ```
 
-`sha256sum --check` uses the filenames recorded in the sums file, so the archives have to sit beside that file. Replace `0.1.1` with the release that was downloaded.
-
-v0.1.0 and v0.1.1 were published before this workflow existed, so they have no assets until the workflow is dispatched. After `.github/workflows/release_binary_assets.yml` is on `main`:
-
-```sh
-gh workflow run release_binary_assets.yml --repo iancleary/ahi --ref main -f release_tag=v0.1.1
-```
-
-The same command with `release_tag=v0.1.0` backfills that release. Dispatch from `main`. The tag that is built does not need to contain the workflow file. The workflow refuses a ref that is not a tag, and it refuses to replace an asset whose bytes differ. The next release published after the workflow is on `main` receives the three assets from the `release` trigger, without a manual run.
+`sha256sum --check` uses the filenames recorded in the sums file, so the archive has to sit beside that file; `--ignore-missing` skips the archives you did not download. Verify each archive you use the same way, and replace `0.6.0` with the release that was downloaded. Backfilling assets onto an older release is described in [docs/release.md](docs/release.md).
 
 Archive layout, runners, and the reproducibility flags are in [docs/release.md](docs/release.md).
 
