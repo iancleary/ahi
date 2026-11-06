@@ -100,7 +100,7 @@ No live inference requests, credential changes, installations, commits, pushes, 
 
 ## Implementation and verification record
 
-[`src/harness/metadata.rs`](../src/harness/metadata.rs) owns the typed model and overlays; [`src/harness.rs`](../src/harness.rs) owns normalization, provider selection, caching and effective metadata resolution. [`src/harness/gateway.rs`](../src/harness/gateway.rs) retains the existing registration guards. [`src/harness/curation.rs`](../src/harness/curation.rs) preserves rich local model entries rather than reconstructing them as IDs on each save. [`src/chat/backend/http.rs`](../src/chat/backend/http.rs) consumes the resolved metadata, and [`src/tui.rs`](../src/tui.rs) shows the selected model's detail summary.
+[`src/harness/metadata.rs`](../src/harness/metadata.rs) owns the typed model and overlays; [`src/harness/mod.rs`](../src/harness/mod.rs) owns normalization, provider selection, caching and effective metadata resolution. [`src/harness/gateway.rs`](../src/harness/gateway.rs) retains the existing registration guards. [`src/harness/curation.rs`](../src/harness/curation.rs) preserves rich local model entries rather than reconstructing them as IDs on each save. [`src/chat/backend/http.rs`](../src/chat/backend/http.rs) consumes the resolved metadata, and [`src/tui/mod.rs`](../src/tui/mod.rs) shows the selected model's detail summary.
 
 The cache retains ordered `models` for membership and a `metadata` map for lookup. This is an index plus attached details, not a second model-selection list. An unavailable or old catalog does not populate curated models. Explicit local values overlay cached values field by field, including individual compatibility and price components.
 

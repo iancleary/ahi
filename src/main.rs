@@ -3,15 +3,16 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ahi::audit::AuditEvent;
-use ahi::check::{all_checks, builtin_by_id};
-use ahi::config::discover_config;
-use ahi::git::repo_root;
 use ahi::harness;
-use ahi::output::render;
-use ahi::runner::{self, Selection};
-use ahi::store::{self, Store};
-use ahi::{config, migrate, policy, VERSION};
+use ahi::hooks::audit::AuditEvent;
+use ahi::hooks::check::{all_checks, builtin_by_id};
+use ahi::hooks::config::discover_config;
+use ahi::hooks::git::repo_root;
+use ahi::hooks::output::render;
+use ahi::hooks::runner::{self, Selection};
+use ahi::hooks::store::{self, Store};
+use ahi::hooks::{config, migrate, policy};
+use ahi::VERSION;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -298,15 +299,15 @@ fn run(cli: &Cli, args: &RunArgs) -> ExitCode {
             runner::Outcome::Failed => "failed",
             runner::Outcome::Skipped => "skipped",
         };
-        let local_env: Vec<ahi::audit::HookEnv<'_>> = report
+        let local_env: Vec<ahi::hooks::audit::HookEnv<'_>> = report
             .local_env
             .iter()
-            .map(|item| ahi::audit::HookEnv {
+            .map(|item| ahi::hooks::audit::HookEnv {
                 hook: &item.hook,
                 names: &item.names,
             })
             .collect();
-        if let Err(err) = ahi::audit::append(
+        if let Err(err) = ahi::hooks::audit::append(
             store.root(),
             &AuditEvent {
                 command: "run",
@@ -413,7 +414,7 @@ fn explain(id: &str) -> ExitCode {
     ExitCode::from(0)
 }
 
-fn print_local_env(policy: Option<&ahi::policy::Policy>) {
+fn print_local_env(policy: Option<&ahi::hooks::policy::Policy>) {
     println!(
         "local hook environment (names only, if set): {}",
         ahi::base_env_names().join(", ")
@@ -454,7 +455,7 @@ fn doctor(
     state: Option<&std::path::Path>,
 ) -> ExitCode {
     println!("ahi {VERSION}");
-    match ahi::git::git_version() {
+    match ahi::hooks::git::git_version() {
         Ok(version) => println!("git: {version}"),
         Err(err) => println!("git: {err}"),
     }

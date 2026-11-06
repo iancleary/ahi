@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::check::builtin_by_id;
 use crate::error::{Error, Result};
+use crate::hooks::check::builtin_by_id;
 use crate::yaml_safe::check_config_yaml;
 use crate::PRE_COMMIT_SCHEMA;
 
@@ -529,7 +529,7 @@ fn materialize_hook(
         .chain(types_or.iter())
         .chain(exclude_types.iter())
     {
-        if !crate::identify::is_known_tag(tag) {
+        if !crate::hooks::identify::is_known_tag(tag) {
             return Err(Error::new(format!(
                 "{origin}: hook `{}` type tag `{tag}` is not recognized",
                 raw.id
@@ -605,7 +605,7 @@ fn materialize_manifest(raw: RawManifestHook, origin: &str) -> Result<ManifestHo
         .chain(raw.types_or.iter().flatten())
         .chain(raw.exclude_types.iter().flatten())
     {
-        if !crate::identify::is_known_tag(tag) {
+        if !crate::hooks::identify::is_known_tag(tag) {
             return Err(Error::new(format!(
                 "{origin}: manifest hook `{}` type tag `{tag}` is not recognized",
                 raw.id

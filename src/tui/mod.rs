@@ -2,6 +2,10 @@
 //!
 //! Enter saves a curated selection and opens chat.
 //! Non-terminal invocation prints the local registry without opening chat.
+pub(crate) mod commands;
+pub(crate) mod gateway;
+pub(crate) mod login;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -18,9 +22,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::chat;
 use crate::chat::input::{EditorKey, InputEditor};
-use crate::commands::{self, CommandContext, CommandMenu, CommonAction, PickerOutcome};
 use crate::error::{Error, Result};
 use crate::harness::{self, Registry};
+use commands::{CommandContext, CommandMenu, CommonAction, PickerOutcome};
 
 pub struct RunOutput {
     pub text: String,
@@ -737,7 +741,7 @@ fn pick_loop(
                     if commands::common_action(&command) == Some(CommonAction::Login) {
                         disable_command_paste()?;
                         ratatui::restore();
-                        let result = crate::login::run(state);
+                        let result = login::run(state);
                         *terminal = ratatui::try_init()
                             .map_err(|error| Error::new(format!("terminal resume: {error}")))?;
                         enable_command_paste()?;
@@ -760,7 +764,7 @@ fn pick_loop(
                     } else if commands::common_action(&command) == Some(CommonAction::Gateway) {
                         disable_command_paste()?;
                         ratatui::restore();
-                        let result = crate::gateway::run(state);
+                        let result = gateway::run(state);
                         *terminal = ratatui::try_init()
                             .map_err(|error| Error::new(format!("terminal resume: {error}")))?;
                         enable_command_paste()?;

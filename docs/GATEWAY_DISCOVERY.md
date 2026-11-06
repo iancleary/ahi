@@ -73,11 +73,11 @@ The discovered IDs and their typed metadata go into `<state>/catalogs/lab.json`,
 
 ## Ownership and failure behavior
 
-- [`src/gateway.rs`](../src/gateway.rs) owns the URL form, background fetch, preview, and confirmation. It reuses the existing Unicode-aware input editor. The fetch worker returns a candidate and never writes state, so cancelling a pending request cannot register a gateway later. The in-flight request can continue until its network limits are reached; cancellation does not promise immediate network termination.
-- [`src/harness/gateway.rs`](../src/harness/gateway.rs) validates the entered URL and registers a validated candidate. [`src/harness.rs`](../src/harness.rs) supplies the same catalog decoder and HTTP client used by existing gateway refreshes.
+- [`src/tui/gateway.rs`](../src/tui/gateway.rs) owns the URL form, background fetch, preview, and confirmation. It reuses the existing Unicode-aware input editor. The fetch worker returns a candidate and never writes state, so cancelling a pending request cannot register a gateway later. The in-flight request can continue until its network limits are reached; cancellation does not promise immediate network termination.
+- [`src/harness/gateway.rs`](../src/harness/gateway.rs) validates the entered URL and registers a validated candidate. [`src/harness/mod.rs`](../src/harness/mod.rs) supplies the same catalog decoder and HTTP client used by existing gateway refreshes.
 - [`src/harness/curation.rs`](../src/harness/curation.rs) performs configuration saves with snapshot conflict checks, an exclusive temporary file, validation, and atomic replacement.
-- [`src/commands.rs`](../src/commands.rs) owns the context-aware command registry, common actions, shared popup, and explicit picker outcomes. All three screens use it; chat-specific controls are not offered in model lists.
-- [`src/tui.rs`](../src/tui.rs) and [`src/chat/mod.rs`](../src/chat/mod.rs) restore terminal input modes and carry typed registration/cache outcomes into the destination catalog. The transcript and active chat selection survive the handoff. Only checked-model Enter explicitly changes that selection.
+- [`src/tui/commands.rs`](../src/tui/commands.rs) owns the context-aware command registry, common actions, shared popup, and explicit picker outcomes. All three screens use it; chat-specific controls are not offered in model lists.
+- [`src/tui/mod.rs`](../src/tui/mod.rs) and [`src/chat/mod.rs`](../src/chat/mod.rs) restore terminal input modes and carry typed registration/cache outcomes into the destination catalog. The transcript and active chat selection survive the handoff. Only checked-model Enter explicitly changes that selection.
 
 Only HTTPS is allowed outside loopback; HTTP is permitted for localhost, 127.0.0.1, and ::1. Userinfo, query strings, fragments, whitespace, control characters, and backslashes are rejected. Catalog requests use the existing 15-second connection/read/write timeouts, 1 MiB body cap, and no-redirect policy. A successful catalog fetch does not prove that inference or a configured environment credential will work.
 

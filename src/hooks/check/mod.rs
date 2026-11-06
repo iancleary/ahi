@@ -26,7 +26,7 @@ use supply::{DockerfileCheck, GithubActions, ShellStrict};
 use whitespace::{EndOfFile, LineEndings, TrailingWhitespace};
 
 use crate::error::{Error, Result};
-use crate::paths::join_inside;
+use crate::hooks::paths::join_inside;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {

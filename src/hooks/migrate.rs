@@ -9,7 +9,7 @@
 use serde_yaml::{Mapping, Value};
 
 use crate::error::{Error, Result};
-use crate::policy;
+use crate::hooks::policy;
 use crate::yaml_safe::check_config_yaml;
 
 #[derive(Debug, Clone, Copy)]
@@ -589,7 +589,8 @@ repos:
         assert!(!suggestion
             .suggested
             .contains("https://github.com/pre-commit/pre-commit-hooks"));
-        let parsed = crate::config::parse_config_str(&suggestion.suggested, "suggested").unwrap();
+        let parsed =
+            crate::hooks::config::parse_config_str(&suggestion.suggested, "suggested").unwrap();
         assert!(parsed.repos.iter().any(|repo| repo.repo == "builtin"));
         assert!(parsed.repos.iter().any(|repo| repo.repo == "local"));
     }

@@ -28,9 +28,9 @@ Callback input is hidden: only its character count is drawn. Backspace deletes a
 The separation is between authorization and terminal input, not between two implementations of OAuth:
 
 1. [`src/harness/openai.rs`](../src/harness/openai.rs) owns `OpenAiLogin`: bind numeric-loopback port 1455, create PKCE/state/nonce and the installation UUID, construct the authorization URL, and run a bounded nonblocking callback receiver on a worker thread.
-2. [`src/login.rs`](../src/login.rs) owns terminal drawing and input. It polls the session and supplies pasted callback text through the same validator used by the standalone command. It never starts a blocking stdin reader.
+2. [`src/tui/login.rs`](../src/tui/login.rs) owns terminal drawing and input. It polls the session and supplies pasted callback text through the same validator used by the standalone command. It never starts a blocking stdin reader.
 3. Once a callback is accepted, the session stops and joins its callback worker before exchanging the code and atomically writing a validated credential. Dropping a cancelled session also stops and joins the worker, releasing its listener and spare connections before reentry.
-4. [`src/chat/mod.rs`](../src/chat/mod.rs) and [`src/tui.rs`](../src/tui.rs) hand off the terminal and restore their previous screen afterward. Chat receives only a success/error notice, never the authorization URL, callback text, or tokens. The picker reloads local registry authentication state after success.
+4. [`src/chat/mod.rs`](../src/chat/mod.rs) and [`src/tui/mod.rs`](../src/tui/mod.rs) hand off the terminal and restore their previous screen afterward. Chat receives only a success/error notice, never the authorization URL, callback text, or tokens. The picker reloads local registry authentication state after success.
 
 The standalone `ahi login` uses the same session but supplies pasted input through a stdin reader. That reader belongs only to the standalone command; invoking it inside a long-lived TUI would leave a blocked reader competing with chat input after an automatic browser callback.
 

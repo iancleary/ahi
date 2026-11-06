@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::commands::{CommandContext, CommandMenu, PickerOutcome};
 use crate::error::{Error, Result};
+use crate::tui::commands::{CommandContext, CommandMenu, PickerOutcome};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -1236,13 +1236,13 @@ pub(crate) fn interact(
         match outcome {
             SessionEnd::Exit => return Ok(()),
             SessionEnd::Login => {
-                let notice = match crate::login::run(state_dir) {
+                let notice = match crate::tui::login::run(state_dir) {
                     Ok(()) => "OpenAI login completed; model selection unchanged".to_string(),
                     Err(error) => error.to_string(),
                 };
                 screen.push_notice(notice);
             }
-            SessionEnd::Gateway => match crate::gateway::run(state_dir) {
+            SessionEnd::Gateway => match crate::tui::gateway::run(state_dir) {
                 Ok(Some(registration)) => {
                     screen.push_notice(registration.notice.clone());
                     let provider = registration.provider_id.clone();

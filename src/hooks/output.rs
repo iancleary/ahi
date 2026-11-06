@@ -2,8 +2,8 @@
 
 use serde_json::{json, Value};
 
-use crate::check::all_checks;
-use crate::runner::{Outcome, Report};
+use crate::hooks::check::all_checks;
+use crate::hooks::runner::{Outcome, Report};
 use crate::VERSION;
 
 pub fn render_text(report: &Report) -> String {

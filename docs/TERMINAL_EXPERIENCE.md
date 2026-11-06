@@ -10,7 +10,7 @@ Observed before this refresh:
 
 | Finding | User consequence | Owning boundary |
 | --- | --- | --- |
-| Chat has an input-anchored Settings popup; models and catalog have only an append-only command string | Learning one screen does not teach the others; `/gateway` appears absent | Former `src/chat/settings.rs` (replaced by `src/commands.rs`), `src/tui.rs` |
+| Chat has an input-anchored Settings popup; models and catalog have only an append-only command string | Learning one screen does not teach the others; `/gateway` appears absent | Former `src/chat/settings.rs` (replaced by `src/tui/commands.rs`), `src/tui/mod.rs` |
 | Gateway/login help appears late in long wrapped footer text | Important onboarding controls disappear on narrow terminals | Picker layout and help |
 | “Settings” mixes navigation, registration, authentication, and exit | The menu name does not predict its contents | Command presentation |
 | The initial title foregrounds `models.json` and curation terminology | A new user sees implementation details before an action | Models view and empty state |
@@ -129,10 +129,10 @@ The sketches above are design alternatives, not pixel-accurate screenshots or cl
 
 ### Implemented structure
 
-- [`src/commands.rs`](../src/commands.rs): `CommandDefinition` supplies canonical spellings, aliases, labels, descriptions, common actions, and applicable `CommandContext`s. `CommandMenu` owns matching, navigation, selection/dismissal state, and popup rendering. All three screens consume it. The former chat-only settings module is removed.
-- [`src/tui.rs`](../src/tui.rs): Models/Catalog presentation, bounded single-line command entry with bracketed-paste lifecycle, state-aware empty guidance, context-preserving Back, explicit checked-model use, and visible registration outcomes. `PickerOutcome::{Selected, Back, Exit}` prevents Quit from being confused with cancelling a nested picker.
+- [`src/tui/commands.rs`](../src/tui/commands.rs): `CommandDefinition` supplies canonical spellings, aliases, labels, descriptions, common actions, and applicable `CommandContext`s. `CommandMenu` owns matching, navigation, selection/dismissal state, and popup rendering. All three screens consume it. The former chat-only settings module is removed.
+- [`src/tui/mod.rs`](../src/tui/mod.rs): Models/Catalog presentation, bounded single-line command entry with bracketed-paste lifecycle, state-aware empty guidance, context-preserving Back, explicit checked-model use, and visible registration outcomes. `PickerOutcome::{Selected, Back, Exit}` prevents Quit from being confused with cancelling a nested picker.
 - [`src/chat/mod.rs`](../src/chat/mod.rs): the existing chat editor and response lifecycle consume the shared menu. Handoffs retain transcript and mouse preference; registration is carried directly to Catalog. The input rule keeps a `/ commands` hint.
-- [`src/gateway.rs`](../src/gateway.rs): focused Connect URL entry, retained input/error retry, loading/cancel state, Review summary, and fixed-position controls. Review shows new/existing/conflicting registration and existing effective authentication when rediscovering.
+- [`src/tui/gateway.rs`](../src/tui/gateway.rs): focused Connect URL entry, retained input/error retry, loading/cancel state, Review summary, and fixed-position controls. Review shows new/existing/conflicting registration and existing effective authentication when rediscovering.
 - [`src/harness/gateway.rs`](../src/harness/gateway.rs): `CatalogPersistence::{Saved, Failed(String)}` travels with `GatewayRegistration`. No presentation logic infers partial success by parsing a notice string. Existing snapshot/atomic-save and credential restrictions remain in force.
 
 Onboarding-specific Catalog step labels end when you leave that view. Returning from a multi-model Catalog retains the highlighted checked model without making a selection write. An existing gateway with no selected models prompts catalog choice, not first-gateway setup. Raw `models.json` empty-reason diagnostics remain unchanged for the non-terminal interface but are not the primary terminal copy.

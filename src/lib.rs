@@ -1,34 +1,19 @@
-//! ahi library: pre-commit config, file filtering, and offline builtin checks.
+//! ahi library: the pre-commit hook runner (`hooks`), the model picker and
+//! chat terminal screens (`tui`, `chat`), and the provider harness (`harness`).
 //!
 //! The package, the library target, and the binary are all named `ahi`.
 
 #![forbid(unsafe_code)]
 
 mod actions;
-pub mod audit;
 pub mod chat;
-pub mod check;
 mod clipboard;
-mod commands;
-pub mod config;
 pub mod error;
-pub mod filter;
-mod gateway;
-pub mod git;
 pub mod harness;
-pub mod identify;
-mod local_hook;
-mod login;
-pub mod migrate;
-pub mod output;
-mod paths;
-pub mod policy;
-pub mod runner;
+pub mod hooks;
 mod shlex;
-pub mod store;
 pub mod tui;
 pub mod update;
-mod wsl;
 mod yaml_safe;
 
 #[cfg(test)]
@@ -36,7 +21,7 @@ mod yaml_safe;
 mod fixture_directory;
 
 pub use error::{Error, Result};
-pub use local_hook::{base_env_names, default_toolchain_names};
+pub use hooks::local_hook::{base_env_names, default_toolchain_names};
 
 /// Version baked in from the library package. The `ahi` binary uses the same number.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
