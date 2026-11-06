@@ -1,0 +1,9 @@
+# Deliberately invalid: only version 1 is supported. Use it to see the
+# fail-closed path (`ahi tui --actions` refuses to start).
+version: 2
+default: deny
+rules:
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve

@@ -147,8 +147,10 @@ enum Event {
         item_id: String,
         arguments: String,
     },
+    /// The item is kept raw so a completed response can be reconstructed
+    /// from it; it is parsed as `Item` when the event is handled.
     #[serde(rename = "response.output_item.done")]
-    ItemDone { output_index: usize, item: Item },
+    ItemDone { output_index: usize, item: Value },
     #[serde(rename = "response.completed")]
     Completed { response: TerminalResponse },
     #[serde(rename = "response.incomplete")]
@@ -172,7 +174,10 @@ struct ResponseIdentity {
 struct TerminalResponse {
     id: String,
     status: String,
-    /// Raw so the items can be replayed verbatim; each is also parsed as `Item`.
+    /// Raw so the items can be replayed verbatim; each is also parsed as
+    /// `Item`. Current OpenAI streams send this empty (observed on
+    /// `gpt-6.1-sol`, 2026-11-05); the finished slots then stand in for it.
+    #[serde(default)]
     output: Vec<Value>,
     usage: Option<Usage>,
     error: Option<Value>,
@@ -246,7 +251,8 @@ enum Slot {
         arguments: String,
         arguments_done: bool,
     },
-    Finished(Item),
+    /// `raw` is the `output_item.done` item verbatim, for native replay.
+    Finished { item: Item, raw: Value },
 }
 
 fn invalid() -> Error {
@@ -300,9 +306,22 @@ impl Slots {
 
     fn finished(&self, index: usize) -> Option<&Item> {
         match self.0.get(index) {
-            Some(Some(Slot::Finished(item))) => Some(item),
+            Some(Some(Slot::Finished { item, .. })) => Some(item),
             _ => None,
         }
+    }
+
+    /// The raw finished items in output order, or `None` while any occupied
+    /// slot is still pending.
+    fn finished_items(&self) -> Option<Vec<Value>> {
+        self.0
+            .iter()
+            .flatten()
+            .map(|slot| match slot {
+                Slot::Finished { raw, .. } => Some(raw.clone()),
+                Slot::Pending { .. } => None,
+            })
+            .collect()
     }
 }
 
@@ -448,8 +467,10 @@ pub(super) fn read_stream(
             }
             Event::ItemDone {
                 output_index,
-                item: final_item,
+                item: raw,
             } => {
+                let final_item: Item =
+                    serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
                 let Some(Slot::Pending {
                     item,
                     text,
@@ -525,7 +546,13 @@ pub(super) fn read_stream(
                         if id == final_id => {}
                     _ => return Err(invalid()),
                 }
-                slots.put(output_index, Slot::Finished(final_item));
+                slots.put(
+                    output_index,
+                    Slot::Finished {
+                        item: final_item,
+                        raw,
+                    },
+                );
             }
             Event::Completed { response } => {
                 if response.status != "completed"
@@ -533,14 +560,27 @@ pub(super) fn read_stream(
                     || response.incomplete_details.is_some()
                     || !identifier(&response.id)
                     || response_id.as_ref().is_some_and(|id| id != &response.id)
-                    || response.output.len() != slots.occupied()
                 {
                     return Err(invalid());
                 }
+                // The terminal event either lists every finished item, which
+                // must match what was streamed, or lists nothing, in which
+                // case the finished slots are the output.
+                let output = if response.output.is_empty() {
+                    slots.finished_items().ok_or_else(|| {
+                        Error::protocol(
+                            "OpenAI completed with unfinished or conflicting output items",
+                        )
+                    })?
+                } else if response.output.len() != slots.occupied() {
+                    return Err(invalid());
+                } else {
+                    response.output
+                };
                 let mut calls = ToolCallAssembler::default();
                 let mut call_index = 0;
                 let mut native_bytes = 0;
-                for (index, raw) in response.output.iter().enumerate() {
+                for (index, raw) in output.iter().enumerate() {
                     let item: Item = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
                     if slots.finished(index) != Some(&item) {
                         return Err(Error::protocol(
@@ -584,7 +624,7 @@ pub(super) fn read_stream(
                         calls: calls.finish()?,
                         native: Some(NativeReplay {
                             protocol: Protocol::OpenAiResponses,
-                            items: response.output,
+                            items: output,
                         }),
                     }
                 };

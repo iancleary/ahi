@@ -33,6 +33,9 @@ pub(crate) struct HttpBackend {
     /// Tool root and `ahi.actions.yaml` location; `None` is the process's
     /// working directory at each submission.
     workspace: Option<PathBuf>,
+    /// An explicit policy file (`ahi tui --actions`) used instead of the
+    /// workspace's `ahi.actions.yaml`.
+    actions: Option<PathBuf>,
     grants: SessionGrants,
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
@@ -46,6 +49,7 @@ impl HttpBackend {
         Self {
             state,
             workspace: None,
+            actions: None,
             grants: SessionGrants::default(),
             agent: ureq::AgentBuilder::new()
                 .redirects(0)
@@ -53,6 +57,13 @@ impl HttpBackend {
                 .build(),
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Read tool policy from `path` instead of the workspace's
+    /// `ahi.actions.yaml`. `None` keeps the working-directory lookup.
+    pub(crate) fn with_actions(mut self, path: Option<PathBuf>) -> Self {
+        self.actions = path;
+        self
     }
 
     #[cfg(test)]
@@ -69,6 +80,7 @@ impl CompletionBackend for HttpBackend {
         let (sender, receiver) = mpsc::channel();
         let state = self.state.clone();
         let workspace = self.workspace.clone();
+        let actions = self.actions.clone();
         let grants = self.grants.clone();
         let agent = self.agent.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -77,7 +89,10 @@ impl CompletionBackend for HttpBackend {
             let workspace = workspace.or_else(|| std::env::current_dir().ok());
             let result = complete(
                 &state,
-                workspace.as_deref(),
+                ToolSource {
+                    workspace: workspace.as_deref(),
+                    actions: actions.as_deref(),
+                },
                 grants,
                 &agent,
                 request,
@@ -141,9 +156,17 @@ fn cancelled(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
+/// Where a turn's tool policy comes from: the workspace's `ahi.actions.yaml`
+/// unless an explicit `actions` file replaces it.
+struct ToolSource<'a> {
+    /// Tool root; `None` disables tools for the turn.
+    workspace: Option<&'a Path>,
+    actions: Option<&'a Path>,
+}
+
 fn complete(
     state: &Path,
-    workspace: Option<&Path>,
+    source: ToolSource<'_>,
     grants: SessionGrants,
     agent: &ureq::Agent,
     request: ChatRequest,
@@ -159,6 +182,7 @@ fn complete(
     if let Some(window) = metadata.context_window {
         protocol::emit(sender, ResponseEvent::ContextWindow(window.get()))?;
     }
+    let ToolSource { workspace, actions } = source;
     let mut tools = match workspace {
         Some(directory) => ToolRuntime::load(
             directory,
@@ -166,6 +190,7 @@ fn complete(
             &request.selection.gateway,
             connection.destination(),
             grants,
+            actions,
         )?,
         None => None,
     };
@@ -207,10 +232,16 @@ fn complete(
                         },
                     )?;
                     let Some(tools) = tools.as_mut() else {
-                        return Err(Error::policy(format!(
-                        "tool execution is disabled: no {} rule approves a builtin tool in this working directory",
-                        crate::actions::FILE_NAME
-                    )));
+                        return Err(Error::policy(match actions {
+                            Some(path) => format!(
+                                "tool execution is disabled: no rule in {} approves a builtin tool",
+                                path.display()
+                            ),
+                            None => format!(
+                                "tool execution is disabled: no {} rule approves a builtin tool in this working directory",
+                                crate::actions::FILE_NAME
+                            ),
+                        }));
                     };
                     cancelled(cancel)?;
                     let results = tools.run_round(&calls, sender)?;

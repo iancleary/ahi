@@ -47,20 +47,22 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --workspace --all-features
 
       - name: Check documentation
         # PowerShell on Windows does not accept the bash `VAR=value command` form.
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
       - name: Verify package
         # Local crate metadata check. This does not publish and does not use a registry token.
-        run: cargo package
+        # --workspace packages ahi-win32 alongside ahi; a plain `cargo package`
+        # would look for the path dependency on crates.io and fail.
+        run: cargo package --workspace
 
       - name: Build project
         run: cargo build --release

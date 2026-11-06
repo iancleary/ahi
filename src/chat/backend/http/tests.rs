@@ -1893,3 +1893,128 @@ fn the_turn_output_bound_is_a_cap_including_diagnostics() {
     assert!(results[4].2.contains("budget") && results[4].2.len() <= 64);
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));
 }
+
+/// Live `gpt-6.1-sol` streams (observed 2026-11-05) finish with
+/// `response.completed` carrying `"output": []`, no `Content-Type` header,
+/// `phase` on items and `obfuscation` on argument deltas. The finished slots
+/// stand in for the empty terminal output; a pending slot still fails.
+#[test]
+fn an_empty_terminal_output_is_reconstructed_from_the_finished_items() {
+    let message = json!({"id":"msg_live", "type":"message", "role":"assistant", "status":"completed", "phase":"final_answer", "content":[{"type":"output_text", "text":"pong","annotations":[],"logprobs":[]}]});
+    let mut pending = message.clone();
+    pending["status"] = json!("in_progress");
+    pending["content"] = json!([]);
+    let empty = json!({"type":"response.completed","response":{"id":"resp_live","status":"completed","output":[],"usage":{"input_tokens":13,"output_tokens":5,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}}});
+    let text = response_events(vec![
+        json!({"type":"response.created","response":{"id":"resp_live","status":"in_progress","output":[]}}),
+        json!({"type":"response.in_progress","response":{"id":"resp_live"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":pending}),
+        json!({"type":"response.content_part.added","output_index":0,"item_id":"msg_live","content_index":0}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_live","delta":"pong","obfuscation":"x"}),
+        json!({"type":"response.metadata"}),
+        json!({"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg_live","text":"pong"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":message}),
+        empty.clone(),
+    ]);
+    let (result, events, _) = responses_fixture_with_refresh(&text, false, None);
+    assert_eq!(result.unwrap(), StreamOutcome::Stopped);
+    assert_eq!(
+        events,
+        vec![
+            ResponseEvent::TextDelta("pong".into()),
+            ResponseEvent::Usage {
+                input_tokens: 13,
+                output_tokens: 5,
+                cached_input_tokens: Some(0),
+                cost_usd: None
+            }
+        ]
+    );
+
+    let call = json!({"id":"fc_live","type":"function_call","call_id":"call_live","name":"read_file","arguments":"{\"path\":\"README.md\"}","status":"completed"});
+    let mut pending = call.clone();
+    pending["status"] = json!("in_progress");
+    pending["arguments"] = json!("");
+    let tools = response_events(vec![
+        json!({"type":"response.created","response":{"id":"resp_live","status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":pending}),
+        json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_live","delta":"{\"path\":","obfuscation":"abc","sequence_number":3}),
+        json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_live","delta":"\"README.md\"}","obfuscation":"","sequence_number":4}),
+        json!({"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_live","arguments":"{\"path\":\"README.md\"}"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":call}),
+        empty,
+    ]);
+    let (result, _, _) = responses_fixture_with_refresh(&tools, false, None);
+    let StreamOutcome::ToolCalls { calls, native, .. } = result.unwrap() else {
+        panic!("expected a validated tool call");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_live");
+    assert_eq!(calls[0].arguments["path"], "README.md");
+    // The item that finished is what the continuation replays verbatim.
+    assert_eq!(native.unwrap().items, vec![call.clone()]);
+
+    // An empty terminal output never completes an item that is still pending.
+    let unfinished = response_events(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":pending}),
+        json!({"type":"response.completed","response":{"id":"resp_live","status":"completed","output":[]}}),
+    ]);
+    let (result, events, _) = responses_fixture_with_refresh(&unfinished, false, None);
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("unfinished or conflicting"));
+    assert!(events.is_empty());
+}
+
+/// `--actions` names the policy file. It replaces the workspace's
+/// `ahi.actions.yaml`, must exist, and its rule paths still apply to the
+/// workspace.
+#[test]
+fn an_explicit_actions_file_replaces_the_workspace_policy() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[("call_a", "read_file", json!({"path": "src/a.rs"}))]),
+        text_stream("done"),
+    ]);
+    // The workspace file denies everything; the explicit file approves reads.
+    let fixture = ToolFixture::new(
+        &url,
+        "version: 1\nrules:\n  - {id: none, action: tool_call, match: {tool: read_file}, effect: deny}\n",
+        json!({"id": "vendor/model"}),
+    );
+    let explicit = fixture.root.join("elsewhere/policy.yaml");
+    fs::create_dir_all(explicit.parent().unwrap()).unwrap();
+    fs::write(&explicit, APPROVE_READS).unwrap();
+    let mut backend = fixture.backend().with_actions(Some(explicit.clone()));
+    let (events, approvals) = collect_answering(&mut backend, request(), vec![]);
+    assert!(approvals.is_empty());
+    assert_eq!(
+        results(&events),
+        vec![("call_a".to_string(), 0, "fn a() {}\n".to_string())]
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let requests = server.join().unwrap();
+    assert_eq!(
+        request_body(&requests[0])["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A missing explicit file fails the turn before any request is sent,
+    // naming the file; the workspace policy is not consulted.
+    let (url, server) = server_sequence(vec![]);
+    let fixture = ToolFixture::new(&url, APPROVE_READS, json!({"id": "vendor/model"}));
+    let missing = fixture.root.join("missing.yaml");
+    let mut backend = fixture.backend().with_actions(Some(missing.clone()));
+    let events = collect(&mut backend, request());
+    let message = match events.last() {
+        Some(ResponseEvent::Failed { message, .. }) => message.clone(),
+        other => panic!("expected a failure, got {other:?}"),
+    };
+    assert!(
+        message.contains("failed to read") && message.contains("missing.yaml"),
+        "{message}"
+    );
+    drop(backend);
+    assert!(server.join().unwrap().is_empty());
+}

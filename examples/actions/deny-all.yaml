@@ -1,0 +1,12 @@
+# Valid policy with no approve rule: no tool is advertised to the model.
+version: 1
+default: deny
+rules:
+  - id: no-reads
+    action: tool_call
+    match: {tool: read_file}
+    effect: deny
+  - id: no-lists
+    action: tool_call
+    match: {tool: list_dir}
+    effect: deny

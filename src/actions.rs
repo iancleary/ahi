@@ -152,9 +152,20 @@ pub(crate) fn load(root: &Path, builtin_tools: &[&str]) -> Result<Option<ActionP
     if !path.is_file() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path)
-        .map_err(|err| Error::new(format!("failed to read {FILE_NAME}: {err}")))?;
-    parse(&text, FILE_NAME, builtin_tools).map(Some)
+    read(&path, FILE_NAME, builtin_tools).map(Some)
+}
+
+/// Load the policy file the operator named (`ahi tui --actions`). Unlike the
+/// working-directory lookup, a missing or unreadable file is an error: the
+/// operator asked for this file, so its absence implies nothing.
+pub(crate) fn load_file(path: &Path, builtin_tools: &[&str]) -> Result<ActionPolicy> {
+    read(path, &path.display().to_string(), builtin_tools)
+}
+
+fn read(path: &Path, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| Error::new(format!("failed to read {origin}: {err}")))?;
+    parse(&text, origin, builtin_tools)
 }
 
 #[derive(Deserialize)]
@@ -421,5 +432,44 @@ mod tests {
             ["list_dir"]
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn an_explicit_file_must_exist_and_the_examples_parse() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/actions");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&examples).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "yaml") {
+                continue;
+            }
+            seen += 1;
+            let result = load_file(&path, &TOOLS);
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if name == "invalid-version.yaml" {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("version 2 is not supported"), "{error}");
+                assert!(error.contains(name), "origin names the file: {error}");
+            } else {
+                let policy = result.unwrap_or_else(|err| panic!("{name}: {err}"));
+                let advertised = policy.advertised_tools();
+                if name == "deny-all.yaml" {
+                    assert!(advertised.is_empty(), "{name}");
+                } else {
+                    assert!(!advertised.is_empty(), "{name}");
+                }
+            }
+        }
+        assert_eq!(
+            seen, 6,
+            "examples/actions changed; update this test and its README"
+        );
+        // The explicit lookup never treats a missing file as "no policy".
+        let missing = examples.join("missing.yaml");
+        let error = load_file(&missing, &TOOLS).unwrap_err().to_string();
+        assert!(
+            error.starts_with("failed to read") && error.contains("missing.yaml"),
+            "{error}"
+        );
+        assert!(load(&examples, &TOOLS).unwrap().is_none());
     }
 }

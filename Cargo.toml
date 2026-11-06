@@ -9,6 +9,9 @@ repository = "https://github.com/iancleary/ahi"
 authors = ["Ian Cleary"]
 readme = "README.md"
 
+[workspace]
+members = [".", "crates/ahi-win32"]
+
 [lib]
 name = "ahi"
 path = "src/lib.rs"
@@ -19,6 +22,7 @@ path = "src/main.rs"
 
 # Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
+base64 = "=0.22.1"
 clap = { version = "=4.5.23", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.10"
@@ -39,6 +43,10 @@ unicode-segmentation = "=1.12.0"
 unicode-width = "=0.2.0"
 ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
 yaml-rust2 = "=0.10.0"
+
+# In-repo Win32 clipboard; the only crate in the workspace with unsafe code.
+[target.'cfg(windows)'.dependencies]
+ahi-win32 = { path = "crates/ahi-win32", version = "=0.1.0" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.169"

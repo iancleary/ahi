@@ -87,6 +87,11 @@ enum Command {
         /// Explicitly refresh reference catalogs before opening the picker or printing.
         #[arg(long)]
         refresh: bool,
+        /// Tool policy file to use instead of ahi.actions.yaml in the working
+        /// directory. It must exist and parse; rule paths and tool confinement
+        /// stay relative to the working directory. See examples/actions.
+        #[arg(long, value_name = "FILE")]
+        actions: Option<PathBuf>,
     },
     /// Print the OpenAI browser login URL and wait for the redirect.
     ///
@@ -172,7 +177,9 @@ fn main() -> ExitCode {
             }
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
-        Command::Tui { refresh } => tui(cli.state_dir.as_deref(), *refresh),
+        Command::Tui { refresh, actions } => {
+            tui(cli.state_dir.as_deref(), *refresh, actions.as_deref())
+        }
         Command::Login => login(cli.state_dir.as_deref()),
     }
 }
@@ -522,7 +529,11 @@ fn doctor(
     ExitCode::from(0)
 }
 
-fn tui(state: Option<&std::path::Path>, refresh: bool) -> ExitCode {
+fn tui(
+    state: Option<&std::path::Path>,
+    refresh: bool,
+    actions: Option<&std::path::Path>,
+) -> ExitCode {
     let state = match harness::state_dir(state) {
         Ok(dir) => dir,
         Err(err) => {
@@ -530,7 +541,7 @@ fn tui(state: Option<&std::path::Path>, refresh: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match ahi::tui::run(&state, refresh) {
+    match ahi::tui::run(&state, refresh, actions) {
         Ok(output) => {
             if !output.text.is_empty() {
                 println!("{}", output.text);

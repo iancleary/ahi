@@ -61,7 +61,7 @@ The serialized UTF-8 browser request has a 16 MiB hard limit and also respects a
 
 ## Stream normalization
 
-Source: [`responses.rs`](../src/chat/backend/http/responses.rs).
+Source: [`responses.rs`](../src/chat/backend/protocol/responses.rs).
 
 | Responses event | ahi behavior |
 |---|---|
@@ -70,7 +70,7 @@ Source: [`responses.rs`](../src/chat/backend/http/responses.rs).
 | `response.output_text.delta` | Validate item/index association and emit `TextDelta`. |
 | Function-argument delta/done | Accumulate bounded arguments for the matching function item; do not display them. |
 | `response.output_item.done` | Validate identity, text/arguments and completion; close the slot. Final text can supply text for a part that had no deltas. Conflicting text is not silently repaired. |
-| `response.completed` | Require `status: "completed"`; reconcile the ordered terminal output with every finished slot; report actual usage and normalize validated calls. |
+| `response.completed` | Require `status: "completed"`. When the terminal `output` lists items, reconcile it one for one with every finished slot; when it is empty (what the live API sends as of 2026-11-05, with no `Content-Type` header), the finished slots are the output. A slot still pending fails either way. Report actual usage and normalize validated calls. |
 | `response.incomplete` | Fail distinctly for output-limit truncation versus other incompleteness. |
 | Refusal events/content | Fail with a refusal diagnostic, without rendering refusal text as the answer. |
 | `response.failed` / `error` | Fail with a bounded generic diagnostic, not upstream text. |

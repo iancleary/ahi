@@ -27,7 +27,20 @@ pub struct RunOutput {
     pub refresh_failed: bool,
 }
 
-pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
+/// `actions` names a tool policy file to use instead of the working
+/// directory's `ahi.actions.yaml`. It is read once here, so an invalid or
+/// missing file fails before the picker opens, and again on every chat turn.
+pub fn run(state: &Path, refresh: bool, actions: Option<&Path>) -> Result<RunOutput> {
+    let actions =
+        match actions {
+            Some(path) => {
+                chat::check_actions_file(path)?;
+                Some(path.canonicalize().map_err(|err| {
+                    Error::new(format!("cannot resolve {}: {err}", path.display()))
+                })?)
+            }
+            None => None,
+        };
     let mut registry = harness::load_registry(state)?;
     if !io::stdout().is_terminal() {
         let errors = if refresh {
@@ -47,30 +60,35 @@ pub fn run(state: &Path, refresh: bool) -> Result<RunOutput> {
     // Cancelling startup exits, even if an old selection file exists. Only
     // Enter starts chat; cancelling /model instead keeps the active selection.
     if let PickerOutcome::Selected(selection) = pick(state, &mut picker, refresh)? {
-        chat::interact(state, &selection, |view, gateway, registration| {
-            // Reopen the same curated picker, with a fresh local snapshot.
-            // A malformed external edit retains the last valid registry.
-            if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
-                picker.status = err.to_string();
-            }
-            picker.reset_view();
-            if let Some(registration) = registration {
-                picker.set_registration(registration);
-            }
-            picker.focus_provider(gateway);
-            if matches!(view, chat::PickerView::Catalog) {
-                if let Some(provider) = picker
-                    .registry
-                    .providers
-                    .iter()
-                    .position(|entry| entry.id == gateway)
-                {
-                    picker.screen = Screen::Catalog { provider };
-                    picker.cursor.select(Some(0));
+        chat::interact(
+            state,
+            &selection,
+            actions.as_deref(),
+            |view, gateway, registration| {
+                // Reopen the same curated picker, with a fresh local snapshot.
+                // A malformed external edit retains the last valid registry.
+                if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
+                    picker.status = err.to_string();
                 }
-            }
-            pick(state, &mut picker, false)
-        })?;
+                picker.reset_view();
+                if let Some(registration) = registration {
+                    picker.set_registration(registration);
+                }
+                picker.focus_provider(gateway);
+                if matches!(view, chat::PickerView::Catalog) {
+                    if let Some(provider) = picker
+                        .registry
+                        .providers
+                        .iter()
+                        .position(|entry| entry.id == gateway)
+                    {
+                        picker.screen = Screen::Catalog { provider };
+                        picker.cursor.select(Some(0));
+                    }
+                }
+                pick(state, &mut picker, false)
+            },
+        )?;
     }
     Ok(RunOutput {
         text: picker.print_on_exit.join("\n"),
@@ -436,6 +454,9 @@ impl Picker {
     }
 
     fn draw(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        // A chat copy may still be completing after switching to the picker.
+        let stdout = io::stdout();
+        let _output = stdout.lock();
         terminal
             .draw(|frame| self.draw_frame(frame))
             .map_err(|err| Error::new(format!("terminal draw: {err}")))?;

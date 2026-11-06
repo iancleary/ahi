@@ -1,0 +1,16 @@
+# Read and list anywhere in the working tree, never .env; no prompts.
+version: 1
+default: deny
+rules:
+  - id: no-env
+    action: tool_call
+    match: {tool: read_file, path: .env}
+    effect: deny
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve

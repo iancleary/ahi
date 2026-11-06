@@ -46,6 +46,15 @@ pub(crate) fn translate_approval(key: KeyEvent) -> Option<ApprovalKey> {
         KeyCode::Char('n' | 'N') => Some(ApprovalKey::Deny),
         KeyCode::Char('a' | 'A') => Some(ApprovalKey::ApproveRest),
         KeyCode::Esc => Some(ApprovalKey::DenyRest),
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(ApprovalKey::PreviousCall)
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => Some(ApprovalKey::NextCall),
+        KeyCode::Up => Some(ApprovalKey::Previous),
+        KeyCode::Down => Some(ApprovalKey::Next),
+        KeyCode::Enter if !key.modifiers.intersects(KeyModifiers::SHIFT) => {
+            Some(ApprovalKey::Choose)
+        }
         _ => None,
     }
 }
