@@ -1197,15 +1197,15 @@ fn rule_line(width: usize) -> String {
     )
 }
 
-/// Validate an explicit `--actions` policy file before any screen opens, so
+/// Validate an explicit `--tools` policy file before any screen opens, so
 /// a typo fails at startup instead of on every chat turn.
 pub(crate) fn check_actions_file(path: &Path) -> Result<()> {
-    crate::actions::load_file(path, &backend::tools::BUILTIN).map(drop)
+    crate::tool_policy::load_file(path, &backend::tools::BUILTIN).map(drop)
 }
 
 /// Run the chat screen until the operator exits or asks for the model picker.
 /// `actions` is the operator's explicit policy file, used for every turn in
-/// place of the working directory's `ahi.actions.yaml`.
+/// place of the working directory's `ahi.tools.yaml`.
 pub(crate) fn interact(
     state_dir: &Directories,
     selection: &str,

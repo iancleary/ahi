@@ -94,11 +94,11 @@ enum Command {
         /// Explicitly refresh reference catalogs before opening the picker or printing.
         #[arg(long)]
         refresh: bool,
-        /// Tool policy file to use instead of ahi.actions.yaml in the working
+        /// Tool policy file to use instead of ahi.tools.yaml in the working
         /// directory. It must exist and parse; rule paths and tool confinement
-        /// stay relative to the working directory. See examples/actions.
+        /// stay relative to the working directory. See examples/tools.
         #[arg(long, value_name = "FILE")]
-        actions: Option<PathBuf>,
+        tools: Option<PathBuf>,
     },
     /// Print the OpenAI browser login URL and wait for the redirect.
     ///
@@ -121,8 +121,9 @@ struct DevArgs {
     /// Pull or build the image again even when it is already present.
     #[arg(long, global = true)]
     rebuild: bool,
-    /// Image reference. Overrides AHI_DEV_IMAGE and the `dev-image` file in
-    /// the config directory. Default: ghcr.io/iancleary/ahi-dev:latest.
+    /// Image reference. Overrides AHI_DEV_IMAGE, the repository's ahi.dev.yaml,
+    /// and the `dev-image` file in the config directory.
+    /// Default: ghcr.io/iancleary/ahi-dev:latest.
     #[arg(long, global = true, value_name = "REF")]
     image: Option<String>,
     /// Shell to run inside the container. Default: the basename of SHELL, else /bin/bash.
@@ -227,7 +228,7 @@ fn main() -> ExitCode {
             }
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
-        Command::Tui { refresh, actions } => tui(&cli, *refresh, actions.as_deref()),
+        Command::Tui { refresh, tools } => tui(&cli, *refresh, tools.as_deref()),
         Command::Login => login(&cli),
         Command::Dev(args) => dev(&cli, args),
     }
@@ -520,14 +521,14 @@ fn print_local_env(policy: Option<&ahi::hooks::policy::Policy>) {
             policy.toolchain_env.join(", ")
         );
     }
-    for hook in &policy.trusted_system_hooks {
-        if hook.toolchain_env.is_empty() {
+    for rule in &policy.rules {
+        if rule.toolchain_env.is_empty() {
             continue;
         }
         println!(
-            "toolchain pass-through ({}): {}",
-            hook.id,
-            hook.toolchain_env.join(", ")
+            "toolchain pass-through (rule {}): {}",
+            rule.id,
+            rule.toolchain_env.join(", ")
         );
     }
 }
@@ -580,7 +581,7 @@ fn doctor(
         Err(err) => println!("directories: {err}"),
     }
     println!("scratch: {}", store::scratch_dir().display());
-    match ahi::dev::resolve_runtime(None, env::var(ahi::dev::RUNTIME_ENV).ok().as_deref()) {
+    match ahi::dev::resolve_runtime(None, env::var(ahi::dev::RUNTIME_ENV).ok().as_deref(), None) {
         Ok(runtime) => println!("container runtime: {}", runtime.display()),
         Err(_) => println!("container runtime: none (ahi dev needs podman or docker)"),
     }
@@ -593,23 +594,17 @@ fn doctor(
     {
         Ok(root) => match policy::load_policy(&root) {
             Ok(loaded) => {
-                let path = root.join("ahi.policy.yaml");
+                let path = root.join(policy::FILE_NAME);
                 if loaded.path_present {
-                    println!("policy: {}", path.display());
+                    println!("hooks policy: {}", path.display());
                 } else {
-                    println!("policy: absent (deny by default)");
+                    println!("hooks policy: absent (deny by default)");
                 }
-                let pinned = loaded
-                    .trusted_system_hooks
-                    .iter()
-                    .filter(|hook| hook.entry.is_some())
-                    .count();
-                let bare = loaded.trusted_system_hooks.len() - pinned;
+                let approved = loaded.approved_hooks();
+                let denied = loaded.rules.len() - approved;
+                println!("hook rules: {approved} approve, {denied} deny");
                 println!(
-                    "trusted system hooks: {pinned} entry-pinned, {bare} id-only (id-only does not authorize)"
-                );
-                println!(
-                    "local execution: system and script when the policy pins the hook id and the exact entry; other languages are refused"
+                    "local execution: system and script when an approve rule matches the hook id and the exact entry; other languages are refused"
                 );
                 println!(
                     "remote hooks: not executed and not fetched. Checkers are repo: builtin. ahi migrate can suggest a builtin id"
@@ -619,9 +614,9 @@ fn doctor(
                 );
                 print_local_env(Some(&loaded));
             }
-            Err(err) => println!("policy: {err}"),
+            Err(err) => println!("hooks policy: {err}"),
         },
-        Err(err) => println!("policy: {err}"),
+        Err(err) => println!("hooks policy: {err}"),
     }
     ExitCode::from(0)
 }

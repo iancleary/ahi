@@ -1,5 +1,5 @@
 # ahi reads this file (see docs/SPEC.md). `repo: local` `language: system`
-# hooks run only when ahi.policy.yaml pins the hook id and the exact entry
+# hooks run only when an ahi.hooks.yaml rule approves the hook id and the exact entry
 # string. Entries mirror the `just lint` and `just test` recipes so local
 # checks match CI.
 repos:

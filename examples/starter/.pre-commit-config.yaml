@@ -7,8 +7,8 @@
 # `examples/starter/pre-commit` is a sample git hook that passes `--fix`.
 # `ahi install` is not implemented; copy that file to `.git/hooks/pre-commit`.
 #
-# The local hooks run only when examples/starter/ahi.policy.yaml is next to
-# this file (or copied to the repository root as ahi.policy.yaml).
+# The local hooks run only when examples/starter/ahi.hooks.yaml is next to
+# this file (or copied to the repository root as ahi.hooks.yaml).
 repos:
   - repo: builtin
     hooks:

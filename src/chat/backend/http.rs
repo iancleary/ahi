@@ -31,11 +31,11 @@ mod tests;
 
 pub(crate) struct HttpBackend {
     state: Directories,
-    /// Tool root and `ahi.actions.yaml` location; `None` is the process's
+    /// Tool root and `ahi.tools.yaml` location; `None` is the process's
     /// working directory at each submission.
     workspace: Option<PathBuf>,
-    /// An explicit policy file (`ahi tui --actions`) used instead of the
-    /// workspace's `ahi.actions.yaml`.
+    /// An explicit policy file (`ahi tui --tools`) used instead of the
+    /// workspace's `ahi.tools.yaml`.
     actions: Option<PathBuf>,
     grants: SessionGrants,
     /// One client for the life of the chat: connections are reused across
@@ -64,7 +64,7 @@ impl HttpBackend {
     }
 
     /// Read tool policy from `path` instead of the workspace's
-    /// `ahi.actions.yaml`. `None` keeps the working-directory lookup.
+    /// `ahi.tools.yaml`. `None` keeps the working-directory lookup.
     pub(crate) fn with_actions(mut self, path: Option<PathBuf>) -> Self {
         self.actions = path;
         self
@@ -164,7 +164,7 @@ fn cancelled(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
-/// Where a turn's tool policy comes from: the workspace's `ahi.actions.yaml`
+/// Where a turn's tool policy comes from: the workspace's `ahi.tools.yaml`
 /// unless an explicit `actions` file replaces it.
 struct ToolSource<'a> {
     /// Tool root; `None` disables tools for the turn.
@@ -247,7 +247,7 @@ fn complete(
                             ),
                             None => format!(
                                 "tool execution is disabled: no {} rule approves a builtin tool in this working directory",
-                                crate::actions::FILE_NAME
+                                crate::tool_policy::FILE_NAME
                             ),
                         }));
                     };

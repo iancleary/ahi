@@ -397,7 +397,7 @@ fn copy_local(
         other => other,
     };
     local_notes.push(format!(
-        "- `{id}` language `{language}` can stay as `repo: local` when ahi.policy.yaml pins the id and the exact entry.\n{}",
+        "- `{id}` language `{language}` can stay as `repo: local` when an ahi.hooks.yaml rule approves the id and the exact entry.\n{}",
         policy::policy_snippet(&id, &entry, written)
     ));
     local_hooks.push(copy_fields(map, &id, LOCAL_COPY));

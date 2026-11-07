@@ -1,11 +1,11 @@
 # Tool policy examples
 
-Each file is a complete `ahi.actions.yaml` for the chat screen's builtin,
+Each file is a complete `ahi.tools.yaml` for the chat screen's builtin,
 read-only tools (`read_file`, `list_dir`). Copy one to a repository root as
-`ahi.actions.yaml`, or point a session at it without copying:
+`ahi.tools.yaml`, or point a session at it without copying:
 
 ```sh
-ahi tui --actions examples/actions/ask-every-read.yaml
+ahi tui --tools examples/tools/ask-every-read.yaml
 ```
 
 Rule paths and tool confinement are always relative to the directory where
@@ -19,4 +19,4 @@ Rule paths and tool confinement are always relative to the directory where
 | `sources-only.yaml` | Listing anywhere; reads only under `src` and `docs`, with `.env` and `target` denied. |
 | `list-only.yaml` | Listing only. The model can see the tree but reads are denied. |
 | `deny-all.yaml` | Valid, but no approve rule: no tool is advertised and any requested call fails with `tool execution is disabled`. |
-| `invalid-version.yaml` | Deliberately invalid (`version: 2`): `ahi tui --actions` exits with the parse error, and as `ahi.actions.yaml` every turn fails closed. |
+| `invalid-version.yaml` | Deliberately invalid (`version: 2`): `ahi tui --tools` exits with the parse error, and as `ahi.tools.yaml` every turn fails closed. |

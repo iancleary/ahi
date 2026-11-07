@@ -177,3 +177,57 @@ fn the_image_flag_outranks_the_environment_which_outranks_the_file() {
         text(&from_file)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_repository_file_outranks_the_user_file_and_yields_to_the_environment() {
+    let fixture = Fixture::new("dev-repo-file");
+    let runtime = fake_runtime(&fixture.0);
+    fs::create_dir_all(fixture.0.join("state")).unwrap();
+    fs::write(
+        fixture.0.join("state").join("dev-image"),
+        "example.invalid/ahi-dev:file\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("ahi.dev.yaml"),
+        "version: 1\nimage: example.invalid/ahi-dev:repo\nshell: bash\n",
+    )
+    .unwrap();
+
+    let from_repo = fixture
+        .ahi()
+        .args(["dev", "status", "--runtime"])
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    let text_repo = text(&from_repo);
+    assert!(
+        text_repo.contains("image: example.invalid/ahi-dev:repo (from ahi.dev.yaml)"),
+        "{text_repo}"
+    );
+    assert!(text_repo.contains("shell: bash"), "{text_repo}");
+
+    let from_env = fixture
+        .ahi()
+        .env("AHI_DEV_IMAGE", "example.invalid/ahi-dev:env")
+        .args(["dev", "status", "--runtime"])
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    assert!(
+        text(&from_env).contains("image: example.invalid/ahi-dev:env (from AHI_DEV_IMAGE)"),
+        "{}",
+        text(&from_env)
+    );
+
+    fs::write(fixture.0.join("ahi.dev.yaml"), "version: 1\nmount: /x\n").unwrap();
+    let invalid = fixture
+        .ahi()
+        .args(["dev", "status", "--runtime"])
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(text(&invalid).contains("mount"), "{}", text(&invalid));
+}

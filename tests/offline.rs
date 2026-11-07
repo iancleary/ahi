@@ -63,9 +63,11 @@ fn system_hook_without_a_policy_prints_the_snippet_and_does_not_run() {
     let output = run(&dir, &["run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("trusted_system_hooks:"), "{text}");
-    assert!(text.contains("id: harmless"), "{text}");
-    assert!(text.contains("entry: \"git status --porcelain\""), "{text}");
+    assert!(text.contains("action: hook"), "{text}");
+    assert!(
+        text.contains("match: {id: harmless, entry: \"git status --porcelain\"}"),
+        "{text}"
+    );
     assert!(text.contains("language `system`"), "{text}");
     let _ = fs::remove_dir_all(dir);
 }
@@ -78,8 +80,8 @@ fn harmless_local_hook_runs_without_cargo() {
         b"repos:\n- repo: local\n  hooks:\n  - id: harmless\n    name: Harmless\n    entry: git rev-parse --is-inside-work-tree\n    language: system\n    pass_filenames: false\n    always_run: true\n    verbose: true\n",
     );
     write(
-        &dir.join("ahi.policy.yaml"),
-        b"version: 1\ntrusted_system_hooks:\n- id: harmless\n  entry: git rev-parse --is-inside-work-tree\n",
+        &dir.join("ahi.hooks.yaml"),
+        b"version: 1\nrules:\n- {id: harmless, action: hook, match: {id: harmless, entry: git rev-parse --is-inside-work-tree}, effect: approve}\n",
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
@@ -159,8 +161,8 @@ fn wrong_entry_is_not_authorized_and_other_languages_stay_unsupported() {
         b"repos:\n- repo: local\n  hooks:\n  - id: harmless\n    name: Harmless\n    entry: git status --porcelain\n    language: system\n    pass_filenames: false\n    always_run: true\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n",
     );
     write(
-        &dir.join("ahi.policy.yaml"),
-        b"version: 1\ntrusted_system_hooks:\n- id: harmless\n  entry: 'git status'\n",
+        &dir.join("ahi.hooks.yaml"),
+        b"version: 1\nrules:\n- {id: harmless, action: hook, match: {id: harmless, entry: 'git status'}, effect: approve}\n",
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
@@ -292,8 +294,8 @@ fn script_hook_receives_filenames_without_a_shell() {
         b"repos:\n- repo: local\n  hooks:\n  - id: record\n    name: Record\n    entry: record.sh\n    language: script\n    pass_filenames: true\n    types: [text]\n    args: ['--flag']\n",
     );
     write(
-        &dir.join("ahi.policy.yaml"),
-        b"version: 1\ntrusted_system_hooks:\n- id: record\n  entry: record.sh\n",
+        &dir.join("ahi.hooks.yaml"),
+        b"version: 1\nrules:\n- {id: record, action: hook, match: {id: record, entry: record.sh}, effect: approve}\n",
     );
     write(&dir.join("a.txt"), b"a\n");
     write(&dir.join("b.txt"), b"b\n");
@@ -336,8 +338,8 @@ fn toolchain_passthrough_is_names_only_and_drops_unlisted_vars() {
         b"repos:\n- repo: local\n  hooks:\n  - id: envcheck\n    name: Env\n    entry: envcheck.sh\n    language: script\n    pass_filenames: false\n    always_run: true\n    verbose: true\n",
     );
     write(
-        &dir.join("ahi.policy.yaml"),
-        b"version: 1\ntrusted_system_hooks:\n- id: envcheck\n  entry: envcheck.sh\n  toolchain_env: [DEMO_TOOLCHAIN]\n",
+        &dir.join("ahi.hooks.yaml"),
+        b"version: 1\nrules:\n- {id: envcheck, action: hook, match: {id: envcheck, entry: envcheck.sh}, effect: approve, toolchain_env: [DEMO_TOOLCHAIN]}\n",
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
@@ -380,8 +382,8 @@ fn secret_toolchain_name_is_refused_before_the_hook_runs() {
         b"repos:\n- repo: local\n  hooks:\n  - id: envcheck\n    name: Env\n    entry: true\n    language: system\n    pass_filenames: false\n    always_run: true\n",
     );
     write(
-        &dir.join("ahi.policy.yaml"),
-        b"version: 1\ntoolchain_env: [AWS_PROFILE]\ntrusted_system_hooks:\n- id: envcheck\n  entry: \"true\"\n",
+        &dir.join("ahi.hooks.yaml"),
+        b"version: 1\ntoolchain_env: [AWS_PROFILE]\nrules:\n- {id: envcheck, action: hook, match: {id: envcheck, entry: \"true\"}, effect: approve}\n",
     );
     write(&dir.join("ok.txt"), b"ok\n");
     git(&dir, &["add", "-A"]);
@@ -407,8 +409,8 @@ fn ians_config_runs_where_cargo_is_available() {
         example("ian-repos/.pre-commit-config.yaml").as_bytes(),
     );
     write(
-        &dir.join("ahi.policy.yaml"),
-        example("ian-repos/ahi.policy.yaml").as_bytes(),
+        &dir.join("ahi.hooks.yaml"),
+        example("ian-repos/ahi.hooks.yaml").as_bytes(),
     );
     write(
         &dir.join("Cargo.toml"),
@@ -499,4 +501,30 @@ fn cargo_works() -> bool {
         (fmt, clippy.output()),
         (Ok(fmt), Ok(clippy)) if fmt.status.success() && clippy.status.success()
     )
+}
+
+#[test]
+fn the_retired_policy_filename_is_an_error_not_silence() {
+    let dir = temp_repo("retired-policy");
+    write(
+        &dir.join(".pre-commit-config.yaml"),
+        b"repos:\n- repo: local\n  hooks:\n  - id: harmless\n    name: Harmless\n    entry: git status --porcelain\n    language: system\n    pass_filenames: false\n    always_run: true\n",
+    );
+    write(
+        &dir.join("ahi.policy.yaml"),
+        b"version: 1\ntrusted_system_hooks:\n- id: harmless\n  entry: git status --porcelain\n",
+    );
+    write(&dir.join("ok.txt"), b"ok\n");
+    git(&dir, &["add", "-A"]);
+    let output = run(&dir, &["run", "--all-files"]);
+    assert_ne!(output.status.code(), Some(0));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("ahi.policy.yaml"), "{text}");
+    assert!(text.contains("ahi.hooks.yaml"), "{text}");
+    assert!(text.contains("no longer read"), "{text}");
+    let _ = fs::remove_dir_all(dir);
 }

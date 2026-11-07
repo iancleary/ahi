@@ -1,6 +1,7 @@
-//! Optional `ahi.actions.yaml`: the per-repository policy for agent actions.
+//! Optional `ahi.tools.yaml`: which builtin tools the chat model may call, and where.
 //!
-//! Absence denies every agent action and disables tool advertisement. Only the
+//! Absence denies every tool call and disables tool advertisement. The file
+//! shares its rule grammar with `ahi.hooks.yaml`. Only the
 //! `tool_call` kind is implemented, and only for tools compiled into ahi; the
 //! file selects and bounds builtin tools, it never defines or fetches one.
 //! The file is operator policy. Model output, tool results, and transcript text
@@ -14,7 +15,9 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::yaml_safe::check_config_yaml;
 
-pub(crate) const FILE_NAME: &str = "ahi.actions.yaml";
+pub(crate) const FILE_NAME: &str = "ahi.tools.yaml";
+/// The name this file had before 0.7.0. Its presence is an error, never silence.
+pub(crate) const RETIRED_FILE_NAME: &str = "ahi.actions.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRule {
@@ -146,8 +149,17 @@ fn is_invisible_format(c: char) -> bool {
         | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
-/// Load `ahi.actions.yaml` from `root`. `Ok(None)` when the file is absent.
+/// Load `ahi.tools.yaml` from `root`. `Ok(None)` when the file is absent. The
+/// retired `ahi.tools.yaml` is an error so a renamed allowlist is never
+/// silently ignored.
 pub(crate) fn load(root: &Path, builtin_tools: &[&str]) -> Result<Option<ActionPolicy>> {
+    let retired = root.join(RETIRED_FILE_NAME);
+    if retired.is_file() {
+        return Err(Error::new(format!(
+            "{} is no longer read; rename it to {FILE_NAME} (the rule grammar is unchanged)",
+            retired.display()
+        )));
+    }
     let path = root.join(FILE_NAME);
     if !path.is_file() {
         return Ok(None);
@@ -155,7 +167,7 @@ pub(crate) fn load(root: &Path, builtin_tools: &[&str]) -> Result<Option<ActionP
     read(&path, FILE_NAME, builtin_tools).map(Some)
 }
 
-/// Load the policy file the operator named (`ahi tui --actions`). Unlike the
+/// Load the policy file the operator named (`ahi tui --tools`). Unlike the
 /// working-directory lookup, a missing or unreadable file is an error: the
 /// operator asked for this file, so its absence implies nothing.
 pub(crate) fn load_file(path: &Path, builtin_tools: &[&str]) -> Result<ActionPolicy> {
@@ -220,19 +232,14 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
     }
     if raw.default.as_deref().is_some_and(|value| value != "deny") {
         return Err(Error::new(format!(
-            "{origin}: default must be deny; agent actions are deny-by-default"
+            "{origin}: default must be deny; tool calls are deny-by-default"
         )));
     }
     let mut rules: Vec<ToolRule> = Vec::new();
     for rule in raw.rules {
         let id = rule.id;
         let fail = |message: String| Error::new(format!("{origin}: rule `{id}`: {message}"));
-        if id.is_empty()
-            || id.len() > 64
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-        {
+        if !crate::hooks::policy::valid_rule_id(&id) {
             return Err(Error::new(format!(
                 "{origin}: rule ids must be 1-64 ASCII letters, digits, '-', '_', or '.'"
             )));
@@ -292,11 +299,11 @@ mod tests {
     const TOOLS: [&str; 2] = ["read_file", "list_dir"];
 
     fn policy(src: &str) -> ActionPolicy {
-        parse(src, "ahi.actions.yaml", &TOOLS).unwrap()
+        parse(src, "ahi.tools.yaml", &TOOLS).unwrap()
     }
 
     fn error(src: &str) -> String {
-        parse(src, "ahi.actions.yaml", &TOOLS)
+        parse(src, "ahi.tools.yaml", &TOOLS)
             .unwrap_err()
             .to_string()
     }
@@ -435,7 +442,7 @@ mod tests {
     }
     #[test]
     fn an_explicit_file_must_exist_and_the_examples_parse() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/actions");
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/tools");
         let mut seen = 0;
         for entry in std::fs::read_dir(&examples).unwrap() {
             let path = entry.unwrap().path();
@@ -461,7 +468,7 @@ mod tests {
         }
         assert_eq!(
             seen, 6,
-            "examples/actions changed; update this test and its README"
+            "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".
         let missing = examples.join("missing.yaml");

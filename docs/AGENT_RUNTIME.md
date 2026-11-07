@@ -79,9 +79,9 @@ OpenShell statements are not re-fetched here. They are used as already written i
 
 v0.1.3, as implemented and as specified:
 
-- `ahi run` reads `.pre-commit-config.yaml`, filters files, and runs builtin checks. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Remote hooks fail with an explicit error.
+- `ahi run` reads `.pre-commit-config.yaml`, filters files, and runs builtin checks. `language: system` and `language: script` run only when an `ahi.hooks.yaml` rule approves the hook id and the exact `entry`. Remote hooks fail with an explicit error.
 - The command set in `src/main.rs` is `run`, `list-checks`, `explain`, `doctor`, `hooks`, `update`, `migrate`, `tui`, and `login`. `ahi hooks install` and `ahi hooks uninstall` exit 1 and name the hook shim phase. Top-level `install` and `uninstall` are not commands. `update` exits 1 and names the attested archive replacement of this binary. `tui` loads OpenAI and gateways from `models.json`. `login` is the OpenAI browser sign-in. `lock`, `verify`, `fetch`, `autoupdate`, and `self-update` are not commands.
-- `ahi.policy.yaml` version 1 is deny-by-default. Unknown keys are errors. The file is parsed. v0.1 consults `trusted_system_hooks` for local system and script hooks.
+- `ahi.hooks.yaml` version 1 is deny-by-default. Unknown keys are errors. Its `action: hook` rules approve local system and script hooks by id and exact entry, in the rule grammar shared with `ahi.tools.yaml`.
 - `ahi::store` is the content-addressed hook cache. It is not a conversation database.
 - `audit.log` is append-only JSON lines: time, command, repository, hook ids, outcome, finding count, local hook ids, and environment names. It does not record file contents or environment values.
 - Release assets, once the workflow in [docs/release.md](release.md) has published them, are a static `x86_64-unknown-linux-musl` binary, a static `aarch64-unknown-linux-musl` binary, and `ahi-<version>-sha256sums.txt`, each attested. macOS and Windows are CI targets. They are not release-archive targets.
@@ -135,7 +135,7 @@ Beside that path, unchanged in role:
 ahi run
 ahi hooks run
     .pre-commit-config.yaml
-    ahi.policy.yaml version 1
+    ahi.hooks.yaml version 1
     builtin checks in process
     pinned local hooks
 ```
@@ -322,9 +322,9 @@ The owner rejected that shape. ahi does not spawn `node`, does not ship `bridge.
 
 ## Policy and hook engine
 
-v0.1 pins a local hook by id and exact `entry` in `ahi.policy.yaml`. Unknown keys error. Absence of the file is deny-by-default. The agent engine keeps that file's version 1 schema unchanged, so a repository that only runs hooks does not gain a new required document.
+A local hook is approved by id and exact `entry` in an `ahi.hooks.yaml` rule. Unknown keys error. Absence of the file is deny-by-default. The agent engine keeps that file's version 1 schema unchanged, so a repository that only runs hooks does not gain a new required document.
 
-Agent rules live in a new file, proposed name `ahi.actions.yaml`. The version 1 parser of `ahi.policy.yaml` does not read it. A missing actions file denies every agent effect. It does not prompt.
+Tool rules live in `ahi.tools.yaml`. The `ahi.hooks.yaml` parser does not read it. A missing actions file denies every agent effect. It does not prompt.
 
 The same file covers every agent action. A pre-commit run is one kind, beside a tool call, a command, a file write, a push, and an outbound message. The v0.1 hook policy file stays the pin for which local hook programs may run. It is not replaced by this file.
 
@@ -361,7 +361,7 @@ This YAML is a sketch of the contract. The `tool_call` subset is implemented for
 
 ### Builtin actions only
 
-ahi is not a package manager, for actions as for hooks. Every tool an agent can call is compiled into the ahi binary, in the same way the checks behind `repo: builtin` are. A rule selects and bounds a builtin action. It cannot name a program to download, an MCP server, a remote tool definition, or a repository to clone. A repository that ships `ahi.actions.yaml` can therefore enable only builtin actions for its own working directory, within the limits each builtin enforces. New tools arrive with new ahi releases.
+ahi is not a package manager, for actions as for hooks. Every tool an agent can call is compiled into the ahi binary, in the same way the checks behind `repo: builtin` are. A rule selects and bounds a builtin action. It cannot name a program to download, an MCP server, a remote tool definition, or a repository to clone. A repository that ships `ahi.tools.yaml` can therefore enable only builtin actions for its own working directory, within the limits each builtin enforces. New tools arrive with new ahi releases.
 
 ### Implemented subset (`tool_call`)
 
@@ -388,10 +388,11 @@ A repository now has up to three ahi-related files, each with one job:
 | File | Governs | Read by |
 | --- | --- | --- |
 | `.pre-commit-config.yaml` | Which hooks run on which files | `ahi run`, upstream pre-commit |
-| `ahi.policy.yaml` | Which local `system`/`script` hook programs may run (pinned id and `entry`) | `ahi run` |
-| `ahi.actions.yaml` | Which agent actions may run, and where | `ahi tui` chat today; the coordinator later |
+| `ahi.hooks.yaml` | Which local `system`/`script` hook programs may run (`action: hook`, matched by id and exact `entry`) | `ahi run` |
+| `ahi.tools.yaml` | Which builtin tools the model may call, and where | `ahi tui` chat today; the coordinator later |
+| `ahi.dev.yaml` | The repository's development image, shell, and runtime preference; grants nothing | `ahi dev` |
 
-They stay separate files with separate parsers so that a repository that only runs hooks never needs agent policy, and agent policy never changes what `ahi run` executes. Open question for the next phase: whether `pre_commit` actions and the other kinds are best expressed in `ahi.actions.yaml` beside `tool_call`, or the per-repository `ahi.*.yaml` files are consolidated into one versioned document. Either way, rules keep the current shape (`id`, `action`, `match`, `effect`, `ask`, `sandbox`), so existing `tool_call` rules carry over.
+They stay separate files with separate parsers so that a repository that only runs hooks never needs agent policy, and agent policy never changes what `ahi run` executes. Decided (0.7.0): one file per job, never a consolidated document, with one rule grammar (`id`, `action`, `match`, `effect`, optional `ask`) across the allowlists so the filename alone states the trust boundary. A future action kind gets its own file if it is a new trust domain, or a new `action` value in the file whose domain it shares.
 
 ### Sandbox direction
 
@@ -424,7 +425,7 @@ Asking the operator is not a fourth verdict. A rule may set `ask: true`. On a ma
 
 **Decision:** `ask: true` is the only prompt, and it is enough for now. The direction is a sandbox plus the declared policy, so a later run needs less confirmation than a prompt on each effect. A configuration that asks for every action invites confirmation without reading the action.
 
-Standing authority is a rule in `ahi.actions.yaml`, reviewed with the repository. It is not a sentence in the transcript.
+Standing authority is a rule in `ahi.tools.yaml`, reviewed with the repository. It is not a sentence in the transcript.
 
 ## Hook contract
 
@@ -437,7 +438,7 @@ Action kinds in the first contract:
 | `file_write` | Before bytes are published over a path | Path prefix, repository root, whether the path is a symlink |
 | `vcs_push` | Before a push or an equivalent publication of git objects | Remote, ref |
 | `outbound_message` | Before a message leaves the machine | Channel, recipient, and a hash of the body |
-| `pre_commit` | Before the existing pre-commit runner starts | Config path. The runner, the config schema, and `ahi.policy.yaml` version 1 stay as specified |
+| `pre_commit` | Before the existing pre-commit runner starts | Config path. The runner, the config schema, and `ahi.hooks.yaml` version 1 stay as specified |
 
 The verdict object:
 
@@ -539,7 +540,7 @@ Proposed commands, additive, and absent until a later phase implements them. The
 | `ahi serve` | Run the coordinator. One writer. Listens on the transports configured from the catalog below. Refuses to start if the store lock is held. |
 | `ahi worker` | Connect to a coordinator through one catalogued transport and execute admitted effects. Does not open the store for write. |
 | `ahi task list` and `ahi task show` | Read the task registry through the coordinator. |
-| `ahi actions check` | Evaluate one action against `ahi.actions.yaml` and print the verdict. Does not execute it. |
+| `ahi actions check` | Evaluate one action against `ahi.tools.yaml` and print the verdict. Does not execute it. |
 | `ahi update` | Replace this ahi binary from an attested archive this repository publishes, after verification. Not a hook-repository command. |
 | `ahi tui [--refresh]` | Load curated models and reference catalogs locally. Explicit `--refresh` or `r` refreshes catalogs. Enter saves `gateway/model` to `selection` and opens local echo-backed chat. `/model` reloads the curated picker locally; cancellation keeps the active model. Quitting the initial picker exits without resuming an old selection. A pipe prints the load and membership diagnostics. |
 | `ahi login` | OpenAI browser sign-in. Prints the URL, may open a browser, and stores the credential in the state directory. |
@@ -591,7 +592,7 @@ Additional adversaries:
 2. Tool results and file contents fed back into the transcript. They are untrusted data on the next turn.
 3. Inbound source events (mail, Slack, GitHub). They cannot create a grant. They can at most become a task the operator's rules already allow the coordinator to open. Opening a task is not permission to push or to send mail.
 4. A worker that has been instructed, by a prompt, to perform an effect the coordinator did not admit. The worker runs only admitted effects. Anything else is a defect.
-5. A sandbox user who can edit `ahi.actions.yaml` inside an OpenShell workspace. Same backstop as the specification: that run is advisory. Enforcement for shared repositories is a runner whose policy the workspace cannot rewrite.
+5. A sandbox user who can edit `ahi.tools.yaml` inside an OpenShell workspace. Same backstop as the specification: that run is advisory. Enforcement for shared repositories is a runner whose policy the workspace cannot rewrite.
 
 Boundaries:
 
@@ -616,7 +617,7 @@ The repository is one package, `ahi`, with a library and a binary, plus the depe
 | --- | --- | --- |
 | `ahi::hooks::policy` | exists | Version 1 hook policy. Unchanged. |
 | `ahi::hooks::store` | exists | Hook cache. Unchanged role. |
-| `ahi::actions` | first agent phase | Parse `ahi.actions.yaml`, evaluate a verdict. |
+| `ahi::tool_policy` | first agent phase | Parse `ahi.tools.yaml`, evaluate a verdict. |
 | `ahi::sandbox` | with v0.4, then reused | Detect an outer sandbox. Apply a host backend to a child. |
 | `ahi::conversation` | store phase | The Rust-native store. Not the hook cache. Not a Node child. |
 | `ahi::coordinator` | coordinator phase | Lock, transport catalog, tasks, worker admission. |
@@ -649,8 +650,8 @@ The root package is `0.1.3`. **Decision:** agent work continues that same versio
 | `update` | Replaces the ahi binary from an attested archive. This version exits 1. Agent work does not use this name for hook pins. `self-update` is not an alias. |
 | `lock`, `verify`, `fetch`, `autoupdate` | These names are not commands. ahi does not install or move hook repositories. |
 | `ahi hooks run` | An alias of `ahi run`, added when the grouped surface is added. The same alias pattern can cover the other hook commands. Aliases are additive. |
-| `ahi.policy.yaml` version 1 | Unchanged. Unknown keys remain errors. Agent keys do not go in this file. |
-| `ahi.actions.yaml` | New. Ignored by `ahi run`. |
+| `ahi.hooks.yaml` version 1 | Rule grammar shared with `ahi.tools.yaml`. Unknown keys remain errors. Tool keys do not go in this file. |
+| `ahi.tools.yaml` | New. Ignored by `ahi run`. |
 | Default `ahi` with no subcommand | Keep today's help text. Do not make a bare `ahi` start a coordinator. |
 | Store files | The hook cache layout stays as specified. The conversation database is a new file under the coordinator's state directory, not inside the repository being checked. |
 | SemVer | Adding commands and a new file is a minor bump once the project is 1.0. Before 1.0, the same additions still must not change `ahi run` exit codes or the version 1 policy schema. A major version is the point at which the conversation schema and the actions schema freeze. It is not a point at which `ahi run` is removed. |
@@ -664,7 +665,7 @@ These phases sit after the hook-runner work. They ship as later ahi releases on 
 | Phase | Relation to the roadmap | Delivered behavior |
 | --- | --- | --- |
 | Specification phases v0.2, v0.3, v0.4 | v0.2 is withdrawn. v0.3 is the single-machine harness. v0.4 is the sandbox. | OpenAI and a custom gateway in `ahi tui`, then sandbox detection. No new builtins in v0.3. No lockfile and no language installer. |
-| Actions | Uses the local system and script process builder that already exists. It does not wait on a language installer. | `ahi.actions.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
+| Actions | Uses the local system and script process builder that already exists. It does not wait on a language installer. | `ahi.tools.yaml`, including `pre_commit` beside tool calls and the other kinds, `ahi actions check`, deny-by-default, `ask: true` only where a rule sets it. `ahi hooks run` alias. `ahi run` unchanged. |
 | Sandbox for effects | After v0.4, reusing its detection and backends. | An approved `command`, `file_write`, or `pre_commit` runs in the default sandbox. Escalation only by rule. The direction is less prompting as the policy and the sandbox cover the effect. Tests follow the specification's Linux, macOS, and Windows honesty table. |
 | Conversation store | After the actions phase. | Rust-native commits, resume, one writer, grants and receipts, `synchronous = FULL` and `fullfsync = ON`. No Node child. No provider required to test resume. |
 | Coordinator | After the store. | `ahi serve`, `ahi worker`, task registry, the transport catalog with the local socket as the unconfigured listener, exact task id or exact source link, uncertain-outcome rule. No source adapters. OpenAI is the first provider, with browser login. `models.json` and gateway discovery are specified above and are not required for that first provider. Neither runs merely because the process started. |

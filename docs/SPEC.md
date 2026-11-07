@@ -42,14 +42,14 @@ What that means for ahi:
 
 1. **The image build is the online step for the ahi binary.** The image contains ahi. ahi does not fetch hook repositories during the image build or at runtime. Builtin checks do not open a network connection.
 2. **No writable home.** The cache is `--cache-dir`, else `AHI_HOME`, else an absolute `$XDG_CACHE_HOME/ahi`, else `$HOME/.cache/ahi`; a process without a home sets one of those or `--state-dir`. Hook scratch uses `std::env::temp_dir()`. `ahi run` needs no cache at all; it only writes `audit.log` to the state directory and warns when that location cannot be resolved. A store whose object directory already exists opens read-only when it cannot be written. `put` fails closed in that case. `get` re-hashes.
-3. **In-sandbox hooks are advisory.** The sandbox user can edit `.pre-commit-config.yaml`, `ahi.policy.yaml`, and the arguments passed to `ahi`. A hook run inside that sandbox is fast feedback. CI running `ahi` on the commit under review is the backstop. The threat model states this in one place so it is not implied by the sandbox marketing.
+3. **In-sandbox hooks are advisory.** The sandbox user can edit `.pre-commit-config.yaml`, `ahi.hooks.yaml`, `ahi.tools.yaml`, and the arguments passed to `ahi`. A hook run inside that sandbox is fast feedback. CI running `ahi` on the commit under review is the backstop. The threat model states this in one place so it is not implied by the sandbox marketing.
 4. **Do not nest by default.** v0.4 detects that the process is already inside an OpenShell sandbox (or another sandbox with the same constraints) and does not apply a second Landlock or seccomp filter. Host-side backends remain an option for a machine that is not already sandboxed. The documented `EPERM` on `SECCOMP_SET_MODE_FILTER` means a nested seccomp filter is expected to fail. **Unverified:** this project did not run ahi inside OpenShell, did not try to nest Landlock or seccomp, and did not find OpenShell docs for macOS or native Windows.
 5. **Git stays inside the sandbox.** `--from-ref` and `--to-ref` stay. ahi does not import a host commit and does not require host-side signing. Two lower-priority ideas remain, and they are not v0.1: load the config from a git ref, and refuse a config that the checked range itself modified.
 6. **Placeholder credentials for git.** Ian's workflow is git over HTTPS inside the sandbox, using the provider placeholder. The provider docs describe HTTP placeholder substitution. An end-to-end `git push` with a placeholder token was not executed for this spec. **Unverified.**
 
 ## Goals
 
-1. Read the pre-commit framework's configuration files (`.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`) and run a useful subset of what they describe, including the same file-selection and file-filtering model.
+1. Read the pre-commit framework's configuration file (`.pre-commit-config.yaml`) and run a useful subset of what they describe, including the same file-selection and file-filtering model.
 2. Fail closed on supply-chain and sandbox boundaries that upstream pre-commit leaves open: floating refs, runtime downloads, unhashed extra dependencies, `language: system` / `script`, and network during `run`.
 3. Ship fast offline checks for the repositories described above, addressable as `repo: builtin` with ids such as `ahi/trailing-whitespace`.
 4. Expose a small Rust library (check trait, runner, content-addressed store, text/JSON/SARIF formatters) and an `ahi` binary.
@@ -60,7 +60,7 @@ What that means for ahi:
 - A drop-in bug-for-bug reimplementation of every pre-commit language, hook, and command. [prek](https://prek.j178.dev/dev/) already pursues that, and it auto-installs toolchains. ahi will not.
 - Publishing to crates.io, cutting a release, pushing a git tag, or running `scripts/cut-release.sh`. The release script and the tag-gated publish workflow are in the tree so a later release has a path. This work does not invoke them. SemVer versus calendar versioning is an open decision.
 - Hosting or calling pre-commit.ci, or any other third-party CI service. **Inferred.**
-- Executing arbitrary hook languages. `language: system` and `language: script` run only when `ahi.policy.yaml` pins the hook id and the exact `entry`. Other languages fail with an explicit error. Remote repos are not fetched and are not substituted at run time.
+- Executing arbitrary hook languages. `language: system` and `language: script` run only when an `ahi.hooks.yaml` rule approves the hook id and the exact `entry`. Other languages fail with an explicit error. Remote repos are not fetched and are not substituted at run time.
 - Rewriting the worktree except for three explicit fixers. `ahi run --fix` rewrites end-of-file, trailing whitespace, and mixed line endings. It does not stash. A file with unstaged changes is left alone. Other builtins stay report-only. The partial-commit stash protocol is still not implemented.
 - A new configuration language. `prek.toml` and `lefthook.yml` / `hk.pkl` are out of scope. ahi reads pre-commit YAML, plus an optional repo-local policy file that upstream pre-commit ignores.
 
@@ -80,7 +80,7 @@ That download-on-demand behavior is the main incompatibility ahi is built to ref
 
 [prek](https://github.com/j178/prek) (Rust, MIT, about 8679 GitHub stars on 2026-10-25) is a single static binary positioned as a faster drop-in for pre-commit. From its [compatibility](https://prek.j178.dev/dev/compatibility/) and [differences](https://prek.j178.dev/diff/) docs:
 
-- Existing `.pre-commit-config.yaml` / `.yml` files and `.pre-commit-hooks.yaml` manifests work.
+- Existing `.pre-commit-config.yaml` / `.yml` files work. The `.pre-commit-hooks.yaml` manifest a hook repository publishes is not read: ahi never fetches a hook repository.
 - It adds `repo: builtin`, native Rust reimplementations of common hooks, `prek.toml`, workspace mode, hook priority, and glob forms of `files` / `exclude`.
 - It installs managed toolchains (Python via uv, Node, Bun, Deno, Go, Rust, Ruby, and others) and shares environments across hooks.
 - `pre-commit hazmat` is not implemented. `migrate-config` is not the same command: prek's migration path targets `prek.toml`.
@@ -99,7 +99,7 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 
 | | pre-commit | prek | lefthook | hk | ahi |
 | --- | --- | --- | --- | --- | --- |
-| Config | `.pre-commit-config.yaml` | that, plus `prek.toml` | `lefthook.yml` | `hk.pkl` | pre-commit YAML, plus optional `ahi.policy.yaml` |
+| Config | `.pre-commit-config.yaml` | that, plus `prek.toml` | `lefthook.yml` | `hk.pkl` | pre-commit YAML, plus optional `ahi.hooks.yaml`, `ahi.tools.yaml`, `ahi.dev.yaml` |
 | Remote hooks | clone at `rev` | clone at `rev` | remotes | imports | refused. Checkers are `repo: builtin` |
 | Runtimes | downloads Node, Rust, Go, others | downloads several toolchains | uses what you run | mise or `PATH` | allowlisted, already installed, never downloaded |
 | Network on `run` | yes, on first use | yes, on first use | when fetching remotes | when mise fetches | no |
@@ -115,7 +115,6 @@ ahi is not a fork of prek and does not depend on it. The `repo: builtin` idea is
 | --- | --- | --- | --- |
 | `.pre-commit-config.yaml` | parsed and enforced |  | Unknown keys are errors. Upstream logs a warning ([`warn_unknown_keys_root`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/clientlib.py)). |
 | `.pre-commit-config.yml` | parsed if `.yaml` is absent |  | Extension. Upstream's constant is `.yaml` only ([`constants.py`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/constants.py)). If both names exist, ahi errors. |
-| `.pre-commit-hooks.yaml` | parsed by the library | not used to fetch or execute a remote repo | Same strictness: unknown keys error. ahi does not clone the repo that would contain this file. |
 | Top-level `repos`, `files`, `exclude`, `fail_fast`, `default_stages`, `default_install_hook_types`, `default_language_version`, `minimum_pre_commit_version` | parsed; `files` / `exclude` / `fail_fast` / `default_stages` affect `ahi run` | install uses `default_install_hook_types` | `default_stages` default remains "all stages", matching upstream. |
 | `ci:` | accepted as a mapping and retained on the config struct | not acted on | ahi does not talk to pre-commit.ci. Unknown nested keys are errors, unlike upstream, which accepts any dict. Schema of the mapping matches [pre-commit.ci](https://pre-commit.ci/) / [`pre_commit_ci_config.py`](https://github.com/pre-commit-ci/pre-commit-ci-config/blob/main/pre_commit_ci_config.py). |
 | `repo` URL | parsed, not cloned, not substituted | stays refused | No network on `run`. ahi does not fetch or install hook repositories. A remote hook fails with an explicit error. `ahi migrate` may suggest a builtin id; `ahi run` does not apply that table. |
@@ -201,37 +200,6 @@ repos:
         exclude: ^vendor/
 ```
 
-### Manifest hook (`.pre-commit-hooks.yaml` and `repo: local`)
-
-Required: `id`, `name`, `entry`, `language`.
-
-Optional, with upstream defaults from [`MANIFEST_HOOK_DICT`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/clientlib.py):
-
-| Key | Default |
-| --- | --- |
-| `alias` | `""` |
-| `files` | `""` |
-| `exclude` | `"^$"` |
-| `types` | `[file]` |
-| `types_or` | `[]` |
-| `exclude_types` | `[]` |
-| `additional_dependencies` | `[]` |
-| `args` | `[]` |
-| `always_run` | `false` |
-| `fail_fast` | `false` |
-| `pass_filenames` | `true` |
-| `description` | `""` |
-| `language_version` | `default` |
-| `log_file` | `""` |
-| `require_serial` | `false` |
-| `stages` | `[]`, later replaced by `default_stages` when empty |
-| `verbose` | `false` |
-| `minimum_pre_commit_version` | `"0"` |
-
-Language names, from [`all_languages.py`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/all_languages.py): `conda`, `coursier`, `dart`, `docker`, `docker_image`, `dotnet`, `fail`, `golang`, `haskell`, `julia`, `lua`, `node`, `perl`, `pygrep`, `python`, `r`, `ruby`, `rust`, `swift`, `unsupported`, `unsupported_script`.
-
-Aliases accepted on input and rewritten, matching [`_translate_language`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/clientlib.py): `system` becomes `unsupported`, `script` becomes `unsupported_script`. After rewriting, both are still denied unless the policy trusts that hook id.
-
 ### Stages
 
 Hook types ([`HOOK_TYPES`](https://github.com/pre-commit/pre-commit/blob/main/pre_commit/clientlib.py)): `commit-msg`, `post-checkout`, `post-commit`, `post-merge`, `post-rewrite`, `pre-commit`, `pre-merge-commit`, `pre-push`, `pre-rebase`, `prepare-commit-msg`.
@@ -246,28 +214,28 @@ Upstream values are strings passed through to the language installer (`pip insta
 
 `ahi run` never installs dependencies. `additional_dependencies` is refused. A string such as `requests` or `ruff>=0.1` is not a download.
 
-### Policy file
+### Hooks policy file
 
-`ahi.policy.yaml` sits next to `.pre-commit-config.yaml`. Upstream pre-commit does not read it. Absence means the defaults below, which are deny-by-default.
+`ahi.hooks.yaml` sits next to `.pre-commit-config.yaml`. Upstream pre-commit does not read it. Absence is deny-by-default: no `system` or `script` hook runs. The file uses the rule grammar shared with `ahi.tools.yaml`; the trust boundary is the filename, so a repository that only runs hooks never carries tool policy and a tool-policy edit never changes what `ahi run` executes.
 
 ```yaml
 version: 1
-# Unused. ahi does not fetch hook repositories. Empty is the default.
-repo_allow: []
-# Runtimes ahi may invoke. It will not download them.
-runtime_allow: []
-# Each item is an id plus the exact entry string. A bare id parses and does not authorize.
-trusted_system_hooks: []
-# Hook ids allowed to open the network. Default is none. Enforced once sandboxes exist.
-# A trusted local hook is not sandboxed in this version, so the network is not blocked for it.
-network_hooks: []
+default: deny
 # Extra toolchain location names for every local system/script hook.
 # Names only, never values. Credential names are a parse error.
 # The default pass-through (CARGO_HOME, RUSTUP_HOME, RUSTUP_TOOLCHAIN) is not listed here.
 toolchain_env: []
+rules:
+  - id: rust-clippy
+    action: hook
+    # Both must equal the hook's id and exact entry string. `args` are not part of the match.
+    match: {id: rust-clippy, entry: cargo clippy --all-targets --all-features -- -D warnings}
+    effect: approve
+    # Optional, for this rule only.
+    toolchain_env: []
 ```
 
-Unknown keys are errors. v0.1 parses the file when it is present and rejects a malformed one. v0.1 does not fetch, so `repo_allow` is not consulted yet. A `language: system` or `script` hook (stored as `unsupported` or `unsupported_script`) runs only when `trusted_system_hooks` contains that id and the exact `entry` string. `args` are not part of the pin. A bare id does not authorize. A pin may also set `toolchain_env` to extra location names for that entry. Those names are added to the global `toolchain_env` list.
+Unknown keys are errors. `action` is `hook`; `effect` is `approve` or `deny`. An approve rule needs `match.entry`: an id alone never authorizes a command. A deny rule may omit `match.entry` to deny every entry for that hook id, and a matching deny rule beats every approve rule. `ask` is a parse error here, since a pre-commit run has no operator to ask. A `language: system` or `script` hook (stored as `unsupported` or `unsupported_script`) runs only when an approve rule matches both its id and its exact `entry`. The retired `ahi.policy.yaml` is an error when present, never silently ignored.
 
 ### Filtering
 
@@ -381,9 +349,9 @@ Trust boundaries:
 | `rev` | Parsed and ignored for execution. ahi does not resolve it and does not clone the repo. |
 | Cache | Content-addressed. Run verifies before use. The store opens read-only when the object directory cannot be written. The cache path is not inside the repository being checked, and it is not assumed to live under a home directory. |
 | Network | Builtin checks do not open one. ahi does not fetch hook repositories. A trusted local hook is not sandboxed in this version, so ahi cannot stop that process from opening a socket. |
-| Runtimes | A name on `runtime_allow` plus a binary already on `PATH` or an explicit path. No nodeenv, no rustup installer, no Go tarball. |
-| `system` / `script` | Denied unless `trusted_system_hooks` has the hook id and the exact `entry`. A bare id does not authorize. |
-| Network-using hooks | `network_hooks` is the allowlist once a sandbox can block the network. This version has no sandbox, so it does not pretend the allowlist is enforced. |
+| Runtimes | A binary already on `PATH` or an explicit path. No nodeenv, no rustup installer, no Go tarball. There is no runtime allowlist; ahi runs only builtin checks and approved local hooks. |
+| `system` / `script` | Denied unless an `ahi.hooks.yaml` approve rule matches the hook id and the exact `entry`. An id alone does not authorize. |
+| Network-using hooks | A future `network: true` on a hook rule is the allowlist once a sandbox can block the network. This version has no sandbox, so it does not pretend the allowlist is enforced. |
 | Environment | Local system and script hooks get the scrubbed environment below. Toolchain pass-through is names of locations, never credentials, and never an installer. |
 | Files the check reads | Opened with `O_NOFOLLOW` where the OS supports it. Paths that escape the repo root are findings, not inputs. |
 
@@ -399,7 +367,7 @@ The pre-commit config keys `ci.autoupdate_branch`, `ci.autoupdate_commit_msg`, a
 
 ### Allowlist
 
-`repo_allow` is not consulted. ahi does not fetch a URL from the config, so there is no remote to allow.
+There is no remote-repository allowlist. ahi does not fetch a URL from the config, so there is no remote to allow.
 
 ### Runtimes
 
@@ -436,7 +404,7 @@ Host-side sandboxing is an option for a process that is not already sandboxed, a
 | macOS | `sandbox-exec` with a generated SBPL profile `(deny default)` plus explicit allows | Best-effort filesystem and network denial for the child | Apple has treated `sandbox-exec` as a deprecated, undocumented interface for years. It is not a security boundary against a process that can exploit the kernel, and profile behavior differs across OS versions. ahi reports the backend name in `ahi doctor` and does not claim parity with Landlock. **Unverified:** no sandbox profile was executed while writing this spec. |
 | Windows | A job object (kill-on-close, active-process limit) around the child | Contains the process tree so a hook cannot orphan itself | A job object does not restrict filesystem or network. Restricted tokens / AppContainer are the real filesystem boundary and are not promised for the first Windows sandbox cut. `ahi doctor` will say "process-tree only" on Windows until that exists. |
 
-If ahi itself selected a backend, and that backend cannot enforce "no network", and the hook is not in `network_hooks`, the hook does not run.
+If ahi itself selected a backend, and that backend cannot enforce "no network", and no hook rule grants it the network, the hook does not run.
 
 Builtin checks stay in-process and offline. They do not need a sandbox to avoid the network; they never open one.
 
@@ -606,8 +574,10 @@ Library modules:
 
 | Module | Responsibility |
 | --- | --- |
-| `ahi::hooks::config` | Parse and validate `.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`. Errors carry path, line, and column when the parser provides them. |
-| `ahi::hooks::policy` | Parse `ahi.policy.yaml`. |
+| `ahi::hooks::config` | Parse and validate `.pre-commit-config.yaml`. Errors carry path, line, and column when the parser provides them. |
+| `ahi::hooks::policy` | Parse `ahi.hooks.yaml`. |
+| `ahi::tool_policy` | Parse `ahi.tools.yaml`, evaluate a verdict. |
+| `ahi::dev` | `ahi dev`, including `ahi.dev.yaml`. |
 | `ahi::hooks::identify` | File-type tags. |
 | `ahi::hooks::filter` | Include/exclude/types and the xargs partition helper. |
 | `ahi::hooks::git` | Staged / all / range file lists, repo root, file mode. |
@@ -703,7 +673,7 @@ Chat, Models, and Catalog share a context-aware Commands registry and popup (`sr
 
 Gateway refresh requests `GET <origin>/agent/models.json`, where the origin is `baseUrl` with its path removed. This is a gateway-specific discovery convention, not a standardized catalog endpoint. The gateway retains `/pi/agent/model.json` as a legacy alias; ahi requests only the canonical route. It sends no credential and follows no redirect, with a 15-second timeout and 1 MiB cap. The supported schema accepts a flat provider or Pi-shaped `providers` map and requires a supported `api`, a safe marker/reference `apiKey`, valid provider/model IDs, finite nonnegative prices when supplied, text/image modalities, and the typed metadata subset. Unsupported fields do not enable arbitrary Pi features or credential commands. New discovery selects a unique compatible provider, or an exact entered inference URL when several candidates exist; registered refresh selects the saved identifier. A declared same-origin `baseUrl` supplies the new registration's inference path and is shown in Review; cross-origin or changed registered paths are rejected. No inference path is guessed. The old `kept-config` fallback is removed: configured ids always remain the picker list, regardless of refresh results.
 
-OpenAI refresh uses only credentials marked for the new ChatGPT direct-token flow, from `credentials/openai.json`, for best-effort `GET https://api.openai.com/v1/models`. Browser tokens are never forwarded to proxy overrides. Old Codex-flow credentials produce a migration diagnostic without being sent anywhere. The earlier manual HTTP 403 used an old credential. A subsequent live request with a new direct-token credential returned HTTP 200 and `models[].slug` metadata. The decoder accepts that format and the standard `data[].id` format, retaining all reported IDs in order without visibility filtering. A 403 reports a discovery limitation, preserving catalogs and curated IDs, without falling back to Codex or bundling Pi's list. Expiry is checked before requests; at most one renewal/retry is allowed per refresh. Token rotation is persisted before retry. Requests follow no redirects, time out after 15 seconds and cap bodies at 1 MiB. Tokens and response bodies are not printed or stored in catalogs. Catalog source metadata records the fixed Platform URL. Pi documents the grant for Responses, not Decisions; ahi implements `POST https://api.openai.com/v1/responses` with its existing protected credential lifecycle. Registered gateways use a separate streaming Chat Completions backend. The typed transport discriminant pins browser credential destinations, disallows redirects/endpoint overrides, and normalizes text, reported usage, and validated function requests into common events. One definitive pre-stream 401 may renew/resubmit; no ambiguous failure or failure after streaming retries generation. Browser requests use `store:false`, text history and capability-gated nested reasoning, omitting unsupported output-limit/temperature fields. Bounded SSE parsing requires a matching successful terminal response and finished output items; Content-Type is diagnostic context, not a header-only acceptance gate. Valid events with incorrect/missing media types work; non-SSE JSON/HTML, EOF, incomplete/refused/failed responses, and conflicting tool calls fail. Format diagnostics expose only HTTP status, recognized media-type categories and fixed body classifications, never raw headers/bodies. Tool execution goes through the same `ahi.actions.yaml` policy as every protocol. Local fixtures verify transport behavior, not live OpenAI inference acceptance. See [OpenAI inference](OPENAI_INFERENCE.md) and [Tool calls](TOOL_CALLS.md).
+OpenAI refresh uses only credentials marked for the new ChatGPT direct-token flow, from `credentials/openai.json`, for best-effort `GET https://api.openai.com/v1/models`. Browser tokens are never forwarded to proxy overrides. Old Codex-flow credentials produce a migration diagnostic without being sent anywhere. The earlier manual HTTP 403 used an old credential. A subsequent live request with a new direct-token credential returned HTTP 200 and `models[].slug` metadata. The decoder accepts that format and the standard `data[].id` format, retaining all reported IDs in order without visibility filtering. A 403 reports a discovery limitation, preserving catalogs and curated IDs, without falling back to Codex or bundling Pi's list. Expiry is checked before requests; at most one renewal/retry is allowed per refresh. Token rotation is persisted before retry. Requests follow no redirects, time out after 15 seconds and cap bodies at 1 MiB. Tokens and response bodies are not printed or stored in catalogs. Catalog source metadata records the fixed Platform URL. Pi documents the grant for Responses, not Decisions; ahi implements `POST https://api.openai.com/v1/responses` with its existing protected credential lifecycle. Registered gateways use a separate streaming Chat Completions backend. The typed transport discriminant pins browser credential destinations, disallows redirects/endpoint overrides, and normalizes text, reported usage, and validated function requests into common events. One definitive pre-stream 401 may renew/resubmit; no ambiguous failure or failure after streaming retries generation. Browser requests use `store:false`, text history and capability-gated nested reasoning, omitting unsupported output-limit/temperature fields. Bounded SSE parsing requires a matching successful terminal response and finished output items; Content-Type is diagnostic context, not a header-only acceptance gate. Valid events with incorrect/missing media types work; non-SSE JSON/HTML, EOF, incomplete/refused/failed responses, and conflicting tool calls fail. Format diagnostics expose only HTTP status, recognized media-type categories and fixed body classifications, never raw headers/bodies. Tool execution goes through the same `ahi.tools.yaml` policy as every protocol. Local fixtures verify transport behavior, not live OpenAI inference acceptance. See [OpenAI inference](OPENAI_INFERENCE.md) and [Tool calls](TOOL_CALLS.md).
 
 A terminal opens a grouped curated picker across OpenAI and all registered gateways. Groups follow provider object key order in `models.json`; implicit OpenAI starts first until explicitly placed by a reorder. On a provider header, Shift+Up/Down or Shift+J/K moves the group and atomically saves provider key order without changing model lists or credentials. `c` opens the provider's catalog curation view: Up/Down or j/k moves the highlight, Shift+Up/Down or Shift+j/k reorders the highlighted checked model, Space toggles inclusion, and each change saves immediately. Checked IDs lead in saved order; missing-catalog IDs stay checked and removable. `y` copies an ID using an available system clipboard tool, or queues it to print on exit. Esc returns to the main picker.
 

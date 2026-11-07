@@ -88,7 +88,7 @@ An absent value means unknown or the documented legacy transport default, not an
 - Enforce a declared `maxRequestBytes` against the actual serialized UTF-8 request before network submission.
 - Apply reasoning effort only when both model reasoning and compatibility support explicitly permit it. Do not send the literal `off` as an OpenAI effort value. Preserve store/developer/tool/thinking-message compatibility flags without inventing workflows that do not exist. If store is sent, it must be false and only when supported.
 - Use reported token usage and complete pricing information for cost calculations; keep unknown costs unknown. Cached input must not be double-counted. Prices use USD per million tokens, following Pi's documented units.
-- Show model names and useful capability/limit metadata in selection/catalog UI. Known context capacity reaches chat's existing context meter. Image metadata does not enable image attachment. Tool metadata does not grant execution: gateway builtin tools require local `ahi.actions.yaml` approval, and OpenAI Responses tools remain disabled.
+- Show model names and useful capability/limit metadata in selection/catalog UI. Known context capacity reaches chat's existing context meter. Image metadata does not enable image attachment. Tool metadata does not grant execution: gateway builtin tools require local `ahi.tools.yaml` approval, and OpenAI Responses tools remain disabled.
 
 The separately implemented [OpenAI browser-login transport](OPENAI_INFERENCE.md) uses Responses rather than these Chat Completions wire fields. It retains shared metadata/byte limits/accounting but omits browser-token-unsupported output-limit fields, following the inspected Pi adapter.
 

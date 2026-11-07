@@ -2,7 +2,7 @@
 //! results. Every requested call produces exactly one result, including calls
 //! that were invalid, denied, cancelled, or over a limit.
 //!
-//! Authority comes from two places only: rules in `ahi.actions.yaml` and
+//! Authority comes from two places only: rules in `ahi.tools.yaml` and
 //! decisions received on the `ApprovalReply` channel the screen holds. Model
 //! text, tool arguments, and tool output cannot add a rule or a grant.
 
@@ -15,9 +15,9 @@ use super::tools::{self, PreparedCall, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
 };
-use crate::actions::{self, path_within, ActionPolicy, Verdict};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
+use crate::tool_policy::{self as tool_policy, path_within, ActionPolicy, Verdict};
 
 /// Model responses that may request tools within one operator turn.
 pub(super) const MAX_ROUNDS: usize = 8;
@@ -73,9 +73,9 @@ enum Plan {
 }
 
 impl ToolRuntime {
-    /// `None` when no `ahi.actions.yaml` rule can approve a builtin tool, in
+    /// `None` when no `ahi.tools.yaml` rule can approve a builtin tool, in
     /// which case no tool is advertised and the request is unchanged.
-    /// `policy_file` is the operator's explicit `--actions` file; it replaces
+    /// `policy_file` is the operator's explicit `--tools` file; it replaces
     /// the working-directory lookup and must exist. Rule paths and tool
     /// confinement stay relative to `directory` either way.
     pub(super) fn load(
@@ -87,8 +87,8 @@ impl ToolRuntime {
         policy_file: Option<&Path>,
     ) -> Result<Option<Self>> {
         let policy = match policy_file {
-            Some(path) => Some(actions::load_file(path, &tools::BUILTIN)?),
-            None => actions::load(directory, &tools::BUILTIN)?,
+            Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
+            None => tool_policy::load(directory, &tools::BUILTIN)?,
         };
         let Some(policy) = policy else {
             return Ok(None);
@@ -194,7 +194,7 @@ impl ToolRuntime {
             } => Plan::Done(denied(&prepared, &format!("denied by rule {rule}"))),
             Verdict::Deny { rule_id: None } => Plan::Done(denied(
                 &prepared,
-                &format!("no {} rule allows this call", actions::FILE_NAME),
+                &format!("no {} rule allows this call", tool_policy::FILE_NAME),
             )),
             Verdict::Approve { .. } => Plan::Run(prepared),
             Verdict::Ask { .. } if self.granted(&prepared) => Plan::Run(prepared),

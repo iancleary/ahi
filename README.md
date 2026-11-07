@@ -1,6 +1,6 @@
 # ahi
 
-`ahi` is a Rust library and command-line tool with two jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration files (`.pre-commit-config.yaml` and `.pre-commit-hooks.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model call read-only workspace tools only where an `ahi.actions.yaml` rule approves them.
+`ahi` is a Rust library and command-line tool with two jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration file (`.pre-commit-config.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model call read-only workspace tools only where an `ahi.tools.yaml` rule approves them.
 
 ## Installation
 
@@ -83,7 +83,7 @@ For the hook runner, the `examples/` directory has ready-made configurations. `e
 ahi run --fix
 ```
 
-`examples/actions` holds chat tool policies (`ahi.actions.yaml`) from read-everything to deny-all, for `ahi tui --actions <file>` or copying into a repository; its README describes each.
+`examples/tools` holds chat tool policies (`ahi.tools.yaml`) from read-everything to deny-all, for `ahi tui --tools <file>` or copying into a repository; its README describes each.
 
 `examples/starter/pre-commit` is a sample hook:
 
@@ -91,6 +91,15 @@ ahi run --fix
 #!/bin/sh
 exec ahi run --fix
 ```
+
+A repository can carry up to four ahi-related files, one per job. The two allowlists share one rule grammar (`id`, `action`, `match`, `effect`, optional `ask`), and the filename says which trust boundary a diff touches. Unknown keys are errors in every file, and the retired names `ahi.policy.yaml` and `ahi.actions.yaml` are refused rather than ignored.
+
+| File | Decides | Read by |
+| --- | --- | --- |
+| `.pre-commit-config.yaml` | Which hooks run; upstream pre-commit format | `ahi run`, `ahi migrate` |
+| `ahi.hooks.yaml` | Which local `system`/`script` hooks may execute, by id and exact entry (`action: hook`) | `ahi run` |
+| `ahi.tools.yaml` | Which builtin read-only tools the model may call, where, and whether to ask (`action: tool_call`) | `ahi tui` |
+| `ahi.dev.yaml` | The development image, shell, and runtime this repository prefers; grants nothing | `ahi dev` |
 
 ## Commands
 
@@ -113,7 +122,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 
 Staged files. `[HOOK]` runs only that hook id or alias. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets, `--hook-stage` selects a stage other than pre-commit, and `--commit-msg-filename` feeds the commit-message path to commit-msg and prepare-commit-msg stages. `--format` is `text`, `json`, or `sarif`. `--fail-fast` stops after the first failing hook, and `--verbose`/`-v` shows passing local-hook output. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings.
 
-Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when an `ahi.hooks.yaml` rule approves that hook id and the exact `entry` string. The entry is split without a shell. A missing rule prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
 
 ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
 
@@ -123,7 +132,7 @@ ahi runs tools that are already installed. It can pass a toolchain manager the v
 | Policy only (`toolchain_env`) | `GOROOT`, `GOPATH`, `VIRTUAL_ENV`, `NVM_DIR`. Not enabled by default. `NVM_DIR` does not enable Node and does not run `npm install`. |
 | Never passed | Names containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and names starting with `AWS_`, `AZURE_`, or `GITHUB_`. Listing one in the policy is an error. |
 
-`ahi explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one `trusted_system_hooks` entry applies only to that id and entry.
+`ahi explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one rule applies only to that rule's id and entry.
 
 Builtin checks are report-only unless `--fix` is passed. `--fix` rewrites only `ahi/end-of-file`, `ahi/trailing-whitespace`, and `ahi/line-endings`, then the hook fails because the file changed. A hook argument `--fix` does the same for those three. `--fix=no` on mixed line endings stays report-only. The write is a temp file in the same directory, fsynced, then renamed. Symlinks are refused. Paths outside the selected set are refused. A file with unstaged changes is left unchanged. ahi does not stash.
 
@@ -202,10 +211,10 @@ Press **`/`** in **Chat, Models, or Catalog** to open the same **Commands** popu
 
 #### Tools and policy
 
-Tools are off unless the working directory has an `ahi.actions.yaml` rule that approves one, for every provider. Only builtin, read-only `read_file` and `list_dir` exist; they are compiled into ahi, use software path checks within the working directory, exclude ahi's own directories, and return bounded output. These in-process checks are not an OS sandbox. A rule with `ask: true` shows an approval prompt in chat that lists the answers for each call: move the highlight with **↑/↓** and apply it with **Enter**, jump to another numbered call with **Shift+↑/↓**, or press the answer's letter (**y** once, **s** for this session under the shown directory and destination, **n** deny, **a** approve the rest, **Esc** deny the rest). Dismissing the prompt cancels the whole batch, including calls a rule had approved. Model output and tool results never grant authority. Without the file, no `tools` are sent and requested calls fail with `tool execution is disabled`. `ahi tui --actions <file>` uses that policy file instead of the working directory's `ahi.actions.yaml`; it must exist and parse, and its rule paths still apply to the working directory. `examples/actions` holds ready-made policies for trying the tools. Approved file contents are sent to the selected provider. Invalid/incomplete calls fail closed; raw tool arguments are not printed in notices or errors. See [Chat screen](docs/CHAT_SCREEN.md#tool-calls).
+Tools are off unless the working directory has an `ahi.tools.yaml` rule that approves one, for every provider. Only builtin, read-only `read_file` and `list_dir` exist; they are compiled into ahi, use software path checks within the working directory, exclude ahi's own directories, and return bounded output. These in-process checks are not an OS sandbox. A rule with `ask: true` shows an approval prompt in chat that lists the answers for each call: move the highlight with **↑/↓** and apply it with **Enter**, jump to another numbered call with **Shift+↑/↓**, or press the answer's letter (**y** once, **s** for this session under the shown directory and destination, **n** deny, **a** approve the rest, **Esc** deny the rest). Dismissing the prompt cancels the whole batch, including calls a rule had approved. Model output and tool results never grant authority. Without the file, no `tools` are sent and requested calls fail with `tool execution is disabled`. `ahi tui --tools <file>` uses that policy file instead of the working directory's `ahi.tools.yaml`; it must exist and parse, and its rule paths still apply to the working directory. `examples/tools` holds ready-made policies for trying the tools. Approved file contents are sent to the selected provider. Invalid/incomplete calls fail closed; raw tool arguments are not printed in notices or errors. See [Chat screen](docs/CHAT_SCREEN.md#tool-calls).
 
 ```yaml
-# ahi.actions.yaml
+# ahi.tools.yaml
 version: 1
 default: deny
 rules:
@@ -272,7 +281,7 @@ Opens a shell in the opinionated development image that [iancleary/ahi-images](h
 | `ahi dev status` | Print the runtime, the image reference and where it came from, the mount, and the local image id and creation time. |
 | `ahi dev clean` | Remove the local image. |
 
-The image reference is the first of `--image`, `AHI_DEV_IMAGE`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/bash`. `--runtime <cmd>` or `AHI_DEV_RUNTIME` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
+The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default. `ahi.dev.yaml` (`version: 1` with optional `image`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell`, else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/bash`. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
 
 ## Files and directories
 
