@@ -4,6 +4,8 @@
 
 ### Added
 
+- Two builtin read-only chat tools, `find_files` (glob over names or paths) and `search_files` (regular expression or literal, `path:line:text`), both in process with no `rg`, `fd`, or `git` subprocess, honoring `.gitignore`, pruning `.git` and ahi's directories, never following symbolic links, with sorted output and fixed caps. `read_file` takes `offset` and `limit` and, when the 64 KiB cap is hit, ends with the offset to continue from instead of a bare truncation marker. The repository's `ahi.tools.yaml` and `examples/tools/read-all.yaml` approve the new tools.
+
 - `ahi dev` and `ahi dev run` set the container hostname to the image's short name (`ahi-dev-rust` for `ghcr.io/iancleary/ahi-dev-rust:latest`) and pass the mounted directory's name as `AHI_DEV_PROJECT`, so the image's prompt reads `dev@ahi-dev-rust:<version> <project>`.
 
 ## 0.10.0 (2026-11-07)

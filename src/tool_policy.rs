@@ -296,7 +296,7 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
 mod tests {
     use super::*;
 
-    const TOOLS: [&str; 2] = ["read_file", "list_dir"];
+    const TOOLS: [&str; 4] = ["read_file", "list_dir", "find_files", "search_files"];
 
     fn policy(src: &str) -> ActionPolicy {
         parse(src, "ahi.tools.yaml", &TOOLS).unwrap()

@@ -367,7 +367,7 @@ ahi is not a package manager, for actions as for hooks. Every tool an agent can 
 
 [Tool catalog](TOOL_CATALOG.md) surveys the built-in tools and permission grammars of nine harnesses and proposes the next tools for this file.
 
-Gateway Chat Completions implements `action: tool_call` for the builtin, read-only tools `read_file` and `list_dir`. [Chat screen](CHAT_SCREEN.md#tool-calls) documents the behavior. The schema:
+Every protocol implements `action: tool_call` for the builtin, read-only tools `read_file`, `list_dir`, `find_files`, and `search_files`. [Chat screen](CHAT_SCREEN.md#tool-calls) documents the behavior. The schema:
 
 | Field | Meaning |
 | --- | --- |
@@ -380,6 +380,8 @@ Gateway Chat Completions implements `action: tool_call` for the builtin, read-on
 | `rules[].effect` | `approve` or `deny`. |
 | `rules[].ask` | Optional, only with `approve`: prompt the operator. |
 | `rules[].sandbox` | Optional. Only `default` (in process, read-only tools) today. |
+
+For `find_files` and `search_files`, `match.path` bounds the directory searched; the pattern is not matchable and never appears in a prompt.
 
 The file uses the hardening shared by ahi's YAML configuration: one document, no anchors or aliases, no duplicate keys, unknown fields rejected, errors naming the file. Evaluation order: deny (case-insensitive path match), approve, session grant, ask, then default deny. A session grant is the operator's `s` answer to an `ask` prompt: tool plus a non-empty directory prefix, held in memory for that working directory and gateway. It is not yet a stored record in a conversation store; there is no store. Grants with `bound: once`, `batch`, or `until`, and receipts, arrive with the store.
 

@@ -1,6 +1,6 @@
 # Tool catalog: what coding-agent harnesses let a model call
 
-Status: survey, 2026-11-07. Input to the `ahi.tools.yaml` build-out beyond `read_file` and `list_dir`. Nothing here is implemented; the last section states what the survey implies for ahi. Names are spelled as each harness spells them. Details marked *unverified* were not confirmed on a page or source file read during the survey.
+Status: survey, 2026-11-07. Input to the `ahi.tools.yaml` build-out beyond `read_file` and `list_dir`. Section 5.1, the read side, shipped after this survey as `read_file` paging, `find_files`, and `search_files`; the rest of section 5 remains proposal. Names are spelled as each harness spells them. Details marked *unverified* were not confirmed on a page or source file read during the survey.
 
 Harnesses surveyed: pi (earendil-works/pi, formerly badlogic/pi-mono), Claude Code, OpenAI Codex CLI, OpenCode, Gemini CLI, Aider, Goose, Amp, Cline and Roo Code.
 
@@ -110,6 +110,8 @@ Three tools complete the read family and need no sandbox beyond today's in-proce
 | `search_files` | `pattern`, `path`, `glob`, `literal`, `limit` | Fixed-string or regex over contents, respecting `.gitignore`, with a result and byte cap. Implemented in the binary; no `rg`. |
 
 Rule shape is unchanged: `match: {tool, path}` with the same prefix semantics. `find_files` and `search_files` take their `path` as the directory searched.
+
+Both run in process and are bound by per-file `open` cost on very large trees; an `openat`-based walk in an in-repo unsafe crate is tracked in [issue #39](https://github.com/iancleary/ahi/issues/39).
 
 ### 5.2 Write-side (new trust domain, behind containment)
 

@@ -113,10 +113,12 @@ Tools are deny-by-default and builtin-only, on every protocol including browser-
 
 | Tool | Arguments | Output |
 |---|---|---|
-| `read_file` | `path` (required) | UTF-8 text, capped at 64 KiB with a truncation marker |
+| `read_file` | `path` (required), `offset` (1-based first line), `limit` (lines) | The file's UTF-8 text verbatim, or the requested window with a `[lines A-B of N]` header. Output is capped at 64 KiB; when more remains, a final `[N more lines; continue with offset=M]` line names where to resume, and no partial line is emitted |
 | `list_dir` | `path` (default `.`) | Sorted names; `/` marks directories and `@` symbolic links; at most 500 entries |
+| `find_files` | `pattern` (required), `path` (default `.`), `limit` (default 200, max 1000) | Sorted workspace-relative paths under `path` whose name (pattern without `/`) or path below `path` (pattern with `/`) matches the glob (`*`, `**`, `?`, `[abc]`, `[!abc]`). `.gitignore` files under `path` are honored, `.git` and ahi's directories are pruned, symbolic links are listed with `@` and never entered |
+| `search_files` | `pattern` (required), `path`, `glob`, `literal`, `ignore_case`, `limit` (default 100, max 500) | `path:line:text` lines, files sorted and lines ascending, for a Rust-syntax regular expression or an exact string. Same walk as `find_files`; files with a NUL in their first 8 KiB or over 2 MiB are skipped and counted; matched lines are cut at 240 characters; output is capped at 64 KiB and total bytes read at 256 MiB |
 
-Paths are lexically normalized and must be relative, without `..`, backslashes, control characters, or invisible formatting characters. On disk, the canonical path must equal the requested one, so no symbolic link is followed and a differently cased spelling is refused, and nothing under any of ahi's own directories (config, data, state, cache) is readable even when it lies inside the working directory. A turn may run at most 8 tool rounds and return 256 KiB of tool content. Every round's request is checked against `inputLimits.maxRequestBytes`.
+Every tool is deterministic: sorted output, fixed caps, and no shell or external program (`rg`, `fd`, `git`) is involved, so results do not depend on what is installed or on the operator's global git configuration. The approval prompt shows the tool and the path only; patterns are never displayed. Paths are lexically normalized and must be relative, without `..`, backslashes, control characters, or invisible formatting characters. On disk, the canonical path must equal the requested one, so no symbolic link is followed and a differently cased spelling is refused, and nothing under any of ahi's own directories (config, data, state, cache) is readable even when it lies inside the working directory. A turn may run at most 8 tool rounds and return 256 KiB of tool content. Every round's request is checked against `inputLimits.maxRequestBytes`.
 
 **Policy.** Rules use `version: 1`, optional `default: deny`, and `rules` entries with `id`, `action: tool_call`, `match.tool`, optional `match.path` (a component-wise prefix), `effect: approve|deny`, optional `ask: true`, and optional `sandbox: default`. Unknown keys, other action kinds, unknown tools, and other sandbox profiles are errors. Like `ahi.hooks.yaml`, an invalid file fails closed: every chat turn in that directory, plain messages included, fails with the file's error until it is fixed. For each call: a matching deny rule denies (case-insensitively, so `SRC/x` cannot bypass a deny on `src/x`); otherwise a matching approve rule without `ask` runs it; otherwise a session grant runs it; otherwise a matching `ask` rule prompts; otherwise it is denied. Only tools an approve rule names are advertised. Without such a rule, the request has no `tools` field.
 
@@ -169,7 +171,7 @@ That was the original screen-development baseline, not current production behavi
 | `backend/sse.rs` | Bounded SSE framing with reusable buffers, shared by the adapters |
 | `backend/http/responses.rs` | OpenAI Responses serialization, bounded stream normalization, and validated function requests |
 | `backend/tool_loop.rs` | One tool round: policy, approval, execution, results, and session grants |
-| `backend/tools/` | Builtin `read_file` and `list_dir`, and working-directory containment |
+| `backend/tools/` | Builtin `read_file`, `list_dir`, `find_files`, and `search_files`; the glob and `.gitignore` matchers; the bounded walk; working-directory containment |
 | `../tool_policy.rs` | `ahi.tools.yaml` parsing and rule evaluation |
 | `../commands.rs` | Shared context-aware command registry, popup state/rendering, and explicit picker outcomes |
 

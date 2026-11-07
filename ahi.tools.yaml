@@ -1,4 +1,5 @@
-# Builtin read-only tools for chat in this repository (see README "Tools").
+# Builtin read-only tools for chat in this repository (see README "Tools"):
+# read_file, list_dir, find_files, search_files.
 # Rules are deny-first; only tools an approve rule names are advertised.
 version: 1
 default: deny
@@ -10,6 +11,14 @@ rules:
   - id: list-tree
     action: tool_call
     match: {tool: list_dir}
+    effect: approve
+  - id: find-tree
+    action: tool_call
+    match: {tool: find_files}
+    effect: approve
+  - id: search-tree
+    action: tool_call
+    match: {tool: search_files}
     effect: approve
   - id: read-sources
     action: tool_call
