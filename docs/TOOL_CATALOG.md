@@ -111,6 +111,8 @@ Three tools complete the read family and need no sandbox beyond today's in-proce
 
 Rule shape is unchanged: `match: {tool, path}` with the same prefix semantics. `find_files` and `search_files` take their `path` as the directory searched.
 
+Both run in process and are bound by per-file `open` cost on very large trees; an `openat`-based walk in an in-repo unsafe crate is tracked in [issue #39](https://github.com/iancleary/ahi/issues/39).
+
 ### 5.2 Write-side (new trust domain, behind containment)
 
 | Tool | Arguments | Notes |
