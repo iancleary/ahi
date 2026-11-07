@@ -42,8 +42,9 @@ pub const IMAGE_FILE: &str = "dev-image";
 pub const REPO_FILE_NAME: &str = "ahi.dev.yaml";
 /// Where the working directory appears inside the container.
 pub const MOUNT_POINT: &str = "/work";
-/// Shell used when neither `--shell` nor `SHELL` says otherwise.
-pub const DEFAULT_SHELL: &str = "/bin/bash";
+/// Shell used when neither `--shell`, `ahi.dev.yaml`, nor `SHELL` says
+/// otherwise. zsh is the login shell of the ahi-dev images.
+pub const DEFAULT_SHELL: &str = "/bin/zsh";
 /// Runtimes probed on `PATH`, in order.
 pub const RUNTIMES: [&str; 2] = ["podman", "docker"];
 
@@ -181,7 +182,7 @@ fn first_reference(contents: &str) -> Option<String> {
 }
 
 /// Resolve the shell: `--shell`, else the repository's `ahi.dev.yaml`, else
-/// the basename of `SHELL`, else `/bin/bash`. The basename is used because
+/// the basename of `SHELL`, else `/bin/zsh`. The basename is used because
 /// the host path (for example `/opt/homebrew/bin/zsh`) does not exist in the
 /// image, while the image puts `bash` and `zsh` on `PATH`.
 pub fn resolve_shell(flag: Option<&str>, repo: Option<&str>, shell_env: Option<&str>) -> String {
@@ -549,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_uses_the_basename_of_shell_then_bash() {
+    fn the_shell_uses_the_basename_of_shell_then_zsh() {
         assert_eq!(
             resolve_shell(Some("fish"), Some("bash"), Some("/bin/zsh")),
             "fish"
