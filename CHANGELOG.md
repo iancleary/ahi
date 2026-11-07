@@ -4,6 +4,8 @@
 
 ### Added
 
+- Two file-changing chat tools under a new `action: file_write` rule kind in `ahi.tools.yaml`: `edit_file` replaces text that occurs exactly once (or every occurrence with `replace_all`), and `write_file` creates a file (or replaces one with `overwrite`). A rule names `edit_file`, `write_file`, or neither for both, so creating files and editing existing ones are approved separately; a write tool under `tool_call` is an error. Writes are atomic, confined to the working directory, never follow symbolic links, and can never touch `ahi.tools.yaml`, `ahi.hooks.yaml`, `ahi.dev.yaml`, `.pre-commit-config.yaml`, `.gitignore`, or `.git`. The approval prompt shows line counts computed from the arguments, and every attempted write appends a hash-only line to `audit.log`. `examples/tools/edit-sources.yaml` shows the grammar.
+
 - Two builtin read-only chat tools, `find_files` (glob over names or paths) and `search_files` (regular expression or literal, `path:line:text`), both in process with no `rg`, `fd`, or `git` subprocess, honoring `.gitignore`, pruning `.git` and ahi's directories, never following symbolic links, with sorted output and fixed caps. `read_file` takes `offset` and `limit` and, when the 64 KiB cap is hit, ends with the offset to continue from instead of a bare truncation marker. The repository's `ahi.tools.yaml` and `examples/tools/read-all.yaml` approve the new tools.
 
 - `ahi dev` and `ahi dev run` set the container hostname to the image's short name (`ahi-dev-rust` for `ghcr.io/iancleary/ahi-dev-rust:latest`) and pass the mounted directory's name as `AHI_DEV_PROJECT`, so the image's prompt reads `dev@ahi-dev-rust:<version> <project>`.

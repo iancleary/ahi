@@ -38,6 +38,40 @@ impl Workspace {
         self.excluded.iter().any(|dir| absolute.starts_with(dir))
     }
 
+    /// Resolve a path for creation or replacement. The parent directory must
+    /// resolve like any read path. Returns the on-disk path and whether a
+    /// regular file is already there; a symbolic link or directory at the
+    /// path is refused, so nothing is ever written through a link.
+    pub(super) fn resolve_for_write(
+        &self,
+        normalized: &str,
+    ) -> std::result::Result<(PathBuf, bool), &'static str> {
+        let (parent, name) = normalized
+            .rsplit_once('/')
+            .map_or(("", normalized), |(parent, name)| (parent, name));
+        if name.is_empty() {
+            return Err("a file path is required");
+        }
+        let directory = self.resolve(parent)?;
+        if !directory.is_dir() {
+            return Err("parent is not a directory");
+        }
+        let path = directory.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(_) => Ok((path, false)),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err("path is a symbolic link; writes never follow links")
+            }
+            Ok(metadata) if metadata.is_file() => {
+                // Existing file: the full read-path check applies, so a
+                // case variant of a real name is refused here too.
+                self.resolve(normalized)?;
+                Ok((path, true))
+            }
+            Ok(_) => Err("path is not a regular file"),
+        }
+    }
+
     /// Resolve a normalized relative path. The canonical result must equal the
     /// lexical join, so no symbolic link is followed, inside or outside, and a
     /// differently cased spelling of a real path (which `realpath` corrects on

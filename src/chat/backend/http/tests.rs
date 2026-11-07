@@ -1436,18 +1436,21 @@ fn operator_decisions_approve_deny_and_grant_for_the_session() {
                 tool: "read_file".into(),
                 target: "src/a.rs".into(),
                 grant_prefix: "src".into(),
+                detail: String::new(),
             },
             ProposedAction {
                 call_id: "c2".into(),
                 tool: "list_dir".into(),
                 target: "src".into(),
                 grant_prefix: "src".into(),
+                detail: String::new(),
             },
             ProposedAction {
                 call_id: "c3".into(),
                 tool: "read_file".into(),
                 target: "secret".into(),
                 grant_prefix: "".into(),
+                detail: String::new(),
             },
         ]]
     );
@@ -1462,6 +1465,108 @@ fn operator_decisions_approve_deny_and_grant_for_the_session() {
     );
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));
     assert_eq!(server.join().unwrap().len(), 3);
+}
+
+#[test]
+fn file_write_rules_edit_and_create_with_line_counts_and_an_audit_line() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[
+            (
+                "c1",
+                "edit_file",
+                json!({"path": "src/a.rs", "old": "fn a() {}", "new": "fn a() {}\nfn a2() {}"}),
+            ),
+            (
+                "c2",
+                "write_file",
+                json!({"path": "src/new.rs", "content": "// new\n"}),
+            ),
+            (
+                "c3",
+                "write_file",
+                json!({"path": "ahi.tools.yaml", "content": "version: 1\n"}),
+            ),
+            (
+                "c4",
+                "edit_file",
+                json!({"path": "secret", "old": "secret", "new": "x"}),
+            ),
+        ]),
+        text_stream("done"),
+    ]);
+    let policy = "version: 1\nrules:\n\
+        - {id: edit-src, action: file_write, match: {tool: edit_file, path: src}, effect: approve, ask: true}\n\
+        - {id: new-src, action: file_write, match: {tool: write_file, path: src}, effect: approve}\n";
+    let fixture = ToolFixture::new(&url, policy, json!({"id": "vendor/model"}));
+    let (events, approvals) = collect_answering(
+        &mut fixture.backend(),
+        request(),
+        vec![Some(vec![ToolDecision::Approve])],
+    );
+    assert_eq!(
+        approvals,
+        vec![vec![ProposedAction {
+            call_id: "c1".into(),
+            tool: "edit_file".into(),
+            target: "src/a.rs".into(),
+            grant_prefix: "src".into(),
+            detail: "+2 -1 lines".into(),
+        }]],
+        "only the ask rule prompts, and the prompt carries counts, not text"
+    );
+    assert_eq!(
+        results(&events),
+        vec![
+            (
+                "c1".into(),
+                0,
+                "edited a.rs: 1 replacement, +2 -1 lines".into()
+            ),
+            ("c2".into(), 0, "created new.rs: 1 lines".into()),
+            (
+                "c3".into(),
+                1,
+                "error: path is protected: ahi policy files, hook configuration, .gitignore, and .git are never written by tools".into()
+            ),
+            (
+                "c4".into(),
+                126,
+                "denied: no ahi.tools.yaml rule allows this call".into()
+            ),
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("src/a.rs")).unwrap(),
+        "fn a() {}\nfn a2() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("src/new.rs")).unwrap(),
+        "// new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("ahi.tools.yaml")).unwrap(),
+        policy,
+        "the policy file is untouched"
+    );
+    let audit = fs::read_to_string(fixture.state.join("audit.log")).unwrap();
+    let lines: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{audit}");
+    assert_eq!(lines[0]["tool"], "edit_file");
+    assert_eq!(lines[0]["path"], "src/a.rs");
+    assert_eq!(lines[0]["outcome"], "ok");
+    assert_eq!(lines[0]["lines_added"], 2);
+    assert!(lines[0]["before"].is_string() && lines[0]["after"].is_string());
+    assert_eq!(lines[1]["tool"], "write_file");
+    assert!(lines[1]["before"].is_null());
+    assert!(
+        !audit.contains("fn a2"),
+        "no file contents in the audit log"
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    server.join().unwrap();
 }
 
 #[test]

@@ -1,0 +1,44 @@
+# Read anywhere; edit existing files under src and tests after a prompt;
+# create new files under tests without one. Policy files, hook
+# configuration, .gitignore, and .git are never writable whatever is here.
+version: 1
+default: deny
+rules:
+  - id: no-env
+    action: tool_call
+    match: {tool: read_file, path: .env}
+    effect: deny
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: find-tree
+    action: tool_call
+    match: {tool: find_files}
+    effect: approve
+  - id: search-tree
+    action: tool_call
+    match: {tool: search_files}
+    effect: approve
+  - id: edit-sources
+    action: file_write
+    match: {tool: edit_file, path: src}
+    effect: approve
+    ask: true
+  - id: edit-tests
+    action: file_write
+    match: {tool: edit_file, path: tests}
+    effect: approve
+    ask: true
+  - id: new-tests
+    action: file_write
+    match: {tool: write_file, path: tests}
+    effect: approve
+  - id: no-lockfile
+    action: file_write
+    match: {path: Cargo.lock}
+    effect: deny
