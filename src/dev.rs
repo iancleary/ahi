@@ -17,7 +17,7 @@
 //! directory.
 
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -52,6 +52,8 @@ pub const RUNTIMES: [&str; 2] = ["podman", "docker"];
 pub enum Action {
     /// Ensure the image exists, then open a shell (the default).
     Enter,
+    /// Ensure the image exists, then run `Options::command` in it.
+    Run,
     /// Pull the image, or build it from a local `ahi-images` checkout.
     Build,
     /// Open a shell in an image that is already present.
@@ -76,6 +78,8 @@ pub struct Options {
     pub rebuild: bool,
     /// `--from`: a local `ahi-images` checkout to build from.
     pub from: Option<PathBuf>,
+    /// `ahi dev run -- <command>`: argv passed through untouched.
+    pub command: Vec<OsString>,
 }
 
 /// Where the image reference came from, for `status`.
@@ -246,27 +250,56 @@ fn executable_names(name: &str) -> impl Iterator<Item = String> + '_ {
     std::iter::once(name.to_string())
 }
 
-/// Arguments for `<runtime> run ...` that open `shell` in `image` with
+/// Arguments for `<runtime> run ...` that run `command` in `image` with
 /// `workdir` mounted at [`MOUNT_POINT`]. `-t` is added only when stdin is a
-/// terminal so a pipe does not make the runtime refuse to start.
-pub fn run_arguments(image: &str, shell: &str, workdir: &Path, tty: bool) -> Vec<String> {
-    let mut args = vec!["run".to_string(), "--rm".to_string(), "-i".to_string()];
+/// terminal so a pipe does not make the runtime refuse to start. On Unix the
+/// host uid and gid are passed as `AHI_HOST_UID` and `AHI_HOST_GID` for an
+/// entrypoint that remaps its user; an image that ignores them is unchanged.
+pub fn run_arguments(
+    image: &str,
+    command: &[OsString],
+    workdir: &Path,
+    tty: bool,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["run".into(), "--rm".into(), "-i".into()];
     if tty {
-        args.push("-t".to_string());
+        args.push("-t".into());
     }
-    args.push("--volume".to_string());
-    args.push(format!("{}:{MOUNT_POINT}", workdir.display()));
-    args.push("--workdir".to_string());
-    args.push(MOUNT_POINT.to_string());
+    args.push("--volume".into());
+    let mut volume = workdir.as_os_str().to_os_string();
+    volume.push(format!(":{MOUNT_POINT}"));
+    args.push(volume);
+    args.push("--workdir".into());
+    args.push(MOUNT_POINT.into());
     if let Ok(term) = env::var("TERM") {
         if !term.is_empty() {
-            args.push("--env".to_string());
-            args.push(format!("TERM={term}"));
+            args.push("--env".into());
+            args.push(format!("TERM={term}").into());
         }
     }
-    args.push(image.to_string());
-    args.push(shell.to_string());
+    for (name, value) in host_identity(workdir) {
+        args.push("--env".into());
+        args.push(format!("{name}={value}").into());
+    }
+    args.push(image.into());
+    args.extend(command.iter().cloned());
     args
+}
+
+/// The owner of the mounted directory, which is the identity the mounted tree
+/// expects. It is the process owner in every ordinary case and needs no libc call.
+#[cfg(unix)]
+fn host_identity(workdir: &Path) -> Vec<(&'static str, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    match fs::metadata(workdir) {
+        Ok(meta) => vec![("AHI_HOST_UID", meta.uid()), ("AHI_HOST_GID", meta.gid())],
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn host_identity(_workdir: &Path) -> Vec<(&'static str, u32)> {
+    Vec::new()
 }
 
 /// Resolved settings for one invocation.
@@ -369,6 +402,12 @@ impl Session {
 
     /// Run the shell interactively and return its exit status.
     pub fn shell(&self) -> Result<ExitStatus> {
+        self.exec(&[OsString::from(&self.shell)])
+    }
+
+    /// Run `command` in the image with stdio inherited and return its exit
+    /// status. The image must already be present.
+    pub fn exec(&self, command: &[OsString]) -> Result<ExitStatus> {
         if !self.image_present()? {
             return Err(Error::new(format!(
                 "image {} is not present; run `ahi dev build` or `ahi dev` first",
@@ -376,7 +415,7 @@ impl Session {
             )));
         }
         let tty = std::io::stdin().is_terminal();
-        let args = run_arguments(&self.image, &self.shell, &self.workdir, tty);
+        let args = run_arguments(&self.image, command, &self.workdir, tty);
         self.command()
             .args(&args)
             .status()
@@ -444,8 +483,8 @@ fn check(status: ExitStatus, what: &str) -> Result<()> {
     }
 }
 
-/// Run `ahi dev`. Returns the exit code the process should use: the shell's
-/// own code for `Enter` and `Shell`, 0 otherwise.
+/// Run `ahi dev`. Returns the exit code the process should use: the child's
+/// own code for `Enter`, `Shell`, and `Run`, 0 otherwise.
 pub fn run(action: Action, options: &Options, dirs: &Directories) -> Result<i32> {
     let session = Session::resolve(options, dirs)?;
     match action {
@@ -457,6 +496,16 @@ pub fn run(action: Action, options: &Options, dirs: &Directories) -> Result<i32>
                 session.ensure(options)?;
             }
             let status = session.shell()?;
+            return Ok(status.code().unwrap_or(1));
+        }
+        Action::Run => {
+            if options.command.is_empty() {
+                return Err(Error::new(
+                    "ahi dev run needs a command after `--`, for example `ahi dev run -- cargo test`",
+                ));
+            }
+            session.ensure(options)?;
+            let status = session.exec(&options.command)?;
             return Ok(status.code().unwrap_or(1));
         }
     }
@@ -516,21 +565,34 @@ mod tests {
 
     #[test]
     fn run_arguments_mount_only_the_working_directory() {
-        let args = run_arguments("img:tag", "zsh", Path::new("/repo"), false);
+        let command: Vec<OsString> = vec!["cargo".into(), "test".into(), "--all".into()];
+        let args = run_arguments("img:tag", &command, Path::new("/repo"), false);
         assert_eq!(&args[..3], ["run", "--rm", "-i"]);
-        assert!(!args.contains(&"-t".to_string()));
-        let volumes: Vec<&String> = args
+        assert!(!args.contains(&OsString::from("-t")));
+        let volumes: Vec<&OsString> = args
             .iter()
             .zip(args.iter().skip(1))
-            .filter(|(flag, _)| flag.as_str() == "--volume")
+            .filter(|(flag, _)| *flag == "--volume")
             .map(|(_, value)| value)
             .collect();
-        assert_eq!(volumes, [&format!("/repo:{MOUNT_POINT}")]);
-        assert_eq!(&args[args.len() - 2..], ["img:tag", "zsh"]);
+        assert_eq!(volumes, [&OsString::from(format!("/repo:{MOUNT_POINT}"))]);
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["img:tag", "cargo", "test", "--all"]
+        );
         let position = args.iter().position(|a| a == "--workdir").unwrap();
         assert_eq!(args[position + 1], MOUNT_POINT);
-        let tty = run_arguments("img:tag", "zsh", Path::new("/repo"), true);
+        let tty = run_arguments("img:tag", &command, Path::new("/repo"), true);
         assert_eq!(&tty[..4], ["run", "--rm", "-i", "-t"]);
+        if cfg!(unix) {
+            let real = run_arguments("img:tag", &command, &env::temp_dir(), false);
+            assert!(real
+                .iter()
+                .any(|a| a.to_string_lossy().starts_with("AHI_HOST_UID=")));
+            assert!(!args
+                .iter()
+                .any(|a| a.to_string_lossy().starts_with("AHI_HOST_UID=")));
+        }
     }
 
     #[test]

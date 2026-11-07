@@ -116,7 +116,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
 | [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read-only tools. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
-| [`ahi dev [build\|shell\|status\|clean]`](#ahi-dev) | Open a shell in the published development image with the working directory mounted. |
+| [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 
 ### ahi run
 
@@ -277,11 +277,12 @@ Opens a shell in the opinionated development image that [iancleary/ahi-images](h
 | --- | --- |
 | `ahi dev` | Pull if missing, then open the shell. Exits with the shell's exit code. |
 | `ahi dev build` | Pull the image. With `--from <dir>`, build `images/dev` from that local `ahi-images` checkout and tag it with the image reference instead. |
+| `ahi dev run -- <command>` | Pull if missing, then run the command in the image with argv passed through untouched. Exits with the command's exit code; stdout and stderr pass through, so it pipes. |
 | `ahi dev shell` | Open the shell in an image that is already present; never pulls. |
 | `ahi dev status` | Print the runtime, the image reference and where it came from, the mount, and the local image id and creation time. |
 | `ahi dev clean` | Remove the local image. |
 
-The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default. `ahi.dev.yaml` (`version: 1` with optional `image`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell`, else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/bash`. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
+The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default. `ahi.dev.yaml` (`version: 1` with optional `image`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell`, else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/bash`. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. On Unix the owner of the mounted directory is passed as `AHI_HOST_UID` and `AHI_HOST_GID` for an image entrypoint that remaps its user; the current image ignores them. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
 
 ## Files and directories
 
