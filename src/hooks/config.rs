@@ -1,4 +1,6 @@
-//! `.pre-commit-config.yaml` and `.pre-commit-hooks.yaml` parsing.
+//! `.pre-commit-config.yaml` parsing. ahi reads only the config; it never
+//! fetches a hook repository, so the `.pre-commit-hooks.yaml` manifest format
+//! is not parsed.
 //!
 //! Unknown keys, legacy stage names, and Python-only regular expressions are
 //! errors. Upstream pre-commit warns for several of those.
@@ -15,7 +17,6 @@ use crate::yaml_safe::check_config_yaml;
 use crate::PRE_COMMIT_SCHEMA;
 
 pub const CONFIG_NAMES: &[&str] = &[".pre-commit-config.yaml", ".pre-commit-config.yml"];
-pub const MANIFEST_NAME: &str = ".pre-commit-hooks.yaml";
 
 pub const HOOK_TYPES: &[&str] = &[
     "commit-msg",
@@ -150,22 +151,6 @@ pub struct Hook {
     pub language_source: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ManifestHook {
-    pub id: String,
-    pub name: String,
-    pub entry: String,
-    pub language: String,
-    pub alias: String,
-    pub files: String,
-    pub exclude: String,
-    pub types: Vec<String>,
-    pub types_or: Vec<String>,
-    pub exclude_types: Vec<String>,
-    pub description: String,
-    pub stages: Vec<String>,
-}
-
 pub fn discover_config(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         if !path.is_file() {
@@ -209,15 +194,6 @@ pub fn parse_config_bytes(bytes: &[u8]) -> Result<Config> {
     let text =
         std::str::from_utf8(bytes).map_err(|_| Error::new("<input>: config is not valid UTF-8"))?;
     parse_config_str(text, "<input>")
-}
-
-pub fn parse_manifest_str(src: &str, origin: &str) -> Result<Vec<ManifestHook>> {
-    check_config_yaml(src, origin)?;
-    let raw: Vec<RawManifestHook> =
-        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
-    raw.into_iter()
-        .map(|hook| materialize_manifest(hook, origin))
-        .collect()
 }
 
 pub fn stage_selects_files(stage: &str) -> bool {
@@ -581,55 +557,6 @@ fn materialize_hook(
     })
 }
 
-fn materialize_manifest(raw: RawManifestHook, origin: &str) -> Result<ManifestHook> {
-    if raw.id.is_empty() || raw.name.is_empty() || raw.entry.is_empty() {
-        return Err(Error::new(format!(
-            "{origin}: manifest hooks require id, name, and entry"
-        )));
-    }
-    let language = translate_language(&raw.language);
-    if !LANGUAGES.contains(&language.as_str()) {
-        return Err(Error::new(format!(
-            "{origin}: manifest hook `{}` language `{language}` is not a pre-commit language",
-            raw.id
-        )));
-    }
-    let minimum = raw
-        .minimum_pre_commit_version
-        .unwrap_or_else(|| "0".to_string());
-    check_minimum(&minimum, origin)?;
-    let stages = check_stages(&raw.stages.unwrap_or_default(), origin, &raw.id)?;
-    let types = raw.types.unwrap_or_else(|| vec!["file".to_string()]);
-    for tag in types
-        .iter()
-        .chain(raw.types_or.iter().flatten())
-        .chain(raw.exclude_types.iter().flatten())
-    {
-        if !crate::hooks::identify::is_known_tag(tag) {
-            return Err(Error::new(format!(
-                "{origin}: manifest hook `{}` type tag `{tag}` is not recognized",
-                raw.id
-            )));
-        }
-    }
-    let _ = compile_regex(raw.files.as_deref().unwrap_or(""), origin, "files")?;
-    let _ = compile_regex(raw.exclude.as_deref().unwrap_or("^$"), origin, "exclude")?;
-    Ok(ManifestHook {
-        id: raw.id,
-        name: raw.name,
-        entry: raw.entry,
-        language,
-        alias: raw.alias.unwrap_or_default(),
-        files: raw.files.unwrap_or_default(),
-        exclude: raw.exclude.unwrap_or_else(|| "^$".to_string()),
-        types,
-        types_or: raw.types_or.unwrap_or_default(),
-        exclude_types: raw.exclude_types.unwrap_or_default(),
-        description: raw.description.unwrap_or_default(),
-        stages,
-    })
-}
-
 fn check_stages(stages: &[String], origin: &str, what: &str) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(stages.len());
     for stage in stages {
@@ -812,52 +739,6 @@ struct RawHook {
     minimum_pre_commit_version: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)]
-struct RawManifestHook {
-    id: String,
-    name: String,
-    entry: String,
-    language: String,
-    #[serde(default)]
-    alias: Option<String>,
-    #[serde(default)]
-    files: Option<String>,
-    #[serde(default)]
-    exclude: Option<String>,
-    #[serde(default)]
-    types: Option<Vec<String>>,
-    #[serde(default)]
-    types_or: Option<Vec<String>>,
-    #[serde(default)]
-    exclude_types: Option<Vec<String>>,
-    #[serde(default)]
-    additional_dependencies: Option<Vec<String>>,
-    #[serde(default)]
-    args: Option<Vec<String>>,
-    #[serde(default)]
-    always_run: Option<bool>,
-    #[serde(default)]
-    fail_fast: Option<bool>,
-    #[serde(default)]
-    pass_filenames: Option<bool>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    language_version: Option<String>,
-    #[serde(default)]
-    log_file: Option<String>,
-    #[serde(default)]
-    require_serial: Option<bool>,
-    #[serde(default)]
-    stages: Option<Vec<String>>,
-    #[serde(default)]
-    verbose: Option<bool>,
-    #[serde(default)]
-    minimum_pre_commit_version: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,17 +784,6 @@ mod tests {
         assert!(unknown.unwrap_err().to_string().contains("extra"));
         let future = parse_config_str("minimum_pre_commit_version: '9.0.0'\nrepos: []\n", "test");
         assert!(future.unwrap_err().to_string().contains("newer"));
-    }
-
-    #[test]
-    fn parses_manifest_and_translates_system() {
-        let hooks = parse_manifest_str(
-            "- id: example\n  name: Example\n  entry: example\n  language: system\n  types: [text]\n",
-            "manifest",
-        )
-        .unwrap();
-        assert_eq!(hooks[0].language, "unsupported");
-        assert_eq!(hooks[0].types, vec!["text".to_string()]);
     }
 
     #[test]

@@ -562,7 +562,7 @@ fn remote_and_language_hooks_are_not_skipped() {
     assert!(text.contains("language `python`"));
     assert!(text.contains("not supported by ahi"), "{text}");
     assert!(text.contains("language `node`"));
-    assert!(text.contains("trusted_system_hooks"));
+    assert!(text.contains("action: hook"), "{text}");
     assert!(text.contains("repo: meta"));
     assert!(
         text.contains("from a remote repo is not executed"),
@@ -574,17 +574,17 @@ fn remote_and_language_hooks_are_not_skipped() {
 }
 
 #[test]
-fn tui_actions_requires_a_valid_policy_file() {
+fn tui_tools_requires_a_valid_policy_file() {
     let dir = fixture();
     write(
         &dir.join("models.json"),
         br#"{"providers":{"lab":{"baseUrl":"http://127.0.0.1:9/v1","api":"openai-completions","models":[{"id":"qwen-3.5"}]}}}"#,
     );
-    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/actions");
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/tools");
     let state = dir.to_str().unwrap();
     // A valid file: the pipe output is unchanged.
     let output = ahi()
-        .args(["--state-dir", state, "tui", "--actions"])
+        .args(["--state-dir", state, "tui", "--tools"])
         .arg(examples.join("read-all.yaml"))
         .output()
         .unwrap();
@@ -601,7 +601,7 @@ fn tui_actions_requires_a_valid_policy_file() {
         ("missing.yaml", "failed to read"),
     ] {
         let output = ahi()
-            .args(["--state-dir", state, "tui", "--actions"])
+            .args(["--state-dir", state, "tui", "--tools"])
             .arg(examples.join(file))
             .output()
             .unwrap();

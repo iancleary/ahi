@@ -1,0 +1,15 @@
+# Which local system/script hooks ahi run may execute. Upstream pre-commit
+# ignores this file. Deny by default: only an approve rule whose match.id and
+# exact match.entry both equal the hook's id and entry lets it run. `args` are
+# not part of the match. Credential-like toolchain_env names are a parse error.
+version: 1
+default: deny
+rules:
+  - id: cargo-clippy
+    action: hook
+    match: {id: cargo-clippy, entry: cargo clippy --all-targets --all-features -- -D warnings}
+    effect: approve
+  - id: cargo-test
+    action: hook
+    match: {id: cargo-test, entry: cargo test --all-features}
+    effect: approve

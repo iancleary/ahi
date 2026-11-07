@@ -10,6 +10,11 @@
 //!
 //! Only the working directory is mounted, at `/work`. The ahi directories,
 //! the home directory, and the container socket stay outside.
+//!
+//! A repository may pin its image in `ahi.dev.yaml` in the working directory.
+//! The file is a preference, not an allowlist: it grants nothing, since the
+//! user still runs `ahi dev` and the container still sees only the working
+//! directory.
 
 use std::env;
 use std::ffi::OsStr;
@@ -18,8 +23,11 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
+use serde::Deserialize;
+
 use crate::directories::Directories;
 use crate::error::{Error, Result};
+use crate::yaml_safe::check_config_yaml;
 
 /// The image the `ahi-images` repository publishes.
 pub const DEFAULT_IMAGE: &str = "ghcr.io/iancleary/ahi-dev:latest";
@@ -30,6 +38,8 @@ pub const RUNTIME_ENV: &str = "AHI_DEV_RUNTIME";
 /// File under the config directory with one image reference per line
 /// (the first non-empty, non-`#` line wins).
 pub const IMAGE_FILE: &str = "dev-image";
+/// Repository-level preferences, read from the working directory.
+pub const REPO_FILE_NAME: &str = "ahi.dev.yaml";
 /// Where the working directory appears inside the container.
 pub const MOUNT_POINT: &str = "/work";
 /// Shell used when neither `--shell` nor `SHELL` says otherwise.
@@ -73,6 +83,7 @@ pub struct Options {
 pub enum ImageSource {
     Flag,
     Environment,
+    RepoFile,
     ConfigFile,
     Default,
 }
@@ -82,27 +93,73 @@ impl ImageSource {
         match self {
             ImageSource::Flag => "--image",
             ImageSource::Environment => IMAGE_ENV,
+            ImageSource::RepoFile => REPO_FILE_NAME,
             ImageSource::ConfigFile => IMAGE_FILE,
             ImageSource::Default => "default",
         }
     }
 }
 
-/// Resolve the image reference: flag, then environment, then the config
-/// file, then the default. Empty values at any level are skipped.
+/// `ahi.dev.yaml`: the repository's preferences for `ahi dev`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoPreferences {
+    pub version: u32,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<String>,
+}
+
+/// Parse `ahi.dev.yaml`. Unknown keys are errors, like every ahi file.
+pub fn parse_repo_preferences(src: &str, origin: &str) -> Result<RepoPreferences> {
+    check_config_yaml(src, origin)?;
+    let prefs: RepoPreferences =
+        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
+    if prefs.version != 1 {
+        return Err(Error::new(format!(
+            "{origin}: {REPO_FILE_NAME} version {} is not supported (expected 1)",
+            prefs.version
+        )));
+    }
+    Ok(prefs)
+}
+
+/// Load `ahi.dev.yaml` from `directory`. Absence is the empty preference set;
+/// a present file that does not parse is an error.
+pub fn load_repo_preferences(directory: &Path) -> Result<RepoPreferences> {
+    let path = directory.join(REPO_FILE_NAME);
+    if !path.is_file() {
+        return Ok(RepoPreferences::default());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|err| Error::new(format!("failed to read {}: {err}", path.display())))?;
+    parse_repo_preferences(&text, &path.display().to_string())
+}
+
+fn clean(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// Resolve the image reference: flag, then environment, then the
+/// repository's `ahi.dev.yaml`, then the user's config file, then the
+/// default. Empty values at any level are skipped.
 pub fn resolve_image(
     flag: Option<&str>,
     environment: Option<&str>,
+    repo: Option<&str>,
     config_file: Option<&str>,
 ) -> (String, ImageSource) {
-    fn clean(value: Option<&str>) -> Option<&str> {
-        value.map(str::trim).filter(|v| !v.is_empty())
-    }
     if let Some(image) = clean(flag) {
         return (image.to_string(), ImageSource::Flag);
     }
     if let Some(image) = clean(environment) {
         return (image.to_string(), ImageSource::Environment);
+    }
+    if let Some(image) = clean(repo) {
+        return (image.to_string(), ImageSource::RepoFile);
     }
     if let Some(image) = config_file.and_then(first_reference) {
         return (image, ImageSource::ConfigFile);
@@ -119,12 +176,12 @@ fn first_reference(contents: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Resolve the shell: `--shell`, else the basename of `SHELL`, else
-/// `/bin/bash`. The basename is used because the host path (for example
-/// `/opt/homebrew/bin/zsh`) does not exist in the image, while the image puts
-/// `bash` and `zsh` on `PATH`.
-pub fn resolve_shell(flag: Option<&str>, shell_env: Option<&str>) -> String {
-    if let Some(shell) = flag.map(str::trim).filter(|s| !s.is_empty()) {
+/// Resolve the shell: `--shell`, else the repository's `ahi.dev.yaml`, else
+/// the basename of `SHELL`, else `/bin/bash`. The basename is used because
+/// the host path (for example `/opt/homebrew/bin/zsh`) does not exist in the
+/// image, while the image puts `bash` and `zsh` on `PATH`.
+pub fn resolve_shell(flag: Option<&str>, repo: Option<&str>, shell_env: Option<&str>) -> String {
+    if let Some(shell) = clean(flag).or(clean(repo)) {
         return shell.to_string();
     }
     shell_env
@@ -136,13 +193,15 @@ pub fn resolve_shell(flag: Option<&str>, shell_env: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_SHELL.to_string())
 }
 
-/// Pick the runtime: the flag or `AHI_DEV_RUNTIME` when set (a name on `PATH`
-/// or a path), else the first of `podman` and `docker` found on `PATH`.
-pub fn resolve_runtime(flag: Option<&str>, environment: Option<&str>) -> Result<PathBuf> {
-    let requested = flag
-        .or(environment)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+/// Pick the runtime: the flag, `AHI_DEV_RUNTIME`, or the repository's
+/// `ahi.dev.yaml` when set (a name on `PATH` or a path), else the first of
+/// `podman` and `docker` found on `PATH`.
+pub fn resolve_runtime(
+    flag: Option<&str>,
+    environment: Option<&str>,
+    repo: Option<&str>,
+) -> Result<PathBuf> {
+    let requested = clean(flag).or(clean(environment)).or(clean(repo));
     if let Some(name) = requested {
         return find_executable(name).ok_or_else(|| {
             Error::new(format!(
@@ -223,19 +282,26 @@ impl Session {
     /// Resolve everything from the flags, the environment, and the config
     /// directory. Does not touch the runtime yet.
     pub fn resolve(options: &Options, dirs: &Directories) -> Result<Self> {
+        let workdir = env::current_dir()
+            .map_err(|err| Error::new(format!("failed to read the working directory: {err}")))?;
+        let repo = load_repo_preferences(&workdir)?;
         let runtime = resolve_runtime(
             options.runtime.as_deref(),
             env::var(RUNTIME_ENV).ok().as_deref(),
+            repo.runtime.as_deref(),
         )?;
         let config_file = fs::read_to_string(dirs.config.join(IMAGE_FILE)).ok();
         let (image, source) = resolve_image(
             options.image.as_deref(),
             env::var(IMAGE_ENV).ok().as_deref(),
+            repo.image.as_deref(),
             config_file.as_deref(),
         );
-        let shell = resolve_shell(options.shell.as_deref(), env::var("SHELL").ok().as_deref());
-        let workdir = env::current_dir()
-            .map_err(|err| Error::new(format!("failed to read the working directory: {err}")))?;
+        let shell = resolve_shell(
+            options.shell.as_deref(),
+            repo.shell.as_deref(),
+            env::var("SHELL").ok().as_deref(),
+        );
         Ok(Self {
             runtime,
             image,
@@ -404,19 +470,23 @@ mod tests {
     #[test]
     fn the_image_reference_follows_flag_env_file_default() {
         assert_eq!(
-            resolve_image(Some("a:1"), Some("b:2"), Some("c:3")),
+            resolve_image(Some("a:1"), Some("b:2"), Some("r:0"), Some("c:3")),
             ("a:1".to_string(), ImageSource::Flag)
         );
         assert_eq!(
-            resolve_image(None, Some("b:2"), Some("c:3")),
+            resolve_image(None, Some("b:2"), Some("r:0"), Some("c:3")),
             ("b:2".to_string(), ImageSource::Environment)
         );
         assert_eq!(
-            resolve_image(None, None, Some("# comment\n\n  c:3 \nd:4\n")),
+            resolve_image(None, None, Some("r:0"), Some("c:3")),
+            ("r:0".to_string(), ImageSource::RepoFile)
+        );
+        assert_eq!(
+            resolve_image(None, None, None, Some("# comment\n\n  c:3 \nd:4\n")),
             ("c:3".to_string(), ImageSource::ConfigFile)
         );
         assert_eq!(
-            resolve_image(None, None, None),
+            resolve_image(None, None, None, None),
             (DEFAULT_IMAGE.to_string(), ImageSource::Default)
         );
     }
@@ -424,17 +494,24 @@ mod tests {
     #[test]
     fn empty_overrides_fall_through() {
         assert_eq!(
-            resolve_image(Some("  "), Some(""), Some("#only comments\n")),
+            resolve_image(Some("  "), Some(""), Some(" "), Some("#only comments\n")),
             (DEFAULT_IMAGE.to_string(), ImageSource::Default)
         );
     }
 
     #[test]
     fn the_shell_uses_the_basename_of_shell_then_bash() {
-        assert_eq!(resolve_shell(Some("fish"), Some("/bin/zsh")), "fish");
-        assert_eq!(resolve_shell(None, Some("/opt/homebrew/bin/zsh")), "zsh");
-        assert_eq!(resolve_shell(None, Some("")), DEFAULT_SHELL);
-        assert_eq!(resolve_shell(None, None), DEFAULT_SHELL);
+        assert_eq!(
+            resolve_shell(Some("fish"), Some("bash"), Some("/bin/zsh")),
+            "fish"
+        );
+        assert_eq!(resolve_shell(None, Some("bash"), Some("/bin/zsh")), "bash");
+        assert_eq!(
+            resolve_shell(None, None, Some("/opt/homebrew/bin/zsh")),
+            "zsh"
+        );
+        assert_eq!(resolve_shell(None, None, Some("")), DEFAULT_SHELL);
+        assert_eq!(resolve_shell(None, None, None), DEFAULT_SHELL);
     }
 
     #[test]
@@ -458,15 +535,35 @@ mod tests {
 
     #[test]
     fn a_missing_requested_runtime_is_an_error_and_a_path_is_accepted() {
-        let err = resolve_runtime(Some("ahi-no-such-runtime-xyz"), None).unwrap_err();
+        let err = resolve_runtime(Some("ahi-no-such-runtime-xyz"), None, None).unwrap_err();
         assert!(err.to_string().contains("ahi-no-such-runtime-xyz"));
         let dir = crate::fixture_directory::create_unique_fixture_directory("dev-runtime");
         let fake = dir.join("fake-runtime");
         fs::write(&fake, b"").unwrap();
         assert_eq!(
-            resolve_runtime(None, Some(fake.to_str().unwrap())).unwrap(),
+            resolve_runtime(None, Some(fake.to_str().unwrap()), None).unwrap(),
             fake
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_repo_file_rejects_unknown_keys_and_other_versions() {
+        let prefs = parse_repo_preferences(
+            "version: 1\nimage: example.invalid/dev:1\nshell: zsh\n",
+            "ahi.dev.yaml",
+        )
+        .unwrap();
+        assert_eq!(prefs.image.as_deref(), Some("example.invalid/dev:1"));
+        assert_eq!(prefs.shell.as_deref(), Some("zsh"));
+        assert_eq!(prefs.runtime, None);
+        let err = parse_repo_preferences("version: 1\nmount: /x\n", "ahi.dev.yaml")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mount"), "{err}");
+        let err = parse_repo_preferences("version: 2\n", "ahi.dev.yaml")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected 1"), "{err}");
     }
 }

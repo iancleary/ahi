@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 pub(super) use workspace::Workspace;
 
 use super::ToolCall;
-use crate::actions::normalize_relative_path;
+use crate::tool_policy::normalize_relative_path;
 
 pub(crate) const READ_FILE: &str = "read_file";
 pub(crate) const LIST_DIR: &str = "list_dir";

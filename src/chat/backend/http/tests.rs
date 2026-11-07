@@ -155,7 +155,7 @@ fn write_models(state: &Path, url: &str, model: serde_json::Value) {
     .unwrap();
 }
 
-/// Never the process working directory: a repository `ahi.actions.yaml`
+/// Never the process working directory: a repository `ahi.tools.yaml`
 /// must not change these tests. The empty workspace enables no tools.
 fn backend(state: &Path) -> HttpBackend {
     let workspace = state.join("empty-workspace");
@@ -773,11 +773,11 @@ fn fragmented_parallel_tool_calls_are_validated_but_never_executed() {
             ],
             native: None,
         },
-        failed("tool execution is disabled: no ahi.actions.yaml rule approves a builtin tool in this working directory", ErrorKind::Policy)
+        failed("tool execution is disabled: no ahi.tools.yaml rule approves a builtin tool in this working directory", ErrorKind::Policy)
     ]);
     let received = server.join().unwrap();
     let (_, body) = received.split_once("\r\n\r\n").unwrap();
-    // Without an approving ahi.actions.yaml rule, no tools are advertised.
+    // Without an approving ahi.tools.yaml rule, no tools are advertised.
     assert!(serde_json::from_str::<serde_json::Value>(body)
         .unwrap()
         .get("tools")
@@ -933,7 +933,7 @@ impl ToolFixture {
         fs::create_dir_all(workspace.join("src")).unwrap();
         fs::create_dir_all(&state).unwrap();
         write_models(&state, url, model);
-        fs::write(workspace.join("ahi.actions.yaml"), actions).unwrap();
+        fs::write(workspace.join("ahi.tools.yaml"), actions).unwrap();
         fs::write(workspace.join("src/a.rs"), "fn a() {}\n").unwrap();
         fs::write(workspace.join("src/b.rs"), "fn b() {}\n").unwrap();
         fs::write(workspace.join("secret"), "secret-value\n").unwrap();
@@ -1384,7 +1384,7 @@ fn every_call_gets_a_result_and_diagnostics_never_echo_raw_arguments() {
             (
                 "c5".into(),
                 126,
-                "denied: no ahi.actions.yaml rule allows this call".into()
+                "denied: no ahi.tools.yaml rule allows this call".into()
             ),
             ("c6".into(), 0, "fn a() {}\n".into()),
         ]
@@ -1969,8 +1969,8 @@ fn an_empty_terminal_output_is_reconstructed_from_the_finished_items() {
     assert!(events.is_empty());
 }
 
-/// `--actions` names the policy file. It replaces the workspace's
-/// `ahi.actions.yaml`, must exist, and its rule paths still apply to the
+/// `--tools` names the policy file. It replaces the workspace's
+/// `ahi.tools.yaml`, must exist, and its rule paths still apply to the
 /// workspace.
 #[test]
 fn an_explicit_actions_file_replaces_the_workspace_policy() {

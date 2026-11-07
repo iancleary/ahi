@@ -6,7 +6,6 @@
 
 #![forbid(unsafe_code)]
 
-mod actions;
 pub mod chat;
 mod clipboard;
 pub mod dev;
@@ -15,6 +14,7 @@ pub mod error;
 pub mod harness;
 pub mod hooks;
 mod shlex;
+mod tool_policy;
 pub mod tui;
 pub mod update;
 mod yaml_safe;

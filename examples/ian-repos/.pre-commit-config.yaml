@@ -9,7 +9,7 @@
 #   exec ahi run --fix
 # The same snippet is examples/starter/pre-commit.
 #
-# The local Rust hooks run only when ahi.policy.yaml pins each id and the
+# The local Rust hooks run only when ahi.hooks.yaml approves each id and the
 # exact entry string.
 repos:
   - repo: builtin

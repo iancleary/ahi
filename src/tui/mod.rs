@@ -33,7 +33,7 @@ pub struct RunOutput {
 }
 
 /// `actions` names a tool policy file to use instead of the working
-/// directory's `ahi.actions.yaml`. It is read once here, so an invalid or
+/// directory's `ahi.tools.yaml`. It is read once here, so an invalid or
 /// missing file fails before the picker opens, and again on every chat turn.
 pub fn run(state: &Directories, refresh: bool, actions: Option<&Path>) -> Result<RunOutput> {
     let actions =

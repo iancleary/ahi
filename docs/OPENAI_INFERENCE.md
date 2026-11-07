@@ -51,7 +51,7 @@ For an ordinary text conversation the payload is equivalent to:
 }
 ```
 
-The assistant entry uses Responses' easy-input message form. All existing user/assistant text is replayed on each turn, and complete builtin tool exchanges are replayed as `function_call` and `function_call_output` items; notices are never sent. Tool definitions are declared only when an `ahi.actions.yaml` rule approves a builtin. There is no `previous_response_id` or server-stored conversation, and no invented tool output.
+The assistant entry uses Responses' easy-input message form. All existing user/assistant text is replayed on each turn, and complete builtin tool exchanges are replayed as `function_call` and `function_call_output` items; notices are never sent. Tool definitions are declared only when an `ahi.tools.yaml` rule approves a builtin. There is no `previous_response_id` or server-stored conversation, and no invented tool output.
 
 Reasoning is sent as `reasoning: {"effort": "medium"}` only when effective metadata explicitly enables both reasoning and reasoning-effort support and thinking is not Off. Off omits the setting; the literal `off` is never sent. A missing capability does not imply support. The metadata does not describe per-model effort-level maps; a service can reject a level unsupported by that particular model. When reasoning effort is sent, the request also carries `include: ["reasoning.encrypted_content"]` (Pi sends it under the same condition, on the browser-login path too), and a tool-calling turn's terminal output items, reasoning included, are replayed verbatim with the tool results. See [Providers](PROVIDERS.md#protocols), native replay. No reasoning summary is displayed.
 
