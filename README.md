@@ -11,7 +11,7 @@ cargo install ahi --locked
 ahi --version
 ```
 
-Run the same command again to update. Linux and Windows can skip Cargo and use the prebuilt, attested archives below; macOS cannot yet.
+Run the same command again to update. Linux and Windows can skip Cargo and use the prebuilt, attested archives below; macOS cannot yet (due to instability with GitHub Actions MacOS runners, as of early November 2026).
 
 ### Linux
 
@@ -116,17 +116,96 @@ On Unix every `ahi` directory ahi creates is mode `0700`, and every file it writ
 
 Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME` and `XDG_CACHE_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR` and keeps every ahi directory under one root, and `--color auto|always|never` is validated but this version prints plain text either way.
 
-| Command | Behavior |
+| Command | Summary |
 | --- | --- |
-| `ahi run [HOOK]` | Staged files. `[HOOK]` runs only that hook id or alias. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets, `--hook-stage` selects a stage other than pre-commit, and `--commit-msg-filename` feeds the commit-message path to commit-msg and prepare-commit-msg stages. `--format` is `text`, `json`, or `sarif`. `--fail-fast` stops after the first failing hook, and `--verbose`/`-v` shows passing local-hook output. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings. |
-| `ahi list-checks` | Builtin check ids with aliases. `--format` is `text` (default) or `json`. |
-| `ahi explain <id>` | What one check reports. |
-| `ahi doctor` | Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, policy summary. Sandbox detection is not in v0.1. |
-| `ahi migrate` | Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping. |
-| `ahi hooks install`, `ahi hooks uninstall` | Exit 1. They are the hook shim commands and are not implemented. Top-level `install` and `uninstall` are not commands. |
-| `ahi update` | Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, and windows-x86_64; macOS and other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`. |
-| `ahi tui [--refresh]` | Pick curated models from `models.json`. Load is local-only; `--refresh` explicitly refreshes reference catalogs. Enter saves a selection and opens chat; configured OpenAI-compatible gateways stream real model responses. A pipe prints the load and catalog membership. |
-| `ahi login` | Sign in with ChatGPT using the current direct-token browser flow. Prints the URL and accepts a pasted full callback URL when the browser cannot reach ahi. |
+| [`ahi run [HOOK]`](#ahi-run) | Run the configured hooks on staged files, a file list, or a ref range, with text, JSON, or SARIF output. |
+| [`ahi list-checks`](#ahi-list-checks) | List the builtin check ids and aliases. |
+| [`ahi explain <id>`](#ahi-explain) | Describe one builtin check and the environment names local hooks receive. |
+| [`ahi doctor`](#ahi-doctor) | Report versions, paths, directories, modes, and policy. |
+| [`ahi migrate`](#ahi-migrate) | Suggest an ahi config from an existing `.pre-commit-config.yaml`. |
+| [`ahi hooks install`, `ahi hooks uninstall`](#ahi-hooks) | Hook shim commands; not implemented, exit 1. |
+| [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
+| [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read-only tools. |
+| [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
+
+### ahi run
+
+Staged files. `[HOOK]` runs only that hook id or alias. `--all-files`, `--files`, and `--from-ref`/`--to-ref` select other sets, `--hook-stage` selects a stage other than pre-commit, and `--commit-msg-filename` feeds the commit-message path to commit-msg and prepare-commit-msg stages. `--format` is `text`, `json`, or `sarif`. `--fail-fast` stops after the first failing hook, and `--verbose`/`-v` shows passing local-hook output. `--fix` rewrites end-of-file, trailing whitespace, and mixed line endings.
+
+Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+
+ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
+
+| | Names |
+| --- | --- |
+| Passed by default, if set | `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, plus `PATH`, `HOME`, and the other base names in the spec. `PRE_COMMIT=1` is set. |
+| Policy only (`toolchain_env`) | `GOROOT`, `GOPATH`, `VIRTUAL_ENV`, `NVM_DIR`. Not enabled by default. `NVM_DIR` does not enable Node and does not run `npm install`. |
+| Never passed | Names containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and names starting with `AWS_`, `AZURE_`, or `GITHUB_`. Listing one in the policy is an error. |
+
+`ahi explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one `trusted_system_hooks` entry applies only to that id and entry.
+
+Builtin checks are report-only unless `--fix` is passed. `--fix` rewrites only `ahi/end-of-file`, `ahi/trailing-whitespace`, and `ahi/line-endings`, then the hook fails because the file changed. A hook argument `--fix` does the same for those three. `--fix=no` on mixed line endings stays report-only. The write is a temp file in the same directory, fsynced, then renamed. Symlinks are refused. Paths outside the selected set are refused. A file with unstaged changes is left unchanged. ahi does not stash.
+
+A configuration that enables every builtin check:
+
+```yaml
+repos:
+  - repo: builtin
+    hooks:
+      - id: ahi/trailing-whitespace
+      - id: ahi/end-of-file
+      - id: ahi/dockerfile
+      - id: ahi/github-actions
+      - id: ahi/shell-strict
+      - id: ahi/line-endings
+      - id: ahi/shebang-executable
+      - id: ahi/executable-shebang
+      - id: ahi/no-commit-to-branch
+      - id: ahi/check-xml
+      - id: ahi/aws-credentials
+      - id: ahi/vcs-permalinks
+      - id: ahi/byte-order-marker
+```
+
+`ahi/byte-order-marker` reports a leading UTF-8 BOM and does not remove it. `ahi/aws-credentials` matches access-key id shapes and labeled secret assignments in the selected files. It does not read `~/.aws` or the environment. `ahi/no-commit-to-branch` defaults to `main` and `master`.
+
+### ahi list-checks
+
+Builtin check ids with aliases. `--format` is `text` (default) or `json`.
+
+The ids, aliases, and what each check reports are the same table `ahi explain` draws on. The hook configuration example under [ahi run](#ahi-run) lists every builtin id.
+
+### ahi explain
+
+What one check reports.
+
+It also prints the environment names a local hook receives by default; see the table under [ahi run](#ahi-run).
+
+### ahi doctor
+
+Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, policy summary. Sandbox detection is not in v0.1.
+
+It warns about any ahi directory or file that other users can read; see [Directories](#directories).
+
+### ahi migrate
+
+Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping.
+
+`ahi migrate` is a reading aid, not upstream `migrate-config`. It does not rewrite `sha`, `python_venv`, or legacy stage names, and it does not fetch a `rev`. Hooks with an obvious builtin id are suggested as `repo: builtin`. `repo: local` system and script hooks are copied with the policy snippet they need. Everything else is listed under "Not ported" with a reason. A run-time substitution of remote hook ids was removed; native checks run only from `repo: builtin`.
+
+### ahi hooks
+
+Exit 1. They are the hook shim commands and are not implemented. Top-level `install` and `uninstall` are not commands.
+
+### ahi update
+
+Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, and windows-x86_64; macOS and other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`.
+
+Installation and the manual verification steps are under [Installation](#installation) and [Release assets](#release-assets).
+
+### ahi tui
+
+Pick curated models from `models.json`. Load is local-only; `--refresh` explicitly refreshes reference catalogs. Enter saves a selection and opens chat; configured OpenAI-compatible gateways stream real model responses. A pipe prints the load and catalog membership.
 
 In 0.3.0, model catalogs and curated selections are separate. The main picker offers **only** `providers.<id>.models` from `models.json`, in saved order, for OpenAI and every gateway. An omitted list stays empty even after refresh. Reference catalogs never supply picker defaults; their curation view lets you explicitly choose the saved list. See [CHANGELOG.md](CHANGELOG.md) for the breaking gateway-loading change.
 
@@ -178,15 +257,11 @@ For example, save this as `~/.config/ahi/models.json` (replace the example id wi
     "openai": {
       "baseUrl": "https://api.openai.com/v1",
       "api": "openai-completions",
-      "models": [{"id": "gpt-4.1"}]
+      "models": [{"id": "gpt-6.1-sol"}]
     }
   }
 }
 ```
-
-**`/login`** in chat or either model screen opens the same OpenAI sign-in view. It shows the authorization URL, tries the browser, and accepts a pasted full callback URL. **Esc** or **Ctrl+C** cancels and returns to the originating screen; the active model, transcript, and curated settings are retained. Login never refreshes catalogs automatically; use `r` explicitly afterward. The standalone `ahi login` command remains available. See [OpenAI login: flow, limits, and verification](docs/OPENAI_LOGIN.md).
-
-**OpenAI login now uses the current Sign in with ChatGPT direct-token flow**, not the older Codex fixed-client flow. `ahi login` binds `http://127.0.0.1:1455/auth/callback` before opening the browser, requests an issued client for this installation and the `https://api.openai.com/v1` resource with `chatgpt.tokens.use.direct`. When automatic callback is unavailable, paste the full final callback URL, including `state` and `client_id`; a bare code is not sufficient. Old credentials remain untouched until a new login succeeds; explicit refresh asks you to run `ahi login` to migrate. Browser tokens are never forwarded to proxies: a conflicting OpenAI `baseUrl` causes an error. Register proxies as separate gateways.
 
 Explicit OpenAI refresh attempts `GET https://api.openai.com/v1/models` only with new direct-token credentials. **A live request with a new direct-token credential returned HTTP 200 and model metadata.** That response used `models[].slug`; ahi accepts this shape as well as the standard `data[].id` format, preserving every reported ID in order. The earlier HTTP 403 was from an old Codex-flow credential, not the new grant. A 403 preserves the catalog and curated IDs and reports unavailable discovery. Expiry is checked before requests; authentication failures permit at most one renewal and retry. Requests refuse redirects, have a 15-second timeout and a 1 MiB response cap. Pi uses this grant for Responses, not Decisions; ahi now implements the corresponding Responses transport. Configured gateway inference uses a separate Chat Completions backend. Local transport/authentication fixtures passed, but no live OpenAI inference was performed for this implementation. `auth signed-in` means only a credential file exists.
 
@@ -194,42 +269,13 @@ Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the
 
 `ahi tui` never fetches on startup. `ahi tui --refresh` explicitly requests refreshes, preserves old catalogs on failure, and in a pipe exits 1 if any refresh failed while still printing the local load. Catalogs are atomically replaced objects containing provider, source URL, retrieval timestamp, ordered reported IDs, and typed metadata by model ID; old array-format and identifier-only object catalogs remain readable with unknown metadata. `retrieval time unknown (old catalog format)` means that the cached array lacks a timestamp, not that authentication is old. Refresh never edits the curated file.
 
-Checkers are `repo: builtin`. `ahi lock`, `ahi verify`, `ahi fetch`, `update`, `self-update`, `install`, and `uninstall` are not commands. The hook shim commands are `ahi hooks install` and `ahi hooks uninstall`, and they exit 1. `repo: local` with `language: system` or `language: script` runs when `ahi.policy.yaml` lists that hook id and the exact `entry` string. The entry is split without a shell. A missing policy prints the snippet to add and does not run the command. Other local languages fail the hook and say `not supported by ahi`. `repo: meta` fails with an explicit error. A URL repo fails the hook and is not fetched. Nothing is skipped silently.
+### ahi login
 
-ahi runs tools that are already installed. It can pass a toolchain manager the variables it needs to find itself. It does not install, update, resolve, or cache a toolchain or dependencies for a local hook.
+Sign in with ChatGPT using the current direct-token browser flow. Prints the URL and accepts a pasted full callback URL when the browser cannot reach ahi.
 
-| | Names |
-| --- | --- |
-| Passed by default, if set | `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, plus `PATH`, `HOME`, and the other base names in the spec. `PRE_COMMIT=1` is set. |
-| Policy only (`toolchain_env`) | `GOROOT`, `GOPATH`, `VIRTUAL_ENV`, `NVM_DIR`. Not enabled by default. `NVM_DIR` does not enable Node and does not run `npm install`. |
-| Never passed | Names containing `TOKEN`, `SECRET`, `PASSWORD`, or `KEY`, and names starting with `AWS_`, `AZURE_`, or `GITHUB_`. Listing one in the policy is an error. |
+**`/login`** in chat or either model screen opens the same OpenAI sign-in view. It shows the authorization URL, tries the browser, and accepts a pasted full callback URL. **Esc** or **Ctrl+C** cancels and returns to the originating screen; the active model, transcript, and curated settings are retained. Login never refreshes catalogs automatically; use `r` explicitly afterward. The standalone `ahi login` command remains available. See [OpenAI login: flow, limits, and verification](docs/OPENAI_LOGIN.md).
 
-`ahi explain` prints those names. The audit line records the names passed to each local hook and does not record values. A global `toolchain_env` list applies to every local hook. A `toolchain_env` list on one `trusted_system_hooks` entry applies only to that id and entry.
-
-Builtin checks are report-only unless `--fix` is passed. `--fix` rewrites only `ahi/end-of-file`, `ahi/trailing-whitespace`, and `ahi/line-endings`, then the hook fails because the file changed. A hook argument `--fix` does the same for those three. `--fix=no` on mixed line endings stays report-only. The write is a temp file in the same directory, fsynced, then renamed. Symlinks are refused. Paths outside the selected set are refused. A file with unstaged changes is left unchanged. ahi does not stash.
-
-`ahi migrate` is a reading aid, not upstream `migrate-config`. It does not rewrite `sha`, `python_venv`, or legacy stage names, and it does not fetch a `rev`. Hooks with an obvious builtin id are suggested as `repo: builtin`. `repo: local` system and script hooks are copied with the policy snippet they need. Everything else is listed under "Not ported" with a reason. A run-time substitution of remote hook ids was removed; native checks run only from `repo: builtin`.
-
-```yaml
-repos:
-  - repo: builtin
-    hooks:
-      - id: ahi/trailing-whitespace
-      - id: ahi/end-of-file
-      - id: ahi/dockerfile
-      - id: ahi/github-actions
-      - id: ahi/shell-strict
-      - id: ahi/line-endings
-      - id: ahi/shebang-executable
-      - id: ahi/executable-shebang
-      - id: ahi/no-commit-to-branch
-      - id: ahi/check-xml
-      - id: ahi/aws-credentials
-      - id: ahi/vcs-permalinks
-      - id: ahi/byte-order-marker
-```
-
-`ahi/byte-order-marker` reports a leading UTF-8 BOM and does not remove it. `ahi/aws-credentials` matches access-key id shapes and labeled secret assignments in the selected files. It does not read `~/.aws` or the environment. `ahi/no-commit-to-branch` defaults to `main` and `master`.
+**OpenAI login now uses the current Sign in with ChatGPT direct-token flow**, not the older Codex fixed-client flow. `ahi login` binds `http://127.0.0.1:1455/auth/callback` before opening the browser, requests an issued client for this installation and the `https://api.openai.com/v1` resource with `chatgpt.tokens.use.direct`. When automatic callback is unavailable, paste the full final callback URL, including `state` and `client_id`; a bare code is not sufficient. Old credentials remain untouched until a new login succeeds; explicit refresh asks you to run `ahi login` to migrate. Browser tokens are never forwarded to proxies: a conflicting OpenAI `baseUrl` causes an error. Register proxies as separate gateways.
 
 ## Examples
 
