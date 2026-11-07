@@ -1,6 +1,6 @@
 # Development container and sandbox: how `ahi dev` and `ahi sandbox` relate
 
-Status: `ahi dev` shipped in 0.7.0 as a launcher. `ahi dev run` and `ahi sandbox` are proposals here, not implemented. Image work is tracked in [iancleary/ahi-images](https://github.com/iancleary/ahi-images).
+Status: `ahi dev` shipped in 0.7.0 as a launcher. `ahi dev run` and `ahi sandbox check` ship in 0.8.0; `ahi sandbox run` and rule-driven profiles are proposals here. Image work is tracked in [iancleary/ahi-images](https://github.com/iancleary/ahi-images).
 
 ## Two commands, two questions
 
