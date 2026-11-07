@@ -180,7 +180,7 @@ It warns about any ahi directory or file that other users can read; see [Files a
 
 ### ahi migrate
 
-Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report and a suggested config. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping.
+Best-effort suggestion from `.pre-commit-config.yaml`. Prints a report in four parts, "Builtin equivalents", "Local hooks kept as repo: local", "Not ported" with a reason per hook, and the `ahi.hooks.yaml` rules the local hooks need, then the suggested config and a closing line that says the file was left unchanged. Does not guarantee feature parity or the same file scope. Does not write unless `--write` is set, and does not replace an existing file unless `--force` is also set. `ahi run` does not use the mapping.
 
 `ahi migrate` is a reading aid, not upstream `migrate-config`. It does not rewrite `sha`, `python_venv`, or legacy stage names, and it does not fetch a `rev`. Hooks with an obvious builtin id are suggested as `repo: builtin`. `repo: local` system and script hooks are copied with the policy snippet they need. Everything else is listed under "Not ported" with a reason. A run-time substitution of remote hook ids was removed; native checks run only from `repo: builtin`.
 

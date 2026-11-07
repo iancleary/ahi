@@ -247,8 +247,9 @@ repos:
     assert!(stdout.contains("rust-linting"), "{stdout}");
     assert!(stdout.contains("entry: \"cargo fmt --all --\""), "{stdout}");
     assert!(stdout.contains("check-ast"), "{stdout}");
-    assert!(stdout.contains("does not fetch"), "{stdout}");
-    assert!(stderr.contains("unchanged"), "{stderr}");
+    assert!(stdout.contains("not fetched"), "{stdout}");
+    assert!(stdout.contains("unchanged"), "{stdout}\n{stderr}");
+    assert!(stdout.contains("Add to ahi.hooks.yaml"), "{stdout}");
     let unchanged = fs::read_to_string(dir.join(".pre-commit-config.yaml")).unwrap();
     assert_eq!(unchanged, original);
     let refused = run(&dir, &["migrate", "--write"]);

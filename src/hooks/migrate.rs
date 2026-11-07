@@ -196,43 +196,76 @@ pub struct Suggestion {
     pub suggested: String,
 }
 
+/// One upstream hook with an offline builtin, or a builtin copied as is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuiltinNote {
+    id: String,
+    builtin_id: String,
+    detail: String,
+}
+
+/// One `repo: local` hook that ahi can run once a rule approves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalNote {
+    id: String,
+    language: String,
+    entry: String,
+}
+
+/// One hook, repo, or entry that is left out, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Skip {
+    subject: String,
+    reason: String,
+}
+
+#[derive(Debug, Default)]
+struct Notes {
+    builtin: Vec<BuiltinNote>,
+    local: Vec<LocalNote>,
+    skipped: Vec<Skip>,
+}
+
+impl Notes {
+    fn skip(&mut self, subject: impl Into<String>, reason: impl Into<String>) {
+        self.skipped.push(Skip {
+            subject: subject.into(),
+            reason: reason.into(),
+        });
+    }
+}
+
 pub fn suggest(src: &str, origin: &str) -> Result<Suggestion> {
     check_config_yaml(src, origin)?;
     let value: Value =
         serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
     let Some(root) = value.as_mapping() else {
+        let mut notes = Notes::default();
+        notes.skip(
+            origin,
+            "the document is not a mapping. Upstream migrate-config wraps a top-level list in `repos:`; ahi migrate does not rewrite that shape",
+        );
         return Ok(Suggestion {
-            report: format!(
-                "ahi migrate is a best-effort aid. It does not guarantee feature parity or the same file scope.\n\nNot ported:\n- {origin}: the document is not a mapping. Upstream migrate-config would wrap a top-level list in `repos:`. ahi migrate does not rewrite that shape.\n"
-            ),
+            report: render_report(origin, &notes, false),
             suggested: format!("{HEADER}repos: []\n"),
         });
     };
+    let mut notes = Notes::default();
     let mut builtin_hooks = Vec::new();
     let mut local_hooks = Vec::new();
-    let mut builtin_notes = Vec::new();
-    let mut local_notes = Vec::new();
-    let mut skipped = Vec::new();
     let repos_key = Value::String("repos".to_string());
     let Some(repos) = root.get(&repos_key).and_then(Value::as_sequence) else {
         return Err(Error::new(format!("{origin}: config has no repos")));
     };
     for repo in repos {
         let Some(map) = repo.as_mapping() else {
-            skipped.push("- a repo entry is not a mapping".to_string());
+            notes.skip("a repo entry", "not a mapping");
             continue;
         };
-        classify_repo(
-            map,
-            &mut builtin_hooks,
-            &mut local_hooks,
-            &mut builtin_notes,
-            &mut local_notes,
-            &mut skipped,
-        );
+        classify_repo(map, &mut builtin_hooks, &mut local_hooks, &mut notes);
     }
     let suggested = render_suggested(root, &builtin_hooks, &local_hooks)?;
-    let report = render_report(&builtin_notes, &local_notes, &skipped);
+    let report = render_report(origin, &notes, true);
     Ok(Suggestion { report, suggested })
 }
 
@@ -240,9 +273,7 @@ fn classify_repo(
     map: &Mapping,
     builtin_hooks: &mut Vec<Value>,
     local_hooks: &mut Vec<Value>,
-    builtin_notes: &mut Vec<String>,
-    local_notes: &mut Vec<String>,
-    skipped: &mut Vec<String>,
+    notes: &mut Notes,
 ) {
     let url = mapping_str(map, "repo").unwrap_or_default();
     let rev = mapping_str(map, "rev").unwrap_or_default();
@@ -250,18 +281,18 @@ fn classify_repo(
         .get(Value::String("hooks".to_string()))
         .and_then(Value::as_sequence);
     let Some(hooks) = hooks else {
-        skipped.push(format!("- repo `{url}` has no hooks"));
+        notes.skip(format!("repo {url}"), "has no hooks");
         return;
     };
     match url.as_str() {
         "builtin" => {
             for hook in hooks {
-                copy_builtin_already(hook, builtin_hooks, builtin_notes, skipped);
+                copy_builtin_already(hook, builtin_hooks, notes);
             }
         }
         "local" => {
             for hook in hooks {
-                copy_local(hook, local_hooks, local_notes, skipped);
+                copy_local(hook, local_hooks, notes);
             }
         }
         "meta" => {
@@ -270,45 +301,41 @@ fn classify_repo(
                     .as_mapping()
                     .and_then(|hook| mapping_str(hook, "id"))
                     .unwrap_or_else(|| "(missing id)".to_string());
-                skipped.push(format!("- `{id}` (repo: meta): not executed"));
+                notes.skip(id, "repo: meta hooks are not executed by ahi");
             }
         }
         _ => {
             if mapping_str(map, "sha").is_some() && rev.is_empty() {
-                skipped.push(format!(
-                    "- repo `{url}` uses `sha` instead of `rev`. ahi migrate does not perform that upstream migrate-config rewrite, and the repo was not fetched"
-                ));
+                notes.skip(
+                    format!("repo {url}"),
+                    "uses `sha` instead of `rev`; that upstream migrate-config rewrite is not performed and the repo was not fetched",
+                );
             }
             for hook in hooks {
-                copy_remote(hook, &url, &rev, builtin_hooks, builtin_notes, skipped);
+                copy_remote(hook, &url, &rev, builtin_hooks, notes);
             }
         }
     }
 }
 
-fn copy_builtin_already(
-    hook: &Value,
-    builtin_hooks: &mut Vec<Value>,
-    builtin_notes: &mut Vec<String>,
-    skipped: &mut Vec<String>,
-) {
+fn copy_builtin_already(hook: &Value, builtin_hooks: &mut Vec<Value>, notes: &mut Notes) {
     let Some(map) = hook.as_mapping() else {
-        skipped.push("- a builtin hook entry is not a mapping".to_string());
+        notes.skip("a builtin hook entry", "not a mapping");
         return;
     };
     let Some(id) = mapping_str(map, "id") else {
-        skipped.push("- a builtin hook is missing id".to_string());
+        notes.skip("a builtin hook", "missing id");
         return;
     };
     if let Some(stage) = legacy_stage_in(map) {
-        skipped.push(format!(
-            "- `{id}` uses legacy stage `{stage}`. ahi migrate does not rewrite legacy stages"
-        ));
+        notes.skip(id, legacy_stage_reason(&stage));
         return;
     }
-    builtin_notes.push(format!(
-        "- `{id}` is already `repo: builtin` and was copied"
-    ));
+    notes.builtin.push(BuiltinNote {
+        builtin_id: id.clone(),
+        detail: "already repo: builtin; copied as is".to_string(),
+        id: id.clone(),
+    });
     builtin_hooks.push(copy_fields(map, &id, BUILTIN_COPY));
 }
 
@@ -317,78 +344,72 @@ fn copy_remote(
     url: &str,
     rev: &str,
     builtin_hooks: &mut Vec<Value>,
-    builtin_notes: &mut Vec<String>,
-    skipped: &mut Vec<String>,
+    notes: &mut Notes,
 ) {
     let Some(map) = hook.as_mapping() else {
-        skipped.push(format!("- a hook from `{url}` is not a mapping"));
+        notes.skip(format!("a hook from {url}"), "not a mapping");
         return;
     };
     let Some(id) = mapping_str(map, "id") else {
-        skipped.push(format!("- a hook from `{url}` is missing id"));
+        notes.skip(format!("a hook from {url}"), "missing id");
         return;
     };
-    let rev_text = if rev.is_empty() {
-        "(no rev)".to_string()
-    } else {
-        rev.to_string()
-    };
+    let rev_text = if rev.is_empty() { "no rev" } else { rev };
     let Some(known) = equivalent(&id) else {
-        skipped.push(format!(
-            "- `{id}` from `{url}` rev `{rev_text}`: no offline builtin for this id. ahi migrate does not fetch this repo. Remote hooks are not executed"
-        ));
+        notes.skip(
+            id,
+            format!(
+                "no offline builtin for this id; remote hooks never run  ({} {rev_text})",
+                short_repo(url)
+            ),
+        );
         return;
     };
     if let Some(stage) = legacy_stage_in(map) {
-        skipped.push(format!(
-            "- `{id}` uses legacy stage `{stage}`. ahi migrate does not rewrite legacy stages"
-        ));
+        notes.skip(id, legacy_stage_reason(&stage));
         return;
     }
     let fix = if known.fixer {
-        " Rewrites only with `ahi run --fix` or a hook argument `--fix`."
+        "rewrites only with `ahi run --fix`"
     } else {
-        " Report-only. `ahi run --fix` does not change this check."
+        "report-only"
     };
-    builtin_notes.push(format!(
-        "- `{id}` from `{url}` rev `{rev_text}` -> `{}`.{fix} The rev was not fetched.",
-        known.builtin_id
-    ));
+    notes.builtin.push(BuiltinNote {
+        id: id.clone(),
+        builtin_id: known.builtin_id.to_string(),
+        detail: format!("{fix}  ({} {rev_text})", short_repo(url)),
+    });
     builtin_hooks.push(copy_fields(map, known.builtin_id, BUILTIN_COPY));
 }
 
-fn copy_local(
-    hook: &Value,
-    local_hooks: &mut Vec<Value>,
-    local_notes: &mut Vec<String>,
-    skipped: &mut Vec<String>,
-) {
+fn copy_local(hook: &Value, local_hooks: &mut Vec<Value>, notes: &mut Notes) {
     let Some(map) = hook.as_mapping() else {
-        skipped.push("- a local hook entry is not a mapping".to_string());
+        notes.skip("a local hook entry", "not a mapping");
         return;
     };
     let Some(id) = mapping_str(map, "id") else {
-        skipped.push("- a local hook is missing id".to_string());
+        notes.skip("a local hook", "missing id");
         return;
     };
     let Some(language) = mapping_str(map, "language") else {
-        skipped.push(format!("- `{id}` (repo: local) has no language"));
+        notes.skip(id, "repo: local hook has no language");
         return;
     };
     let Some(entry) = mapping_str(map, "entry") else {
-        skipped.push(format!("- `{id}` (repo: local) has no entry"));
+        notes.skip(id, "repo: local hook has no entry");
         return;
     };
     if let Some(stage) = legacy_stage_in(map) {
-        skipped.push(format!(
-            "- `{id}` uses legacy stage `{stage}`. ahi migrate does not rewrite legacy stages"
-        ));
+        notes.skip(id, legacy_stage_reason(&stage));
         return;
     }
     if !carries_local(&language) {
-        skipped.push(format!(
-            "- `{id}` (repo: local) language `{language}`: not supported by ahi"
-        ));
+        notes.skip(
+            id,
+            format!(
+                "language {language} is not supported by ahi; only system and script run locally"
+            ),
+        );
         return;
     }
     let written = match language.as_str() {
@@ -396,11 +417,28 @@ fn copy_local(
         "unsupported_script" => "script",
         other => other,
     };
-    local_notes.push(format!(
-        "- `{id}` language `{language}` can stay as `repo: local` when an ahi.hooks.yaml rule approves the id and the exact entry.\n{}",
-        policy::policy_snippet(&id, &entry, written)
-    ));
+    notes.local.push(LocalNote {
+        id: id.clone(),
+        language: written.to_string(),
+        entry,
+    });
     local_hooks.push(copy_fields(map, &id, LOCAL_COPY));
+}
+
+fn legacy_stage_reason(stage: &str) -> String {
+    format!("uses legacy stage `{stage}`; ahi migrate does not rewrite legacy stage names")
+}
+
+/// `https://github.com/pre-commit/pre-commit-hooks` -> `pre-commit/pre-commit-hooks`.
+fn short_repo(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = trimmed.rsplit('/');
+    match (parts.next(), parts.next()) {
+        (Some(name), Some(owner)) if !owner.contains(':') && !owner.is_empty() => {
+            format!("{owner}/{name}")
+        }
+        _ => trimmed.to_string(),
+    }
 }
 
 fn carries_local(language: &str) -> bool {
@@ -490,44 +528,95 @@ fn render_suggested(
     Ok(format!("{HEADER}{body}"))
 }
 
-fn render_report(builtin_notes: &[String], local_notes: &[String], skipped: &[String]) -> String {
-    let mut out = String::from(
-        "ahi migrate is a best-effort aid. It does not guarantee feature parity or the same file scope as the hooks it reads.\n\
-It does not fetch remote repositories. `ahi run` does not use this mapping and does not substitute hook ids.\n\
-The suggestion is a new document. Comments in the original config are not copied.\n\
-Upstream migrate-config rewrites (`sha` to `rev`, `python_venv`, legacy stage names) are not performed.\n\n",
+/// Width of the widest `name` so the reason column lines up.
+fn column_width<'a>(names: impl Iterator<Item = &'a str>) -> usize {
+    names.map(str::len).max().unwrap_or(0)
+}
+
+fn section(out: &mut String, title: &str, count: usize) {
+    out.push('\n');
+    out.push_str(title);
+    out.push_str(&format!(" ({count})\n"));
+}
+
+/// The report printed before the suggested config.
+///
+/// Four parts, each a titled list with aligned columns: hooks that map to a
+/// builtin, local hooks kept as `repo: local`, what was not ported and why,
+/// and the `ahi.hooks.yaml` rules the local hooks need. The caveats that
+/// every reader must see fit in the three header lines.
+fn render_report(origin: &str, notes: &Notes, parsed: bool) -> String {
+    let mut out = format!(
+        "ahi migrate: a best-effort suggestion from {origin}\n\
+         This does not guarantee feature parity or the same file scope. Remote repositories and\n\
+         revs are not fetched, comments are not copied, and `ahi run` does not use this mapping.\n"
     );
-    out.push_str("Builtin equivalents:\n");
-    if builtin_notes.is_empty() {
-        out.push_str("- (none)\n");
+    if !parsed {
+        section(&mut out, "Not ported", notes.skipped.len());
+        push_skips(&mut out, &notes.skipped);
+        return out;
+    }
+
+    section(&mut out, "Builtin equivalents", notes.builtin.len());
+    if notes.builtin.is_empty() {
+        out.push_str("  (none)\n");
     } else {
-        for note in builtin_notes {
-            out.push_str(note);
-            out.push('\n');
+        let id_width = column_width(notes.builtin.iter().map(|n| n.id.as_str()));
+        let builtin_width = column_width(notes.builtin.iter().map(|n| n.builtin_id.as_str()));
+        for note in &notes.builtin {
+            out.push_str(&format!(
+                "  {:<id_width$}  -> {:<builtin_width$}  {}\n",
+                note.id, note.builtin_id, note.detail
+            ));
         }
     }
-    out.push_str("\nLocal hooks carried over:\n");
-    if local_notes.is_empty() {
-        out.push_str("- (none)\n");
+
+    section(
+        &mut out,
+        "Local hooks kept as repo: local",
+        notes.local.len(),
+    );
+    if notes.local.is_empty() {
+        out.push_str("  (none)\n");
     } else {
-        for note in local_notes {
-            out.push_str(note);
-            if !note.ends_with('\n') {
-                out.push('\n');
-            }
+        let id_width = column_width(notes.local.iter().map(|n| n.id.as_str()));
+        let language_width = column_width(notes.local.iter().map(|n| n.language.as_str()));
+        for note in &notes.local {
+            out.push_str(&format!(
+                "  {:<id_width$}  {:<language_width$}  {}\n",
+                note.id, note.language, note.entry
+            ));
         }
     }
-    out.push_str("\nNot ported:\n");
-    if skipped.is_empty() {
-        out.push_str("- (none)\n");
+
+    section(&mut out, "Not ported", notes.skipped.len());
+    if notes.skipped.is_empty() {
+        out.push_str("  (none)\n");
     } else {
-        for note in skipped {
-            out.push_str(note);
-            out.push('\n');
+        push_skips(&mut out, &notes.skipped);
+    }
+
+    if !notes.local.is_empty() {
+        out.push_str(&format!(
+            "\nAdd to {} so the local hooks may run (deny by default; the id and exact entry must match):\n\n",
+            policy::FILE_NAME
+        ));
+        out.push_str("rules:\n");
+        for note in &notes.local {
+            out.push_str(&policy::approve_rule(&note.id, &note.entry));
         }
     }
-    out.push_str("\nSuggested config:\n");
+
+    out.push_str("\nSuggested config\n");
+    out.push_str("----------------\n");
     out
+}
+
+fn push_skips(out: &mut String, skipped: &[Skip]) {
+    let width = column_width(skipped.iter().map(|s| s.subject.as_str()));
+    for skip in skipped {
+        out.push_str(&format!("  {:<width$}  {}\n", skip.subject, skip.reason));
+    }
 }
 
 fn mapping_str(map: &Mapping, key: &str) -> Option<String> {
@@ -574,11 +663,21 @@ repos:
         let suggestion = suggest(IAN, ".pre-commit-config.yaml").unwrap();
         assert!(suggestion.report.contains("does not guarantee"));
         assert!(suggestion.report.contains("not fetched"));
+        assert!(suggestion
+            .report
+            .contains("pre-commit/pre-commit-hooks v6.0.0"));
         assert!(suggestion.report.contains("ahi/check-yaml"));
         assert!(suggestion.report.contains("ahi/end-of-file"));
         assert!(suggestion.report.contains("ahi/trailing-whitespace"));
         assert!(suggestion.report.contains("ahi run --fix"));
-        assert!(suggestion.report.contains("id: rust-linting"));
+        assert!(suggestion.report.contains("Add to ahi.hooks.yaml"));
+        assert!(suggestion.report.contains("  - id: rust-linting\n"));
+        assert_eq!(
+            suggestion.report.matches("rules:").count(),
+            1,
+            "{}",
+            suggestion.report
+        );
         assert!(suggestion.report.contains("entry: \"cargo fmt --all --\""));
         assert!(suggestion.report.contains("check-ast"));
         assert!(suggestion.report.contains("not supported by ahi"));
@@ -599,8 +698,9 @@ repos:
     fn an_ahi_config_is_copied_and_not_treated_as_a_remote() {
         let src = "repos:\n- repo: builtin\n  hooks:\n  - id: ahi/check-yaml\n";
         let suggestion = suggest(src, "config").unwrap();
-        assert!(suggestion.report.contains("already `repo: builtin`"));
+        assert!(suggestion.report.contains("already repo: builtin"));
         assert!(suggestion.suggested.contains("ahi/check-yaml"));
-        assert!(suggestion.report.contains("Not ported:\n- (none)"));
+        assert!(suggestion.report.contains("Not ported (0)\n  (none)"));
+        assert!(!suggestion.report.contains("Add to"));
     }
 }
