@@ -105,6 +105,49 @@ enum Command {
     /// Opening a browser is attempted and is not required. The credential is
     /// written under the state directory.
     Login,
+    /// Open a shell in the opinionated development image with the working
+    /// directory mounted at /work.
+    ///
+    /// Needs podman or docker on PATH. The image is published by
+    /// iancleary/ahi-images; without a subcommand the image is pulled when it
+    /// is missing and a shell opens. Only the working directory is mounted.
+    Dev(DevArgs),
+}
+
+#[derive(clap::Args)]
+struct DevArgs {
+    #[command(subcommand)]
+    command: Option<DevCommand>,
+    /// Pull or build the image again even when it is already present.
+    #[arg(long, global = true)]
+    rebuild: bool,
+    /// Image reference. Overrides AHI_DEV_IMAGE and the `dev-image` file in
+    /// the config directory. Default: ghcr.io/iancleary/ahi-dev:latest.
+    #[arg(long, global = true, value_name = "REF")]
+    image: Option<String>,
+    /// Shell to run inside the container. Default: the basename of SHELL, else /bin/bash.
+    #[arg(long, global = true, value_name = "CMD")]
+    shell: Option<String>,
+    /// Container runtime: a name on PATH or a path. Overrides AHI_DEV_RUNTIME.
+    /// Default: podman, then docker.
+    #[arg(long, global = true, value_name = "CMD")]
+    runtime: Option<String>,
+    /// Build from this local checkout of iancleary/ahi-images (its images/dev
+    /// directory) instead of pulling, and tag the result with the image reference.
+    #[arg(long, global = true, value_name = "DIR")]
+    from: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum DevCommand {
+    /// Pull the image, or build it from --from.
+    Build,
+    /// Open a shell in an image that is already present; never pulls.
+    Shell,
+    /// Show the runtime, the image reference and where it came from, and the local image id.
+    Status,
+    /// Remove the local image.
+    Clean,
 }
 
 #[derive(Subcommand)]
@@ -186,6 +229,39 @@ fn main() -> ExitCode {
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
         Command::Tui { refresh, actions } => tui(&cli, *refresh, actions.as_deref()),
         Command::Login => login(&cli),
+        Command::Dev(args) => dev(&cli, args),
+    }
+}
+
+fn dev(cli: &Cli, args: &DevArgs) -> ExitCode {
+    use ahi::dev::{Action, Options};
+    let action = match args.command {
+        None => Action::Enter,
+        Some(DevCommand::Build) => Action::Build,
+        Some(DevCommand::Shell) => Action::Shell,
+        Some(DevCommand::Status) => Action::Status,
+        Some(DevCommand::Clean) => Action::Clean,
+    };
+    let options = Options {
+        image: args.image.clone(),
+        shell: args.shell.clone(),
+        runtime: args.runtime.clone(),
+        rebuild: args.rebuild,
+        from: args.from.clone(),
+    };
+    let dirs = match directories(cli) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match ahi::dev::run(action, &options, &dirs) {
+        Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -504,6 +580,10 @@ fn doctor(
         Err(err) => println!("directories: {err}"),
     }
     println!("scratch: {}", store::scratch_dir().display());
+    match ahi::dev::resolve_runtime(None, env::var(ahi::dev::RUNTIME_ENV).ok().as_deref()) {
+        Ok(runtime) => println!("container runtime: {}", runtime.display()),
+        Err(_) => println!("container runtime: none (ahi dev needs podman or docker)"),
+    }
     println!("sandbox: not probed in this version");
     println!(
         "network: not enforced in this version (no sandbox); local hook environments are scrubbed"

@@ -1,5 +1,6 @@
 //! ahi library: the pre-commit hook runner (`hooks`), the model picker and
-//! chat terminal screens (`tui`, `chat`), and the provider harness (`harness`).
+//! chat terminal screens (`tui`, `chat`), the provider harness (`harness`), and
+//! the development container command (`dev`).
 //!
 //! The package, the library target, and the binary are all named `ahi`.
 
@@ -8,6 +9,7 @@
 mod actions;
 pub mod chat;
 mod clipboard;
+pub mod dev;
 pub mod directories;
 pub mod error;
 pub mod harness;

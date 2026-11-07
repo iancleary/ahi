@@ -58,6 +58,7 @@ ahi doctor          # versions, the config, data, state and cache directories, a
 ahi login           # sign in to OpenAI in the browser (optional)
 ahi tui             # register a gateway with /gateway, curate models, chat
 ahi run --all-files # in a repository with .pre-commit-config.yaml
+ahi dev             # shell in the published dev image, with podman or docker installed
 ```
 
 Where ahi keeps `models.json`, the credential, and its logs is in [Files and directories](#files-and-directories). Installs older than 0.6.0 kept everything in `~/.local/share/ahi`; that section says what to move.
@@ -106,6 +107,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
 | [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read-only tools. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
+| [`ahi dev [build\|shell\|status\|clean]`](#ahi-dev) | Open a shell in the published development image with the working directory mounted. |
 
 ### ahi run
 
@@ -257,6 +259,20 @@ Sign in with ChatGPT using the current direct-token browser flow. Prints the URL
 **`/login`** in chat or either model screen opens the same OpenAI sign-in view. It shows the authorization URL, tries the browser, and accepts a pasted full callback URL. **Esc** or **Ctrl+C** cancels and returns to the originating screen; the active model, transcript, and curated settings are retained. Login never refreshes catalogs automatically; use `r` explicitly afterward. The standalone `ahi login` command remains available. See [OpenAI login: flow, limits, and verification](docs/OPENAI_LOGIN.md).
 
 **OpenAI login now uses the current Sign in with ChatGPT direct-token flow**, not the older Codex fixed-client flow. `ahi login` binds `http://127.0.0.1:1455/auth/callback` before opening the browser, requests an issued client for this installation and the `https://api.openai.com/v1` resource with `chatgpt.tokens.use.direct`. When automatic callback is unavailable, paste the full final callback URL, including `state` and `client_id`; a bare code is not sufficient. Old credentials remain untouched until a new login succeeds; explicit refresh asks you to run `ahi login` to migrate. Browser tokens are never forwarded to proxies: a conflicting OpenAI `baseUrl` causes an error. Register proxies as separate gateways.
+
+### ahi dev
+
+Opens a shell in the opinionated development image that [iancleary/ahi-images](https://github.com/iancleary/ahi-images) publishes as `ghcr.io/iancleary/ahi-dev:latest` (Fedora, a non-root `dev` user with sudo, git, ripgrep, fd, bat, jq, tmux, vim, zsh). ahi does not contain a Containerfile; it drives a container runtime, `podman` or `docker`, found on `PATH`. Without a subcommand it pulls the image when it is missing and runs it interactively with the working directory mounted at `/work`. Only the working directory is mounted: the ahi directories, the home directory, and the container socket stay outside, and the image runs as its own `dev` user.
+
+| Command | Effect |
+| --- | --- |
+| `ahi dev` | Pull if missing, then open the shell. Exits with the shell's exit code. |
+| `ahi dev build` | Pull the image. With `--from <dir>`, build `images/dev` from that local `ahi-images` checkout and tag it with the image reference instead. |
+| `ahi dev shell` | Open the shell in an image that is already present; never pulls. |
+| `ahi dev status` | Print the runtime, the image reference and where it came from, the mount, and the local image id and creation time. |
+| `ahi dev clean` | Remove the local image. |
+
+The image reference is the first of `--image`, `AHI_DEV_IMAGE`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/bash`. `--runtime <cmd>` or `AHI_DEV_RUNTIME` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
 
 ## Files and directories
 
