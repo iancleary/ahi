@@ -18,7 +18,7 @@ Run the same command again to update. Linux and Windows can skip Cargo and use t
 Statically linked archives for **x86_64** and **aarch64** are on the [latest release](https://github.com/iancleary/ahi/releases/latest).
 
 1. Download `ahi-<version>-linux-<architecture>.tar.gz` and `ahi-<version>-sha256sums.txt`.
-2. [Verify the checksum and the GitHub build-provenance attestation](#release-assets) before extracting.
+2. [Verify the checksum and the GitHub build-provenance attestation](#verifying-downloads) before extracting.
 3. Extract and install `ahi` somewhere on your `PATH`:
 
    ```sh
@@ -35,7 +35,7 @@ Afterwards `ahi update` replaces the binary with the next release's archive, ver
 An **x86_64** archive is on the [latest release](https://github.com/iancleary/ahi/releases/latest).
 
 1. Download `ahi-<version>-windows-x86_64.tar.gz` and `ahi-<version>-sha256sums.txt`.
-2. [Verify the checksum and attestation](#release-assets). In PowerShell, `Get-FileHash <archive> -Algorithm SHA256` gives the checksum to compare with the sums file, and `gh attestation verify` checks provenance.
+2. [Verify the checksum and attestation](#verifying-downloads). In PowerShell, `Get-FileHash <archive> -Algorithm SHA256` gives the checksum to compare with the sums file, and `gh attestation verify` checks provenance.
 3. Extract in PowerShell and put `ahi.exe` on your user `PATH`:
 
    ```powershell
@@ -51,7 +51,7 @@ An **x86_64** archive is on the [latest release](https://github.com/iancleary/ah
 
 Use `cargo install ahi --locked`, above. Prebuilt macOS archives and `ahi update` are deferred while GitHub-hosted ARM64 runners lack capacity; `ahi update` on macOS prints that pointer and makes no network request. See the [restoration checklist](docs/macos-update-follow-up.md).
 
-### First run
+## Getting started
 
 ```sh
 ahi doctor          # versions, the config, data, state and cache directories, and any mode warnings
@@ -60,59 +60,38 @@ ahi tui             # register a gateway with /gateway, curate models, chat
 ahi run --all-files # in a repository with .pre-commit-config.yaml
 ```
 
-Where ahi keeps `models.json`, the credential, and its logs is in [Directories](#directories). Installs older than 0.6.0 kept everything in `~/.local/share/ahi`; that section says what to move.
+Where ahi keeps `models.json`, the credential, and its logs is in [Files and directories](#files-and-directories). Installs older than 0.6.0 kept everything in `~/.local/share/ahi`; that section says what to move.
 
-## Build
+`ahi tui` shows only models you have curated. The quickest start is to save a `models.json` by hand in the config directory, `~/.config/ahi/models.json` on Linux and macOS (replace the example id with the model you want):
 
-MSRV is Rust 1.88. A `justfile` wraps the same commands CI runs.
-
-```sh
-cargo test --all-features
-cargo build --release
-./target/release/ahi --version
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "models": [{"id": "gpt-6.1-sol"}]
+    }
+  }
+}
 ```
 
-`ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
-
-For real terminal verification on POSIX, build and run the maintained workflow against that exact executable:
+For the hook runner, the `examples/` directory has ready-made configurations. `examples/starter` is builtins plus the two local Rust hooks, with a matching policy. `examples/ian-repos` is the same Rust hooks and the three pre-commit-hooks checks expressed as `repo: builtin`. Both expect:
 
 ```sh
-cargo build --target-dir target/terminal-experience-verification
-uv run scripts/smoke-model-picker.py \
-  --binary target/terminal-experience-verification/debug/ahi \
-  --capture-directory target/terminal-experience-captures
+ahi run --fix
 ```
 
-It exercises shared command menus, gateway onboarding through a streamed local reply, model curation, editor handoffs, state/conflict preservation, and the existing chat/OpenAI regressions. Screen captures include 80×24 and 60×24 layouts. It uses disposable state and loopback HTTP only—not your credentials, clipboard, editor configuration, or an external model service. OpenAI callback cases need local port 1455 available. See [the terminal experience audit and verification guide](docs/TERMINAL_EXPERIENCE.md).
+`examples/actions` holds chat tool policies (`ahi.actions.yaml`) from read-everything to deny-all, for `ahi tui --actions <file>` or copying into a repository; its README describes each.
 
-`scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself builds with Rust 1.88. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
+`examples/starter/pre-commit` is a sample hook:
 
-### Toolchain versions
+```sh
+#!/bin/sh
+exec ahi run --fix
+```
 
-Three toolchain numbers are decoupled on purpose.
-
-`rust-version = "1.88"` in the root `Cargo.toml` is the MSRV floor, the oldest Rust ahi promises to build with. ahi's own code needs only 1.83. The floor is set by the dependency tree: `ratatui-core` 0.1.2 and every security-patched `time` release (0.3.47 and later, the RUSTSEC-2026-0009 fix) require 1.88, and `cargo deny check` and `cargo audit` refuse the vulnerable `time` releases, so no allowed dependency set has a lower floor.
-
-CI and the release asset workflows build with a pinned recent stable. Each workflow installs it with the runners' preinstalled rustup and no third-party action, and selects it with a top-level `RUSTUP_TOOLCHAIN`. Local development floats to the latest stable through `rust-toolchain.toml` (`channel = "stable"`). `RUSTUP_TOOLCHAIN` outranks `rust-toolchain.toml` in rustup's precedence, which keeps CI pinned while local floats. Bump the pin and the install steps together when adopting a new stable.
-
-Because ordinary CI builds a recent stable, the MSRV is exercised in exactly one place: the publish workflow checks the declared floor with `cargo +1.88.0 check --all-features --locked` immediately before `cargo publish`. Bump the MSRV only when a security-forced dependency floor or ahi's own code requires it, never because a new stable shipped. A bump is one commit: change `rust-version` in `Cargo.toml`, verify the new floor builds, extend the chain in `docs/SPEC.md`, and record the raise in `CHANGELOG.md` with the next version.
-
-## Directories
-
-ahi keeps its own files in the XDG base directories, each with an `ahi` child:
-
-| Files | Directory | Default |
-| --- | --- | --- |
-| `models.json` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
-| `credentials/openai.json`, `openai-device-id` | `$XDG_DATA_HOME/ahi` | `~/.local/share/ahi` |
-| `selection`, `thinking`, `audit.log` | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
-| `catalogs/`, `objects/sha256/` | `$XDG_CACHE_HOME/ahi` | `~/.cache/ahi` |
-
-An XDG variable counts only when it is an absolute path, as the specification requires. On Windows without XDG variables the categories live under `%LOCALAPPDATA%\ahi\{config,data,state,cache}`. `--state-dir`, or `AHI_STATE_DIR`, puts every category under one directory for portable or sandboxed setups; `--cache-dir`, or `AHI_HOME`, moves the cache alone. Without a home directory, set the XDG variables or `--state-dir`. ahi never reads `~/.pi`, and it does not move files from older locations: `ahi doctor` prints the directories in use. Earlier versions kept everything in `~/.local/share/ahi`; move `models.json` from there to `~/.config/ahi/`, or pass `--state-dir ~/.local/share/ahi` to keep the old layout.
-
-On Unix every `ahi` directory ahi creates is mode `0700`, and every file it writes there (`models.json`, the credential, the device id, `selection`, `thinking`, `audit.log`) is `0600`. Missing XDG bases such as `~/.config` are created with the normal process umask, and a directory that already exists keeps the mode its owner chose. The credential is a file; XDG decides placement, not encryption, so protect the data directory as you would `~/.ssh`. Like ssh, ahi refuses to use a credential that other users can read, whoever loosened it, and tells you to `chmod 600` it or sign in again; `ahi doctor` warns about any ahi directory or file that is group- or world-accessible. A store whose `objects/sha256` directory already exists can be opened read-only.
-
-## Commands in this version
+## Commands
 
 Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME` and `XDG_CACHE_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR` and keeps every ahi directory under one root, and `--color auto|always|never` is validated but this version prints plain text either way.
 
@@ -185,7 +164,7 @@ It also prints the environment names a local hook receives by default; see the t
 
 Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, policy summary. Sandbox detection is not in v0.1.
 
-It warns about any ahi directory or file that other users can read; see [Directories](#directories).
+It warns about any ahi directory or file that other users can read; see [Files and directories](#files-and-directories).
 
 ### ahi migrate
 
@@ -201,11 +180,13 @@ Exit 1. They are the hook shim commands and are not implemented. Top-level `inst
 
 Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, and windows-x86_64; macOS and other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`.
 
-Installation and the manual verification steps are under [Installation](#installation) and [Release assets](#release-assets).
+Installation and the manual verification steps are under [Installation](#installation) and [Verifying downloads](#verifying-downloads).
 
 ### ahi tui
 
 Pick curated models from `models.json`. Load is local-only; `--refresh` explicitly refreshes reference catalogs. Enter saves a selection and opens chat; configured OpenAI-compatible gateways stream real model responses. A pipe prints the load and catalog membership.
+
+#### Picker and curation
 
 In 0.3.0, model catalogs and curated selections are separate. The main picker offers **only** `providers.<id>.models` from `models.json`, in saved order, for OpenAI and every gateway. An omitted list stays empty even after refresh. Reference catalogs never supply picker defaults; their curation view lets you explicitly choose the saved list. See [CHANGELOG.md](CHANGELOG.md) for the breaking gateway-loading change.
 
@@ -213,7 +194,11 @@ The curated picker includes OpenAI and every registered gateway. Provider groups
 
 Press **`/`** in **Chat, Models, or Catalog** to open the same **Commands** popup. **Add gateway** (`/gateway`) is the first action, followed by model choice, catalog browsing, OpenAI sign-in, and Quit. New installations show this onboarding path explicitly. Gateway setup guides you through **Connect → Review → Choose models**; registration results and cache warnings appear in the destination catalog immediately. Type `/login` for ChatGPT sign-in without configuring a model first. See [Gateway discovery](docs/GATEWAY_DISCOVERY.md) for the URL contract and [the UI audit](docs/TERMINAL_EXPERIENCE.md) for the design decisions. `r` refreshes catalogs and `c` opens a provider's curation view. Checked models appear first in saved order, followed by unchecked catalog IDs. **Up/Down or j/k** moves the highlight. **Shift+Up/Down or Shift+j/k** reorders the highlighted checked model and saves. **Space** checks/unchecks and immediately saves. Configured IDs missing from the catalog remain checked and removable. **Enter** on a checked catalog model saves the active selection and opens/resumes chat; an unchecked model first needs **Space**. `y` copies an ID (or prints it on exit if no clipboard tool succeeds), and Esc returns to Models with the relevant provider and checked model still highlighted. Each curated ID shows `listed`, `absent from catalog`, or `catalog unavailable`.
 
+#### Chat
+
 **Enter** on a curated model saves the selection and opens chat. A configured gateway is called at `<baseUrl>` plus the path its `api` implies: `/chat/completions` for `openai-completions`, `/responses` for `openai-responses`, `/messages` for `anthropic-messages`, streaming the conversation history. This sends your messages to the selected provider and may incur charges. `apiKey` and custom header values resolve the marker `gateway` or `$ENV_NAME` at submission time; secrets are not stored in `models.json`. Curated OpenAI models use browser-login credentials with `POST https://api.openai.com/v1/responses`. Setting `ANTHROPIC_API_KEY` adds a built-in `anthropic` provider that talks to `https://api.anthropic.com/v1/messages` with that key. See [Providers](docs/PROVIDERS.md) for the protocol, authentication, and catalog matrix, and [OpenAI inference](docs/OPENAI_INFERENCE.md) for the browser-login transport. Every protocol validates streamed function calls and runs the policy-gated builtin tools described below through one turn loop. Model output is not execution authority. [Tool calls](docs/TOOL_CALLS.md) distinguishes this implemented subset from the future general agent runtime. Invalid/incomplete calls fail closed; tool arguments are not printed in notices or parser errors.
+
+#### Tools and policy
 
 Tools are off unless the working directory has an `ahi.actions.yaml` rule that approves one, for every provider. Only builtin, read-only `read_file` and `list_dir` exist; they are compiled into ahi, use software path checks within the working directory, exclude ahi's own directories, and return bounded output. These in-process checks are not an OS sandbox. A rule with `ask: true` shows an approval prompt in chat that lists the answers for each call: move the highlight with **↑/↓** and apply it with **Enter**, jump to another numbered call with **Shift+↑/↓**, or press the answer's letter (**y** once, **s** for this session under the shown directory and destination, **n** deny, **a** approve the rest, **Esc** deny the rest). Dismissing the prompt cancels the whole batch, including calls a rule had approved. Model output and tool results never grant authority. Without the file, no `tools` are sent and requested calls fail with `tool execution is disabled`. `ahi tui --actions <file>` uses that policy file instead of the working directory's `ahi.actions.yaml`; it must exist and parse, and its rule paths still apply to the working directory. `examples/actions` holds ready-made policies for trying the tools. Approved file contents are sent to the selected provider. Invalid/incomplete calls fail closed; raw tool arguments are not printed in notices or errors. See [Chat screen](docs/CHAT_SCREEN.md#tool-calls).
 
@@ -233,35 +218,31 @@ rules:
     effect: deny
 ```
 
+#### Requests and limits
+
 Token usage comes only from reported responses. Known catalog context capacity feeds the context meter; complete price/usage information enables cumulative reported-usage cost in Commands, not a claim about the provider's billing total. Reasoning effort is sent only when model metadata explicitly permits it and thinking is not Off. Gateways with a declared `maxTokens` receive a conservative output budget of `min(4096, maxTokens)` through the declared token field; browser-token Responses requests omit unsupported output-limit fields. Exact serialized request-byte limits are enforced before submission. See [Gateway model configuration](docs/GATEWAY_MODEL_CONFIGURATION.md) for supported fields, precedence, and limits. Only one turn runs at a time; Enter preserves the next draft while a reply is active.
 
 Requests refuse redirects, have a 120-second timeout, and cap events at 1 MiB and the total stream at 16 MiB. A gateway that cannot be reached (DNS or connection failure) gets three connection attempts with short pauses; generation is never automatically retried, and after a connection failure **Enter** on a blank input resends the same message. OpenAI can renew once and resubmit after a definitive pre-stream HTTP 401; ambiguous failures or failures after content never retry generation. **Esc** cancels a streaming response: the partial reply is kept and sent with the next message, and the connection is closed at the next read. Exiting chat does the same without the notice. Neither can make a provider stop generating before it notices the closed socket.
+
+#### Commands popup
 
 The shared **Commands** popup opens immediately when you type **`/`**. Keep typing to filter by command, alias, or action label; use **Up/Down** to select, **Enter** to apply, and **Esc** to dismiss without executing. Chat retains its draft on dismissal; Models/Catalog return to list navigation. Single-line command paste in Models/Catalog is bounded and never submits by itself. Chat additionally offers thinking levels, mouse mode, and conversation clearing. Commands are local actions, never model prompts, and exact typed commands continue to work. During an active response, Enter preserves a non-quit command draft; press Enter again after the response finishes to apply it. **`$`** remains reserved for future skill invocation and does not open Commands.
 
 **`/models`** (alias **`/model`**) reopens the curated picker across all providers with locally reloaded settings; selecting a model keeps the transcript, and cancelling keeps the active model. **`/catalog`** opens the active provider's full cached catalog for curation, including uncurated models; `r` explicitly refreshes it, Esc returns to the all-provider picker, and `q` returns to chat. No catalog is fetched just by opening it. **`/quit`** (alias **`/exit`**) closes ahi, even during an active response; upstream cancellation is not guaranteed. `/quit` also exits from a nested Models or Catalog screen; it is different from `q`, which cancels the picker and returns to chat when one exists. At the initial picker, `q` exits even if an old selection exists. **Ctrl+D** on empty chat input exits.
 
+#### Clipboard and selection
+
 Chat has mouse capture **on by default**, with wheel scrolling, clickable jump controls, and app-managed text selection. **Left-drag transcript text** to select it with a background highlight; releasing the drag copies it to the clipboard. **Ctrl+Y** copies the retained selection again; **Esc** clears the highlight without clearing your draft, and with no highlight it cancels a streaming response. Copy feedback appears in the input rule, never in the model transcript. On native Windows, ahi writes the system clipboard through the Win32 API, falling back to `powershell.exe` reading a private UTF-8 temporary file if the clipboard stays busy. On Linux/WSL, ahi tries display-appropriate clipboard tools first (`wl-copy` for Wayland, `xclip`/`xsel` for X11). If those fail on WSL, Windows Terminal receives a bounded OSC 52 copy request; other WSL terminals fall back to `wslpath` and `powershell.exe` using a private UTF-8 temporary file. Headless Linux and SSH/mosh sessions also use OSC 52; set `AHI_CLIPBOARD_OSC52=1` to request it for remote clients without SSH markers. OSC 52 requires terminal support and cannot acknowledge acceptance; its base64 payload is limited to 100,000 characters. If no clipboard adapter succeeds, the selection stays highlighted for retry. **Ctrl+S** (or **`/select`**) enters a keyboard selection mode over the transcript: **h/j/k/l** or the arrows move a cursor, **w**/**b** move by word using Vim's character classes (keyword, punctuation, emoji, and one class per CJK script, so `foo.bar` is three words and a run of ideographs is one), **0**/**$** jump within the row, **g**/**G** jump to the oldest/newest row, Page Up/Down move by a page, **v** starts a character-wise visual range, **V** a line-wise one over whole logical lines with soft wraps rejoined and a trailing newline on yank, exactly as in Vim, **y** yanks it to the clipboard and leaves the mode with the highlight kept for a Ctrl+Y retry, and **Esc** (or Ctrl+C) leaves without copying. The transcript scrolls to keep the cursor visible, selection keys never reach the draft, and the mode works with mouse capture on or off. Native terminal **Cmd+C** is not the app's copy shortcut; use **`/mouse off`** if you prefer terminal-native drag selection and copying. You can also scroll the chat transcript with **Page Up / Page Down**. **Ctrl+K** (or **Ctrl+Home**) jumps to the top; **Ctrl+L** (or **Ctrl+End**) jumps to the bottom and resumes following streamed output.
 
 Use **`/mouse on`** to re-enable application mouse handling: the wheel scrolls the transcript, and floating **Top**/**Bottom** controls support hover and click. Wheel scrolling preserves selected transcript rows, and click-without-drag still activates the jump controls. Copying rejoins soft-wrapped rows while preserving original newlines and spaces, and handles wide Unicode characters and combining marks. Resizing the transcript width, clearing chat, or changing mouse mode clears selection. Dragging onto the top row or below the transcript auto-scrolls one row per frame while the button is held, extending the highlight from the original anchor into newly revealed text; moving back inside the viewport or releasing stops it. The wheel still extends a selection too. **`/mouse off`** restores native selection and hides those controls; **`/mouse`** reports the current mode. The mode is session-local and starts on each time you launch chat. Scrolling up keeps your reading position fixed as new output arrives. Plain Home/End still move within the input, and Ctrl+J still inserts a newline.
 
-Explicit checkbox/reorder saves atomically replace `models.json` in the config directory, pretty-printing JSON while preserving other providers and settings. Gateway reordering intentionally changes provider key order; model curation preserves it. Stale external edits or save failures leave the file and loaded list unchanged; press `e` to review/reload before retrying. Merely browsing does not create a file; an explicit checkbox action can.
+#### Editing models.json
+
+A starter `models.json` is in [Getting started](#getting-started). Explicit checkbox/reorder saves atomically replace `models.json` in the config directory, pretty-printing JSON while preserving other providers and settings. Gateway reordering intentionally changes provider key order; model curation preserves it. Stale external edits or save failures leave the file and loaded list unchanged; press `e` to review/reload before retrying. Merely browsing does not create a file; an explicit checkbox action can.
 
 `e` opens `models.json` in `$VISUAL` or `$EDITOR` (notepad fallback on Windows). Other systems ask for an editor when neither is set. Editor-only reload never rewrites the editor's bytes and never fetches. Invalid edits retain the previous registry and display the file path and line.
 
-For example, save this as `~/.config/ahi/models.json` (replace the example id with the model you want):
-
-```json
-{
-  "providers": {
-    "openai": {
-      "baseUrl": "https://api.openai.com/v1",
-      "api": "openai-completions",
-      "models": [{"id": "gpt-6.1-sol"}]
-    }
-  }
-}
-```
+#### Catalogs and refresh
 
 Explicit OpenAI refresh attempts `GET https://api.openai.com/v1/models` only with new direct-token credentials. **A live request with a new direct-token credential returned HTTP 200 and model metadata.** That response used `models[].slug`; ahi accepts this shape as well as the standard `data[].id` format, preserving every reported ID in order. The earlier HTTP 403 was from an old Codex-flow credential, not the new grant. A 403 preserves the catalog and curated IDs and reports unavailable discovery. Expiry is checked before requests; authentication failures permit at most one renewal and retry. Requests refuse redirects, have a 15-second timeout and a 1 MiB response cap. Pi uses this grant for Responses, not Decisions; ahi now implements the corresponding Responses transport. Configured gateway inference uses a separate Chat Completions backend. Local transport/authentication fixtures passed, but no live OpenAI inference was performed for this implementation. `auth signed-in` means only a credential file exists.
 
@@ -277,24 +258,22 @@ Sign in with ChatGPT using the current direct-token browser flow. Prints the URL
 
 **OpenAI login now uses the current Sign in with ChatGPT direct-token flow**, not the older Codex fixed-client flow. `ahi login` binds `http://127.0.0.1:1455/auth/callback` before opening the browser, requests an issued client for this installation and the `https://api.openai.com/v1` resource with `chatgpt.tokens.use.direct`. When automatic callback is unavailable, paste the full final callback URL, including `state` and `client_id`; a bare code is not sufficient. Old credentials remain untouched until a new login succeeds; explicit refresh asks you to run `ahi login` to migrate. Browser tokens are never forwarded to proxies: a conflicting OpenAI `baseUrl` causes an error. Register proxies as separate gateways.
 
-## Examples
+## Files and directories
 
-`examples/starter` is builtins plus the two local Rust hooks, with a matching policy. `examples/ian-repos` is the same Rust hooks and the three pre-commit-hooks checks expressed as `repo: builtin`. Both expect:
+ahi keeps its own files in the XDG base directories, each with an `ahi` child:
 
-```sh
-ahi run --fix
-```
+| Files | Directory | Default |
+| --- | --- | --- |
+| `models.json` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
+| `credentials/openai.json`, `openai-device-id` | `$XDG_DATA_HOME/ahi` | `~/.local/share/ahi` |
+| `selection`, `thinking`, `audit.log` | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
+| `catalogs/`, `objects/sha256/` | `$XDG_CACHE_HOME/ahi` | `~/.cache/ahi` |
 
-`examples/actions` holds chat tool policies (`ahi.actions.yaml`) from read-everything to deny-all, for `ahi tui --actions <file>` or copying into a repository; its README describes each.
+An XDG variable counts only when it is an absolute path, as the specification requires. On Windows without XDG variables the categories live under `%LOCALAPPDATA%\ahi\{config,data,state,cache}`. `--state-dir`, or `AHI_STATE_DIR`, puts every category under one directory for portable or sandboxed setups; `--cache-dir`, or `AHI_HOME`, moves the cache alone. Without a home directory, set the XDG variables or `--state-dir`. ahi never reads `~/.pi`, and it does not move files from older locations: `ahi doctor` prints the directories in use. Earlier versions kept everything in `~/.local/share/ahi`; move `models.json` from there to `~/.config/ahi/`, or pass `--state-dir ~/.local/share/ahi` to keep the old layout.
 
-`examples/starter/pre-commit` is a sample hook:
+On Unix every `ahi` directory ahi creates is mode `0700`, and every file it writes there (`models.json`, the credential, the device id, `selection`, `thinking`, `audit.log`) is `0600`. Missing XDG bases such as `~/.config` are created with the normal process umask, and a directory that already exists keeps the mode its owner chose. The credential is a file; XDG decides placement, not encryption, so protect the data directory as you would `~/.ssh`. Like ssh, ahi refuses to use a credential that other users can read, whoever loosened it, and tells you to `chmod 600` it or sign in again; `ahi doctor` warns about any ahi directory or file that is group- or world-accessible. A store whose `objects/sha256` directory already exists can be opened read-only.
 
-```sh
-#!/bin/sh
-exec ahi run --fix
-```
-
-## Release assets
+## Verifying downloads
 
 A published GitHub release for tag `v<version>` carries four assets. `<version>` is the SemVer string without the leading `v` (tag `v0.6.0` uses `0.6.0`).
 
@@ -316,6 +295,41 @@ gh attestation verify ahi-0.6.0-sha256sums.txt --repo iancleary/ahi
 `sha256sum --check` uses the filenames recorded in the sums file, so the archive has to sit beside that file; `--ignore-missing` skips the archives you did not download. Verify each archive you use the same way, and replace `0.6.0` with the release that was downloaded. Backfilling assets onto an older release is described in [docs/release.md](docs/release.md).
 
 Archive layout, runners, and the reproducibility flags are in [docs/release.md](docs/release.md).
+
+## Development
+
+MSRV is Rust 1.88. A `justfile` wraps the same commands CI runs.
+
+```sh
+cargo test --all-features
+cargo build --release
+./target/release/ahi --version
+```
+
+`ahi --version` prints `ahi` followed by the root manifest version and a newline. `scripts/smoke-version.sh` checks that line against the root manifest.
+
+For real terminal verification on POSIX, build and run the maintained workflow against that exact executable:
+
+```sh
+cargo build --target-dir target/terminal-experience-verification
+uv run scripts/smoke-model-picker.py \
+  --binary target/terminal-experience-verification/debug/ahi \
+  --capture-directory target/terminal-experience-captures
+```
+
+It exercises shared command menus, gateway onboarding through a streamed local reply, model curation, editor handoffs, state/conflict preservation, and the existing chat/OpenAI regressions. Screen captures include 80×24 and 60×24 layouts. It uses disposable state and loopback HTTP only—not your credentials, clipboard, editor configuration, or an external model service. OpenAI callback cases need local port 1455 available. See [the terminal experience audit and verification guide](docs/TERMINAL_EXPERIENCE.md).
+
+`scripts/install-supply-chain-tools.sh` downloads cargo-deny 0.20.2 and cargo-audit 0.22.2 release binaries and checks their sha256. Those versions can read the current RustSec database. The project itself builds with Rust 1.88. `just ci` runs that installer, then `cargo deny check` and `cargo audit`.
+
+### Toolchain versions
+
+Three toolchain numbers are decoupled on purpose.
+
+`rust-version = "1.88"` in the root `Cargo.toml` is the MSRV floor, the oldest Rust ahi promises to build with. ahi's own code needs only 1.83. The floor is set by the dependency tree: `ratatui-core` 0.1.2 and every security-patched `time` release (0.3.47 and later, the RUSTSEC-2026-0009 fix) require 1.88, and `cargo deny check` and `cargo audit` refuse the vulnerable `time` releases, so no allowed dependency set has a lower floor.
+
+CI and the release asset workflows build with a pinned recent stable. Each workflow installs it with the runners' preinstalled rustup and no third-party action, and selects it with a top-level `RUSTUP_TOOLCHAIN`. Local development floats to the latest stable through `rust-toolchain.toml` (`channel = "stable"`). `RUSTUP_TOOLCHAIN` outranks `rust-toolchain.toml` in rustup's precedence, which keeps CI pinned while local floats. Bump the pin and the install steps together when adopting a new stable.
+
+Because ordinary CI builds a recent stable, the MSRV is exercised in exactly one place: the publish workflow checks the declared floor with `cargo +1.88.0 check --all-features --locked` immediately before `cargo publish`. Bump the MSRV only when a security-forced dependency floor or ahi's own code requires it, never because a new stable shipped. A bump is one commit: change `rust-version` in `Cargo.toml`, verify the new floor builds, extend the chain in `docs/SPEC.md`, and record the raise in `CHANGELOG.md` with the next version.
 
 ## License
 
