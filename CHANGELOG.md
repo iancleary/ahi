@@ -5,6 +5,7 @@
 ### Added
 
 - `ahi dev run -- <command>` runs a command in the development image with the same single mount as the shell, pulling first when the image is missing, and exits with the command's code. On Unix `AHI_HOST_UID` and `AHI_HOST_GID` are passed for an entrypoint that remaps its user.
+- `ahi sandbox check` reports the containment backend this host offers (Landlock plus seccomp, `bwrap`, `sandbox-exec`, a job object, or none), whether a seccomp filter is already active on the process as inside OpenShell, and the evidence. Detection only; `ahi doctor` prints the same summary in place of `sandbox: not probed`.
 
 ## 0.7.0 (2026-11-06)
 
