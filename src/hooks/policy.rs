@@ -218,7 +218,11 @@ pub fn valid_rule_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-fn parse_toolchain_names(names: &[String], origin: &str, what: &str) -> Result<Vec<String>> {
+pub(crate) fn parse_toolchain_names(
+    names: &[String],
+    origin: &str,
+    what: &str,
+) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for name in names {
         if let Some(err) = crate::hooks::local_hook::toolchain_name_error(name) {

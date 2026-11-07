@@ -1569,6 +1569,95 @@ fn file_write_rules_edit_and_create_with_line_counts_and_an_audit_line() {
     server.join().unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn command_rules_match_argv_prefixes_show_the_command_and_grant_the_rule_prefix() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[
+            (
+                "c1",
+                "run_command",
+                json!({"argv": ["sh", "-c", "printf hel; printf lo"]}),
+            ),
+            ("c2", "run_command", json!({"argv": ["true"]})),
+            (
+                "c3",
+                "run_command",
+                json!({"argv": ["sh", "-c", "exit 2"], "path": "src"}),
+            ),
+            ("c4", "run_command", json!({"argv": ["rm", "-rf", "x"]})),
+        ]),
+        // Covered by the session grant from c1: the rule's prefix [sh],
+        // not the exact command, so a different sh invocation runs too.
+        calls_stream(&[(
+            "c5",
+            "run_command",
+            json!({"argv": ["sh", "-c", "printf again"]}),
+        )]),
+        text_stream("done"),
+    ]);
+    let policy = "version: 1\nrules:\n\
+        - {id: shell, action: command, match: {argv: [sh]}, effect: approve, ask: true}\n\
+        - {id: noop, action: command, match: {argv: [true]}, effect: approve}\n\
+        - {id: no-rm, action: command, match: {argv: [rm]}, effect: deny}\n";
+    let fixture = ToolFixture::new(&url, policy, json!({"id": "vendor/model"}));
+    let (events, approvals) = collect_answering(
+        &mut fixture.backend(),
+        request(),
+        vec![Some(vec![
+            ToolDecision::ApproveForSession,
+            ToolDecision::Approve,
+        ])],
+    );
+    assert_eq!(
+        approvals,
+        vec![vec![
+            ProposedAction {
+                call_id: "c1".into(),
+                tool: "run_command".into(),
+                target: ".".into(),
+                grant_prefix: "".into(),
+                detail: "sh -c 'printf hel; printf lo'".into(),
+            },
+            ProposedAction {
+                call_id: "c3".into(),
+                tool: "run_command".into(),
+                target: "src".into(),
+                grant_prefix: "src".into(),
+                detail: "sh -c 'exit 2'".into(),
+            },
+        ]],
+        "the prompt shows the command line; approved and denied calls do not prompt"
+    );
+    assert_eq!(
+        results(&events),
+        vec![
+            ("c1".into(), 0, "exit 0\n--- stdout\nhello".into()),
+            ("c2".into(), 0, "exit 0 (no output)".into()),
+            ("c3".into(), 0, "exit 2 (no output)".into()),
+            ("c4".into(), 126, "denied: denied by rule no-rm".into()),
+            ("c5".into(), 0, "exit 0\n--- stdout\nagain".into()),
+        ]
+    );
+    let audit = fs::read_to_string(fixture.state.join("audit.log")).unwrap();
+    let lines: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 4, "{audit}");
+    assert_eq!(lines[0]["tool"], "run_command");
+    assert_eq!(
+        lines[0]["argv"],
+        json!(["sh", "-c", "printf hel; printf lo"])
+    );
+    assert_eq!(lines[0]["exit_code"], 0);
+    assert_eq!(lines[2]["cwd"], "src");
+    assert_eq!(lines[2]["exit_code"], 2);
+    assert!(!audit.contains("hello"), "output is not logged");
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    server.join().unwrap();
+}
+
 #[test]
 fn a_session_grant_carries_across_turns_but_not_to_another_gateway_or_destination() {
     // One server, one destination, for every turn below: a grant is bound to
