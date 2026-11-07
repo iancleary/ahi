@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi dev` and `ahi dev run` set the container hostname to the image's short name (`ahi-dev-rust` for `ghcr.io/iancleary/ahi-dev-rust:latest`) and pass the mounted directory's name as `AHI_DEV_PROJECT`, so the image's prompt reads `dev@ahi-dev-rust:<version> <project>`.
+
 ## 0.10.0 (2026-11-07)
 
 ### Changed

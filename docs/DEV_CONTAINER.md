@@ -20,7 +20,7 @@ They stay separate commands. A dev image with sudo and an open network is the op
 `ahi dev` pulls `ghcr.io/iancleary/ahi-dev:latest` when it is missing and opens a shell. The runtime line is:
 
 ```text
-run --rm -i [-t] --volume <cwd>:/work --workdir /work [--env TERM=...] <image> <shell>
+run --rm -i [-t] --volume <cwd>:/work --workdir /work --hostname <image short name> --env AHI_DEV_PROJECT=<cwd name> [--env TERM=...] <image> <shell>
 ```
 
 - **One mount.** The current working directory, not the git root, bind-mounted read-write at `/work`. Nothing else: no home directory, no ssh agent, no git credentials, no ahi directories, no container socket. Opt-ins, if any arrive, are explicit flags, never defaults.
