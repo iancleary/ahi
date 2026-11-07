@@ -1,6 +1,6 @@
 [package]
 name = "ahi"
-description = "Fail-closed pre-commit runner with a terminal chat for OpenAI and OpenAI-compatible gateways. Runs offline builtin checks from ahi.hooks.yaml; streams model replies with tool policy defined by ahi.policy.yaml."
+description = "Offline pre-commit runner, terminal chat, and development container launcher. Builtin checks and approved local hooks run from .pre-commit-config.yaml and ahi.hooks.yaml; chat tools (read, search, edit, write, run) are gated by ahi.tools.yaml; ahi dev opens the project in a container."
 keywords = ["pre-commit", "git-hooks", "tui", "chat", "openai"]
 categories = ["development-tools", "command-line-utilities"]
 version = "0.11.0"
@@ -31,7 +31,7 @@ flate2 = "=1.1.10"
 getrandom = "=0.2.16"
 quick-xml = "=0.41.0"
 # 0.30.0 is the release that no longer depends on the unmaintained paste crate.
-ratatui = "=0.30.0"
+ratatui = { version = "=0.30.0", default-features = false, features = ["crossterm"] }
 regex = "=1.11.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.134", features = ["preserve_order"] }

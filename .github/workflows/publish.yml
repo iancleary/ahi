@@ -46,14 +46,14 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
 
       - name: Check documentation
         # PowerShell on Windows does not accept the bash `VAR=value command` form.
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -63,7 +63,7 @@ jobs:
         run: cargo package --workspace
 
       - name: Build project
-        run: cargo build --release
+        run: cargo build --release --locked
 
   publish:
     needs: ci
