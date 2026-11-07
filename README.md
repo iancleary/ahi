@@ -117,6 +117,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read-only tools. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|shell\|status\|clean]`](#ahi-dev) | Open a shell in the published development image with the working directory mounted. |
+| [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
 
 ### ahi run
 
@@ -282,6 +283,10 @@ Opens a shell in the opinionated development image that [iancleary/ahi-images](h
 | `ahi dev clean` | Remove the local image. |
 
 The image reference is the first of `--image`, `AHI_DEV_IMAGE`, `image` in the working directory's `ahi.dev.yaml`, the first non-comment line of `dev-image` in the config directory (`~/.config/ahi/dev-image`), and the default. `ahi.dev.yaml` (`version: 1` with optional `image`, `shell`, and `runtime`) is a preference a repository ships for its contributors; flags and environment outrank it, and it grants nothing. `--rebuild` pulls or builds again even when the image is present. `--shell <cmd>` picks the program to run; the default is the repository's `shell`, else the basename of `SHELL` (so a host `/opt/homebrew/bin/zsh` becomes the image's `zsh`), else `/bin/bash`. `--runtime <cmd>`, `AHI_DEV_RUNTIME`, or the repository's `runtime` names the runtime as a command on `PATH` or a path; otherwise `podman` is preferred over `docker`. `-t` is passed only when stdin is a terminal, so a piped script runs too. Image provenance can be checked with `cosign verify` as the ahi-images README describes; ahi itself does not verify signatures before pulling. `ahi doctor` reports which runtime would be used.
+
+### ahi sandbox
+
+Detection only in this version; nothing is confined yet. `ahi sandbox check` prints the platform, whether an outer sandbox is already active on the process, the evidence, and the backend `ahi sandbox run` would use, then exits 0. On Linux it reads `Seccomp:` and `NoNewPrivs:` from `/proc/self/status`, the active LSM list for Landlock, `bwrap` on `PATH` with the user-namespace limits, and container markers. A seccomp filter already active on the process (mode 2, as inside OpenShell) is reported as an outer sandbox, and ahi would run a child directly rather than nest a second filter. The backend order is Landlock plus seccomp, then `bwrap`, then none; macOS reports `sandbox-exec` as best effort because Apple treats it as deprecated; Windows reports a job object, which contains the process tree only. The probes read files and `PATH` and need no unsafe code; the definitive OpenShell test, a `seccomp` call returning `EPERM`, arrives with `ahi sandbox run`. `ahi doctor` carries the same one-line summary. [Development container and sandbox](docs/DEV_CONTAINER.md) has the plan.
 
 ## Files and directories
 

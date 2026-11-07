@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi sandbox check` reports the containment backend this host offers (Landlock plus seccomp, `bwrap`, `sandbox-exec`, a job object, or none), whether a seccomp filter is already active on the process as inside OpenShell, and the evidence. Detection only; `ahi doctor` prints the same summary in place of `sandbox: not probed`.
+
 ## 0.7.0 (2026-11-06)
 
 ### Added

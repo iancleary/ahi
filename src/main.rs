@@ -112,6 +112,19 @@ enum Command {
     /// iancleary/ahi-images; without a subcommand the image is pulled when it
     /// is missing and a shell opens. Only the working directory is mounted.
     Dev(DevArgs),
+    /// Containment for hooks and tool calls. This version only detects what
+    /// the host offers; nothing is confined yet.
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SandboxCommand {
+    /// Print the backend `ahi sandbox run` would use, whether an outer
+    /// sandbox such as OpenShell is already active, and the evidence.
+    Check,
 }
 
 #[derive(clap::Args)]
@@ -231,6 +244,15 @@ fn main() -> ExitCode {
         Command::Tui { refresh, tools } => tui(&cli, *refresh, tools.as_deref()),
         Command::Login => login(&cli),
         Command::Dev(args) => dev(&cli, args),
+        Command::Sandbox {
+            command: SandboxCommand::Check,
+        } => {
+            let report = ahi::sandbox::report(&ahi::sandbox::probe());
+            for line in &report.lines {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -585,7 +607,10 @@ fn doctor(
         Ok(runtime) => println!("container runtime: {}", runtime.display()),
         Err(_) => println!("container runtime: none (ahi dev needs podman or docker)"),
     }
-    println!("sandbox: not probed in this version");
+    println!(
+        "{}",
+        ahi::sandbox::summary(&ahi::sandbox::report(&ahi::sandbox::probe()))
+    );
     println!(
         "network: not enforced in this version (no sandbox); local hook environments are scrubbed"
     );
