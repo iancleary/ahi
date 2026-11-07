@@ -22,11 +22,15 @@ pub(crate) const RETIRED_FILE_NAME: &str = "ahi.actions.yaml";
 /// Builtin tools that change files. They are governed by `action: file_write`
 /// rules, never by `tool_call`, so the filename states the trust boundary.
 pub(crate) const WRITE_TOOLS: [&str; 2] = ["edit_file", "write_file"];
+/// The builtin tool that runs a program. Governed by `action: command`
+/// rules, matched on an argv prefix and a working directory.
+pub(crate) const COMMAND_TOOL: &str = "run_command";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActionKind {
     ToolCall,
     FileWrite,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +41,14 @@ pub(crate) struct ToolRule {
     /// tools for `file_write` (`match.tool` omitted means both).
     pub(crate) tools: Vec<String>,
     /// Normalized workspace-relative prefix. Empty means the whole workspace.
+    /// For `command`, the working directory the command may run in.
     pub(crate) path: Option<String>,
+    /// `command` only: the argv prefix the command must start with, compared
+    /// token by token, exactly.
+    pub(crate) argv: Option<Vec<String>>,
+    /// `command` only: toolchain variable names passed through to the
+    /// process in addition to the base set, as in `ahi.hooks.yaml`.
+    pub(crate) toolchain_env: Vec<String>,
     pub(crate) effect: Effect,
     pub(crate) ask: bool,
 }
@@ -45,6 +56,12 @@ pub(crate) struct ToolRule {
 impl ToolRule {
     fn governs(&self, tool: &str) -> bool {
         self.tools.iter().any(|t| t == tool)
+    }
+
+    fn argv_matches(&self, argv: &[String]) -> bool {
+        self.argv
+            .as_deref()
+            .is_none_or(|prefix| argv.len() >= prefix.len() && argv[..prefix.len()] == *prefix)
     }
 }
 
@@ -85,10 +102,17 @@ impl ActionPolicy {
         tools
     }
 
-    pub(crate) fn evaluate(&self, tool: &str, path: &str) -> Verdict {
+    pub(crate) fn rule(&self, id: &str) -> Option<&ToolRule> {
+        self.rules.iter().find(|rule| rule.id == id)
+    }
+
+    /// `path` is the file, directory, or working directory the call names;
+    /// `argv` is empty for every tool but `run_command`.
+    pub(crate) fn evaluate(&self, tool: &str, path: &str, argv: &[String]) -> Verdict {
         let matching = || {
             self.rules.iter().filter(move |rule| {
                 rule.governs(tool)
+                    && rule.argv_matches(argv)
                     && rule
                         .path
                         .as_deref()
@@ -103,6 +127,7 @@ impl ActionPolicy {
         if let Some(rule) = self.rules.iter().find(|rule| {
             rule.effect == Effect::Deny
                 && rule.governs(tool)
+                && rule.argv_matches(argv)
                 && rule
                     .path
                     .as_deref()
@@ -225,19 +250,26 @@ struct RawRule {
     ask: bool,
     #[serde(default)]
     sandbox: Option<String>,
+    /// `command` only.
+    #[serde(default)]
+    toolchain_env: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMatch {
-    /// Required for `tool_call`; optional for `file_write`.
+    /// Required for `tool_call`; optional for `file_write` and `command`.
     #[serde(default)]
     tool: Option<String>,
+    /// A prefix of the file, directory, or working directory.
     #[serde(default)]
     path: Option<String>,
+    /// `command` only: the argv prefix, required.
+    #[serde(default)]
+    argv: Option<Vec<String>>,
 }
 
-const PLANNED_KINDS: [&str; 4] = ["command", "vcs_push", "outbound_message", "pre_commit"];
+const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
 
 pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
     check_config_yaml(src, origin)?;
@@ -255,7 +287,7 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         )));
     }
     let mut rules: Vec<ToolRule> = Vec::new();
-    for rule in raw.rules {
+    for mut rule in raw.rules {
         let id = rule.id;
         let fail = |message: String| Error::new(format!("{origin}: rule `{id}`: {message}"));
         if !crate::hooks::policy::valid_rule_id(&id) {
@@ -266,7 +298,47 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         if rules.iter().any(|existing| existing.id == id) {
             return Err(fail("duplicate rule id".into()));
         }
+        if rule.action != "command" {
+            if rule.matcher.argv.is_some() {
+                return Err(fail("match.argv applies only to action: command".into()));
+            }
+            if rule.toolchain_env.is_some() {
+                return Err(fail("toolchain_env applies only to action: command".into()));
+            }
+        }
+        let mut argv = None;
+        let mut toolchain_env = Vec::new();
         let (action, tools) = match rule.action.as_str() {
+            "command" => {
+                if rule
+                    .matcher
+                    .tool
+                    .as_deref()
+                    .is_some_and(|tool| tool != COMMAND_TOOL)
+                {
+                    return Err(fail(format!(
+                        "action: command governs `{COMMAND_TOOL}` only; omit match.tool"
+                    )));
+                }
+                let Some(prefix) = rule.matcher.argv.take() else {
+                    return Err(fail(
+                        "match.argv is required for action: command (the argv prefix, as a list)"
+                            .into(),
+                    ));
+                };
+                if prefix.is_empty() || prefix.iter().any(|token| token.is_empty()) {
+                    return Err(fail(
+                        "match.argv must list at least one non-empty token".into(),
+                    ));
+                }
+                argv = Some(prefix);
+                toolchain_env = crate::hooks::policy::parse_toolchain_names(
+                    &rule.toolchain_env.unwrap_or_default(),
+                    origin,
+                    &format!("rule `{id}`: toolchain_env"),
+                )?;
+                (ActionKind::Command, vec![COMMAND_TOOL.to_string()])
+            }
             "tool_call" => {
                 let Some(tool) = rule.matcher.tool else {
                     return Err(fail("match.tool is required for action: tool_call".into()));
@@ -276,11 +348,16 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                         "`{tool}` changes files; govern it with action: file_write"
                     )));
                 }
+                if tool == COMMAND_TOOL {
+                    return Err(fail(format!(
+                        "`{tool}` runs a program; govern it with action: command"
+                    )));
+                }
                 if !builtin_tools.contains(&tool.as_str()) {
                     let readers: Vec<&str> = builtin_tools
                         .iter()
                         .copied()
-                        .filter(|t| !WRITE_TOOLS.contains(t))
+                        .filter(|t| !WRITE_TOOLS.contains(t) && *t != COMMAND_TOOL)
                         .collect();
                     return Err(fail(format!(
                         "`{tool}` is not a builtin tool (expected one of: {})",
@@ -306,7 +383,7 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 return Err(fail(if PLANNED_KINDS.contains(&other) {
                     format!("action `{other}` is not implemented yet")
                 } else {
-                    format!("unknown action `{other}` (expected tool_call or file_write)")
+                    format!("unknown action `{other}` (expected tool_call, file_write, or command)")
                 }));
             }
         };
@@ -335,6 +412,8 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
             action,
             tools,
             path,
+            argv,
+            toolchain_env,
             effect: rule.effect,
             ask: rule.ask,
         });
@@ -346,14 +425,19 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
 mod tests {
     use super::*;
 
-    const TOOLS: [&str; 6] = [
+    const TOOLS: [&str; 7] = [
         "read_file",
         "list_dir",
         "find_files",
         "search_files",
         "edit_file",
         "write_file",
+        "run_command",
     ];
+
+    fn argv(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|t| t.to_string()).collect()
+    }
 
     fn policy(src: &str) -> ActionPolicy {
         parse(src, "ahi.tools.yaml", &TOOLS).unwrap()
@@ -376,27 +460,30 @@ mod tests {
         let approve = |rule: &str| Verdict::Approve {
             rule_id: rule.into(),
         };
-        assert_eq!(policy.evaluate("read_file", "src/main.rs"), approve("src"));
         assert_eq!(
-            policy.evaluate("read_file", "src/secrets/key"),
+            policy.evaluate("read_file", "src/main.rs", &[]),
+            approve("src")
+        );
+        assert_eq!(
+            policy.evaluate("read_file", "src/secrets/key", &[]),
             Verdict::Deny {
                 rule_id: Some("secrets".into())
             }
         );
         assert_eq!(
-            policy.evaluate("read_file", "srcx/main.rs"),
+            policy.evaluate("read_file", "srcx/main.rs", &[]),
             Verdict::Ask {
                 rule_id: "ask-all".into()
             }
         );
         assert_eq!(
-            policy.evaluate("list_dir", ""),
+            policy.evaluate("list_dir", "", &[]),
             Verdict::Deny { rule_id: None }
         );
         // Case variants of a denied path stay denied, never approved.
         for variant in ["SRC/secrets/key", "src/SECRETS/key", "Src/Secrets"] {
             assert_eq!(
-                policy.evaluate("read_file", variant),
+                policy.evaluate("read_file", variant, &[]),
                 Verdict::Deny {
                     rule_id: Some("secrets".into())
                 },
@@ -404,7 +491,7 @@ mod tests {
             );
         }
         assert_eq!(
-            policy.evaluate("read_file", "SRC/main.rs"),
+            policy.evaluate("read_file", "SRC/main.rs", &[]),
             Verdict::Ask {
                 rule_id: "ask-all".into()
             }
@@ -432,39 +519,107 @@ mod tests {
             rule_id: rule.into(),
         };
         assert_eq!(
-            policy.evaluate("edit_file", "src/main.rs"),
+            policy.evaluate("edit_file", "src/main.rs", &[]),
             approve("edit-src")
         );
         assert_eq!(
-            policy.evaluate("write_file", "src/main.rs"),
+            policy.evaluate("write_file", "src/main.rs", &[]),
             Verdict::Deny { rule_id: None },
             "edit-src governs edit_file only"
         );
         assert_eq!(
-            policy.evaluate("write_file", "docs/new.md"),
+            policy.evaluate("write_file", "docs/new.md", &[]),
             Verdict::Ask {
                 rule_id: "new-docs".into()
             }
         );
         assert_eq!(
-            policy.evaluate("write_file", "tests/x.rs"),
+            policy.evaluate("write_file", "tests/x.rs", &[]),
             approve("any-tests")
         );
         assert_eq!(
-            policy.evaluate("edit_file", "tests/x.rs"),
+            policy.evaluate("edit_file", "tests/x.rs", &[]),
             approve("any-tests")
         );
         assert_eq!(
-            policy.evaluate("edit_file", "Cargo.lock"),
+            policy.evaluate("edit_file", "Cargo.lock", &[]),
             Verdict::Deny {
                 rule_id: Some("no-lock".into())
             }
         );
         assert_eq!(
-            policy.evaluate("read_file", "src/main.rs"),
+            policy.evaluate("read_file", "src/main.rs", &[]),
             Verdict::Deny { rule_id: None },
             "write rules never approve reads"
         );
+    }
+
+    #[test]
+    fn command_rules_match_an_argv_prefix_and_a_working_directory() {
+        let policy = policy(
+            "version: 1\nrules:\n\
+             - {id: cargo-test, action: command, match: {argv: [cargo, test]}, effect: approve, toolchain_env: [CARGO_TARGET_DIR]}\n\
+             - {id: cargo-any, action: command, match: {argv: [cargo]}, effect: approve, ask: true}\n\
+             - {id: scripts, action: command, match: {argv: [sh], path: scripts}, effect: approve, ask: true}\n\
+             - {id: no-publish, action: command, match: {argv: [cargo, publish]}, effect: deny}\n",
+        );
+        assert_eq!(policy.advertised_tools(), ["run_command"]);
+        assert_eq!(policy.rules[0].action, ActionKind::Command);
+        assert_eq!(policy.rules[0].toolchain_env, ["CARGO_TARGET_DIR"]);
+        let approve = |rule: &str| Verdict::Approve {
+            rule_id: rule.into(),
+        };
+        let ask = |rule: &str| Verdict::Ask {
+            rule_id: rule.into(),
+        };
+        assert_eq!(
+            policy.evaluate(
+                "run_command",
+                "",
+                &argv(&["cargo", "test", "--all-features"])
+            ),
+            approve("cargo-test")
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "", &argv(&["cargo", "test"])),
+            approve("cargo-test"),
+            "the prefix itself matches"
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "", &argv(&["cargo", "build"])),
+            ask("cargo-any")
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "", &argv(&["cargo"])),
+            ask("cargo-any")
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "", &argv(&["cargo", "publish", "--dry-run"])),
+            Verdict::Deny {
+                rule_id: Some("no-publish".into())
+            },
+            "deny wins over the wider approve"
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "", &argv(&["cargotest"])),
+            Verdict::Deny { rule_id: None },
+            "tokens compare whole, not as string prefixes"
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "scripts/ci", &argv(&["sh", "run.sh"])),
+            ask("scripts")
+        );
+        assert_eq!(
+            policy.evaluate("run_command", "src", &argv(&["sh", "run.sh"])),
+            Verdict::Deny { rule_id: None },
+            "cwd outside the rule's path"
+        );
+        assert_eq!(
+            policy.evaluate("read_file", "src/a.rs", &[]),
+            Verdict::Deny { rule_id: None },
+            "command rules never approve reads"
+        );
+        assert_eq!(policy.rule("cargo-any").map(|r| r.ask), Some(true));
     }
 
     #[test]
@@ -475,8 +630,8 @@ mod tests {
             ("version: 1\ndefault: approve\n".into(), "default must be deny"),
             ("version: 1\nextra: 1\n".into(), "unknown field `extra`"),
             (
-                rule("action: command, match: {tool: read_file}, effect: approve"),
-                "action `command` is not implemented yet",
+                rule("action: outbound_message, match: {tool: read_file}, effect: approve"),
+                "action `outbound_message` is not implemented yet",
             ),
             (
                 rule("action: tool_call, match: {tool: bash}, effect: approve"),
@@ -497,6 +652,34 @@ mod tests {
             (
                 rule("action: vcs_push, match: {tool: read_file}, effect: approve"),
                 "action `vcs_push` is not implemented yet",
+            ),
+            (
+                rule("action: tool_call, match: {tool: run_command}, effect: approve"),
+                "govern it with action: command",
+            ),
+            (
+                rule("action: command, match: {path: src}, effect: approve"),
+                "match.argv is required",
+            ),
+            (
+                rule("action: command, match: {argv: []}, effect: approve"),
+                "at least one non-empty token",
+            ),
+            (
+                rule("action: command, match: {tool: read_file, argv: [ls]}, effect: approve"),
+                "governs `run_command` only",
+            ),
+            (
+                rule("action: tool_call, match: {tool: read_file, argv: [ls]}, effect: approve"),
+                "match.argv applies only to action: command",
+            ),
+            (
+                rule("action: file_write, match: {path: src}, effect: approve, toolchain_env: [CARGO_HOME]"),
+                "toolchain_env applies only to action: command",
+            ),
+            (
+                rule("action: command, match: {argv: [cargo]}, effect: approve, toolchain_env: [AWS_SECRET_ACCESS_KEY]"),
+                "toolchain_env",
             ),
             (
                 rule("action: tool_call, match: {tool: read_file}, effect: deny, ask: true"),
@@ -595,7 +778,7 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 7,
+            seen, 8,
             "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".

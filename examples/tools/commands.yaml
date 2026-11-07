@@ -1,0 +1,51 @@
+# Reads anywhere; cargo check and test run without a prompt; any other
+# cargo subcommand asks; cargo publish and cargo install are denied; a
+# repository script under scripts asks. Commands run on the host with the
+# hook runner's scrubbed environment plus the named toolchain variables.
+version: 1
+default: deny
+rules:
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: find-tree
+    action: tool_call
+    match: {tool: find_files}
+    effect: approve
+  - id: search-tree
+    action: tool_call
+    match: {tool: search_files}
+    effect: approve
+  - id: cargo-check
+    action: command
+    match: {argv: [cargo, check]}
+    effect: approve
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: cargo-test
+    action: command
+    match: {argv: [cargo, test]}
+    effect: approve
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: cargo-other
+    action: command
+    match: {argv: [cargo]}
+    effect: approve
+    ask: true
+  - id: no-publish
+    action: command
+    match: {argv: [cargo, publish]}
+    effect: deny
+  - id: no-install
+    action: command
+    match: {argv: [cargo, install]}
+    effect: deny
+  - id: repo-scripts
+    action: command
+    match: {argv: [sh], path: scripts}
+    effect: approve
+    ask: true

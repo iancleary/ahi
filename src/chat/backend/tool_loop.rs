@@ -44,6 +44,9 @@ pub(super) struct SessionGrant {
     destination: String,
     tool: String,
     prefix: String,
+    /// For `run_command`, the approving rule's argv prefix: the grant is
+    /// exactly as wide as the rule that asked, never the full command.
+    argv: Vec<String>,
 }
 
 /// Held by the backend for the life of the chat process.
@@ -68,10 +71,13 @@ struct Outcome {
     output: String,
 }
 
+/// `Run` and `Ask` carry the id of the rule that approved or asked, so the
+/// run can apply that rule's `toolchain_env` and a session grant can take
+/// that rule's argv prefix.
 enum Plan {
     Done(Outcome),
-    Run(PreparedCall),
-    Ask(PreparedCall),
+    Run(PreparedCall, String),
+    Ask(PreparedCall, String),
 }
 
 impl ToolRuntime {
@@ -146,11 +152,11 @@ impl ToolRuntime {
                 Plan::Done(outcome) => outcome,
                 // A cancelled batch runs nothing further, including calls that
                 // rules alone had approved: the operator walked away from it.
-                Plan::Ask(prepared) | Plan::Run(prepared) if cancelled => {
+                Plan::Ask(prepared, _) | Plan::Run(prepared, _) if cancelled => {
                     denied(&prepared, "approval cancelled")
                 }
-                Plan::Ask(prepared) => denied(&prepared, "approval cancelled"),
-                Plan::Run(prepared) => self.run(&prepared),
+                Plan::Ask(prepared, _) => denied(&prepared, "approval cancelled"),
+                Plan::Run(prepared, rule) => self.run(&prepared, &rule),
             };
             self.account(&mut outcome);
             let mut message = ChatMessage::new(
@@ -191,7 +197,10 @@ impl ToolRuntime {
     }
 
     fn plan(&self, prepared: PreparedCall) -> Plan {
-        match self.policy.evaluate(prepared.tool, &prepared.path) {
+        match self
+            .policy
+            .evaluate(prepared.tool, &prepared.path, prepared.argv())
+        {
             Verdict::Deny {
                 rule_id: Some(rule),
             } => Plan::Done(denied(&prepared, &format!("denied by rule {rule}"))),
@@ -199,10 +208,18 @@ impl ToolRuntime {
                 &prepared,
                 &format!("no {} rule allows this call", tool_policy::FILE_NAME),
             )),
-            Verdict::Approve { .. } => Plan::Run(prepared),
-            Verdict::Ask { .. } if self.granted(&prepared) => Plan::Run(prepared),
-            Verdict::Ask { .. } => Plan::Ask(prepared),
+            Verdict::Approve { rule_id } => Plan::Run(prepared, rule_id),
+            Verdict::Ask { rule_id } if self.granted(&prepared) => Plan::Run(prepared, rule_id),
+            Verdict::Ask { rule_id } => Plan::Ask(prepared, rule_id),
         }
+    }
+
+    /// The approving rule's toolchain pass-through list.
+    fn toolchain_env(&self, rule_id: &str) -> Vec<String> {
+        self.policy
+            .rule(rule_id)
+            .map(|rule| rule.toolchain_env.clone())
+            .unwrap_or_default()
     }
 
     fn granted(&self, prepared: &PreparedCall) -> bool {
@@ -213,6 +230,7 @@ impl ToolRuntime {
                     && grant.destination == self.destination
                     && grant.tool == prepared.tool
                     && path_within(&grant.prefix, &prepared.path)
+                    && prepared.argv().starts_with(&grant.argv)
             })
         })
     }
@@ -228,7 +246,7 @@ impl ToolRuntime {
         let pending: Vec<usize> = plans
             .iter()
             .enumerate()
-            .filter_map(|(index, plan)| matches!(plan, Plan::Ask(_)).then_some(index))
+            .filter_map(|(index, plan)| matches!(plan, Plan::Ask(..)).then_some(index))
             .collect();
         if pending.is_empty() {
             return Ok(false);
@@ -236,7 +254,7 @@ impl ToolRuntime {
         let proposed = pending
             .iter()
             .map(|&index| {
-                let Plan::Ask(prepared) = &plans[index] else {
+                let Plan::Ask(prepared, _) = &plans[index] else {
                     unreachable!("pending holds only Ask plans")
                 };
                 ProposedAction {
@@ -263,16 +281,25 @@ impl ToolRuntime {
             _ => return Ok(true),
         };
         for (index, decision) in pending.into_iter().zip(decisions) {
-            let Plan::Ask(prepared) = std::mem::replace(&mut plans[index], Plan::Done(empty()))
+            let Plan::Ask(prepared, rule) =
+                std::mem::replace(&mut plans[index], Plan::Done(empty()))
             else {
                 unreachable!("pending holds only Ask plans")
             };
             plans[index] = match decision {
-                ToolDecision::Approve => Plan::Run(prepared),
+                ToolDecision::Approve => Plan::Run(prepared, rule),
                 ToolDecision::ApproveForSession => {
-                    // A whole-workspace grant is never offered; treat one as once.
+                    // A whole-workspace grant is never offered for a path
+                    // tool; treat one as once. A command grant is the asking
+                    // rule's argv prefix under the call's directory, which
+                    // may be the root.
                     let prefix = prepared.grant_prefix();
-                    if !prefix.is_empty() {
+                    let argv = self
+                        .policy
+                        .rule(&rule)
+                        .and_then(|rule| rule.argv.clone())
+                        .unwrap_or_default();
+                    if !prefix.is_empty() || prepared.tool == tools::RUN_COMMAND {
                         if let Ok(mut grants) = self.grants.lock() {
                             grants.push(SessionGrant {
                                 root: self.workspace.root().to_path_buf(),
@@ -280,10 +307,11 @@ impl ToolRuntime {
                                 destination: self.destination.clone(),
                                 tool: prepared.tool.to_string(),
                                 prefix,
+                                argv,
                             });
                         }
                     }
-                    Plan::Run(prepared)
+                    Plan::Run(prepared, rule)
                 }
                 ToolDecision::Deny => Plan::Done(denied(&prepared, "denied by the operator")),
             };
@@ -291,7 +319,7 @@ impl ToolRuntime {
         Ok(false)
     }
 
-    fn run(&mut self, prepared: &PreparedCall) -> Outcome {
+    fn run(&mut self, prepared: &PreparedCall, rule_id: &str) -> Outcome {
         if self.output_bytes >= MAX_TURN_OUTPUT_BYTES {
             return error(
                 prepared.tool,
@@ -299,10 +327,18 @@ impl ToolRuntime {
                 "tool output budget for this turn is exhausted",
             );
         }
-        match tools::execute(prepared, &self.workspace) {
-            Ok(tools::Executed { content, write }) => {
+        let toolchain_env = self.toolchain_env(rule_id);
+        match tools::execute(prepared, &self.workspace, &toolchain_env) {
+            Ok(tools::Executed {
+                content,
+                write,
+                command,
+            }) => {
                 if let Some(report) = write {
                     self.audit_write(prepared, &report, "ok");
+                }
+                if let Some(report) = command {
+                    self.audit_command(prepared, &report, "ok");
                 }
                 Outcome {
                     exit_code: EXIT_OK,
@@ -325,6 +361,14 @@ impl ToolRuntime {
                     };
                     self.audit_write(prepared, &none, message);
                 }
+                if prepared.tool == tools::RUN_COMMAND {
+                    let none = tools::CommandReport {
+                        exit_code: None,
+                        duration_ms: 0,
+                        env_names: Vec::new(),
+                    };
+                    self.audit_command(prepared, &none, message);
+                }
                 error(prepared.tool, Some(prepared.target()), message)
             }
         }
@@ -344,6 +388,21 @@ impl ToolRuntime {
             lines_removed: report.lines_removed,
         };
         let _ = crate::hooks::audit::append_write(&self.state_dir, &event);
+    }
+
+    /// One audit line per attempted command: argv, cwd, exit code, duration,
+    /// and environment names. Output is not logged.
+    fn audit_command(&self, prepared: &PreparedCall, report: &tools::CommandReport, outcome: &str) {
+        let event = crate::hooks::audit::CommandEvent {
+            repo: self.workspace.root(),
+            argv: prepared.argv(),
+            cwd: &prepared.path,
+            outcome,
+            exit_code: report.exit_code,
+            duration_ms: report.duration_ms,
+            env_names: &report.env_names,
+        };
+        let _ = crate::hooks::audit::append_command(&self.state_dir, &event);
     }
 
     /// Charge every result's model-facing content, including denials and

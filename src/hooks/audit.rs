@@ -72,6 +72,39 @@ fn append_line(state_dir: &Path, line: serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// One program run by a chat tool. The argv is recorded because it is the
+/// grant; output is not.
+pub struct CommandEvent<'a> {
+    pub repo: &'a Path,
+    pub argv: &'a [String],
+    /// Workspace-relative working directory; empty is the root.
+    pub cwd: &'a str,
+    pub outcome: &'a str,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u128,
+    /// Environment names passed to the process. No values.
+    pub env_names: &'a [String],
+}
+
+/// Append one `command` line to `audit.log`.
+pub fn append_command(state_dir: &Path, event: &CommandEvent<'_>) -> Result<()> {
+    append_line(
+        state_dir,
+        json!({
+            "time": now(),
+            "command": "tool",
+            "tool": "run_command",
+            "repo": event.repo.display().to_string(),
+            "argv": event.argv,
+            "cwd": event.cwd,
+            "outcome": event.outcome,
+            "exit_code": event.exit_code,
+            "duration_ms": event.duration_ms,
+            "env": event.env_names,
+        }),
+    )
+}
+
 pub struct HookEnv<'a> {
     pub hook: &'a str,
     pub names: &'a [String],

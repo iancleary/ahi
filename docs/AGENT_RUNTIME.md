@@ -367,21 +367,23 @@ ahi is not a package manager, for actions as for hooks. Every tool an agent can 
 
 [Tool catalog](TOOL_CATALOG.md) surveys the built-in tools and permission grammars of nine harnesses and proposes the next tools for this file.
 
-Every protocol implements `action: tool_call` for the builtin, read-only tools `read_file`, `list_dir`, `find_files`, and `search_files`, and `action: file_write` for `edit_file` and `write_file`. [Chat screen](CHAT_SCREEN.md#tool-calls) documents the behavior. The schema:
+Every protocol implements `action: tool_call` for the builtin, read-only tools `read_file`, `list_dir`, `find_files`, and `search_files`, `action: file_write` for `edit_file` and `write_file`, and `action: command` for `run_command`. [Chat screen](CHAT_SCREEN.md#tool-calls) documents the behavior. The schema:
 
 | Field | Meaning |
 | --- | --- |
 | `version` | `1`. Other versions are errors. |
 | `default` | Optional. Only `deny`. |
 | `rules[].id` | 1-64 ASCII letters, digits, `-`, `_`, or `.`; unique. Named in denials. |
-| `rules[].action` | `tool_call` or `file_write`. The other kinds in the table below are errors (`not implemented yet`) until implemented, so a rule never silently does nothing. |
-| `rules[].match.tool` | For `tool_call`, a read-only builtin tool name, required. For `file_write`, `edit_file`, `write_file`, or omitted for both. A write tool under `tool_call` is an error. |
+| `rules[].action` | `tool_call`, `file_write`, or `command`. The other kinds in the table below are errors (`not implemented yet`) until implemented, so a rule never silently does nothing. |
+| `rules[].match.tool` | For `tool_call`, a read-only builtin tool name, required. For `file_write`, `edit_file`, `write_file`, or omitted for both. Omitted for `command`. A write or command tool under `tool_call` is an error. |
+| `rules[].match.argv` | `command` only, required: the argv prefix as a list, compared token by token. |
+| `rules[].toolchain_env` | `command` only: variable names passed through to the process beyond the base set, validated as in `ahi.hooks.yaml`. |
 | `rules[].match.path` | Optional workspace-relative prefix, matched by path component. Omitted means the whole working directory. |
 | `rules[].effect` | `approve` or `deny`. |
 | `rules[].ask` | Optional, only with `approve`: prompt the operator. |
 | `rules[].sandbox` | Optional. Only `default` (in process, read-only tools) today. |
 
-For `find_files` and `search_files`, `match.path` bounds the directory searched; the pattern is not matchable and never appears in a prompt. For `file_write`, `match.path` bounds the file changed. Writes run in process for the alpha, with the same software containment as reads plus a hard-coded list of protected paths (the ahi policy files, `.pre-commit-config.yaml`, `.gitignore`, `.git`) and a hash-only audit line per attempt; the sandbox progression below still applies before `command`.
+For `find_files` and `search_files`, `match.path` bounds the directory searched; the pattern is not matchable and never appears in a prompt. For `file_write`, `match.path` bounds the file changed. Writes run in process for the alpha, with the same software containment as reads plus a hard-coded list of protected paths (the ahi policy files, `.pre-commit-config.yaml`, `.gitignore`, `.git`) and a hash-only audit line per attempt; `command` rules run `run_command` on the host in the alpha, with no shell, the hook runner's scrubbed environment, a timeout, and capped output; the sandbox progression below is how they get contained.
 
 The file uses the hardening shared by ahi's YAML configuration: one document, no anchors or aliases, no duplicate keys, unknown fields rejected, errors naming the file. Evaluation order: deny (case-insensitive path match), approve, session grant, ask, then default deny. A session grant is the operator's `s` answer to an `ask` prompt: tool plus a non-empty directory prefix, held in memory for that working directory and gateway. It is not yet a stored record in a conversation store; there is no store. Grants with `bound: once`, `batch`, or `until`, and receipts, arrive with the store.
 

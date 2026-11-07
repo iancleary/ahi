@@ -1,6 +1,6 @@
 //! Builtin model tools. Tools are compiled into ahi; repository configuration
 //! may only select and bound them (see `crate::tool_policy`). Four read, two
-//! write; nothing runs a program.
+//! write, one runs a program the policy names by argv prefix.
 //!
 //! Preparation is lexical and touches no file, so an unapproved call learns
 //! nothing about the workspace. Execution re-checks containment on disk.
@@ -15,6 +15,7 @@ mod glob;
 mod ignore;
 mod list_dir;
 mod read_file;
+mod run_command;
 mod search_files;
 mod walk;
 mod workspace;
@@ -23,6 +24,7 @@ mod write_file;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+pub(crate) use run_command::CommandReport;
 pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 
@@ -35,13 +37,15 @@ pub(crate) const FIND_FILES: &str = "find_files";
 pub(crate) const SEARCH_FILES: &str = "search_files";
 pub(crate) const EDIT_FILE: &str = "edit_file";
 pub(crate) const WRITE_FILE: &str = "write_file";
-pub(crate) const BUILTIN: [&str; 6] = [
+pub(crate) const RUN_COMMAND: &str = "run_command";
+pub(crate) const BUILTIN: [&str; 7] = [
     READ_FILE,
     LIST_DIR,
     FIND_FILES,
     SEARCH_FILES,
     EDIT_FILE,
     WRITE_FILE,
+    RUN_COMMAND,
 ];
 
 /// Files the model may never change, whatever `ahi.tools.yaml` says: the
@@ -90,6 +94,10 @@ pub(super) enum Arguments {
         content: String,
         overwrite: bool,
     },
+    Command {
+        argv: Vec<String>,
+        timeout_secs: u64,
+    },
 }
 
 /// A call whose arguments parsed into a tool's typed input.
@@ -113,11 +121,22 @@ impl PreparedCall {
         }
     }
 
+    /// The argv of a `run_command` call; empty for every other tool. This
+    /// is what command rules and session grants match.
+    pub(super) fn argv(&self) -> &[String] {
+        match &self.arguments {
+            Arguments::Command { argv, .. } => argv,
+            _ => &[],
+        }
+    }
+
     /// What the call would do, from its arguments alone, for the approval
-    /// prompt: line counts for a write, nothing for a read. No file is
-    /// touched and no argument text is repeated.
+    /// prompt: line counts for a write, the command line for a command,
+    /// nothing for a read. No file is touched. The command line is the one
+    /// argument the operator must see to decide, so it is shown.
     pub(super) fn detail(&self) -> String {
         match &self.arguments {
+            Arguments::Command { argv, .. } => run_command::render(argv),
             Arguments::Edit { old, new, .. } => format!(
                 "+{} -{} lines",
                 write_file::line_count(new),
@@ -237,7 +256,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
                     "additionalProperties": false
                 }),
             },
-            _ => ToolSchema {
+            WRITE_FILE => ToolSchema {
                 name: WRITE_FILE,
                 description: "Create a UTF-8 file inside the working directory with the given content. Fails if the file exists unless overwrite is true; with overwrite the file must already exist. Parent directories must exist. Prefer edit_file for changes to an existing file.",
                 parameters: json!({
@@ -248,6 +267,20 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
                         "overwrite": {"type": "boolean", "description": "Replace an existing file"}
                     },
                     "required": ["path", "content"],
+                    "additionalProperties": false
+                }),
+            },
+            _ => ToolSchema {
+                name: RUN_COMMAND,
+                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. Policy approves commands by argv prefix. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments, one element each"},
+                        "path": string("Working directory relative to the working directory; defaults to '.'"),
+                        "timeout": integer("Seconds before the program is killed", 1)
+                    },
+                    "required": ["argv"],
                     "additionalProperties": false
                 }),
             },
@@ -281,6 +314,8 @@ struct RawArguments {
     replace_all: Option<bool>,
     content: Option<String>,
     overwrite: Option<bool>,
+    argv: Option<Vec<String>>,
+    timeout: Option<u64>,
 }
 
 const INVALID: &str = "invalid tool arguments";
@@ -319,7 +354,30 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         && raw.content.is_none()
         && raw.overwrite.is_none();
     let no_paging = raw.offset.is_none() && raw.limit.is_none();
+    let no_command = raw.argv.is_none() && raw.timeout.is_none();
+    if tool != RUN_COMMAND {
+        only(no_command)?;
+    }
     let arguments = match tool {
+        RUN_COMMAND => {
+            only(no_paging && no_search && no_write)?;
+            let argv = raw.argv.ok_or(INVALID)?;
+            if argv.is_empty() || argv.len() > run_command::MAX_ARGV {
+                return Err("argv must have 1 to 64 elements");
+            }
+            if argv[0].is_empty() || argv.iter().any(|token| token.contains('\0')) {
+                return Err("argv tokens must be text without NUL and the program non-empty");
+            }
+            if argv.iter().map(String::len).sum::<usize>() > run_command::MAX_ARGV_BYTES {
+                return Err("argv is larger than 8 KiB");
+            }
+            let timeout_secs = match raw.timeout {
+                None => run_command::DEFAULT_TIMEOUT_SECS,
+                Some(0) => return Err(INVALID),
+                Some(secs) => secs.min(run_command::MAX_TIMEOUT_SECS),
+            };
+            Arguments::Command { argv, timeout_secs }
+        }
         READ_FILE => {
             if path.is_empty() {
                 return Err("read_file needs a file path");
@@ -414,24 +472,39 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
     })
 }
 
-/// A finished call: what the model receives, and for a write, what changed.
+/// A finished call: what the model receives, and for a write or a command,
+/// what happened, for the audit log.
 pub(super) struct Executed {
     pub(super) content: String,
     pub(super) write: Option<WriteReport>,
+    pub(super) command: Option<CommandReport>,
 }
 
-/// Run an approved call. `Err` text is safe to show and to send to the model.
+/// Run an approved call. `toolchain_env` is the approving command rule's
+/// pass-through list; other tools ignore it. `Err` text is safe to show and
+/// to send to the model.
 pub(super) fn execute(
     call: &PreparedCall,
     workspace: &Workspace,
+    toolchain_env: &[String],
 ) -> Result<Executed, &'static str> {
     let read_only = |content: Result<String, &'static str>| {
         content.map(|content| Executed {
             content,
             write: None,
+            command: None,
         })
     };
     match &call.arguments {
+        Arguments::Command { argv, timeout_secs } => {
+            let cwd = workspace.resolve(&call.path)?;
+            let (content, report) = run_command::run(argv, &cwd, *timeout_secs, toolchain_env)?;
+            Ok(Executed {
+                content,
+                write: None,
+                command: Some(report),
+            })
+        }
         Arguments::Edit {
             old,
             new,
@@ -445,6 +518,7 @@ pub(super) fn execute(
             Ok(Executed {
                 content,
                 write: Some(report),
+                command: None,
             })
         }
         Arguments::Write { content, overwrite } => {
@@ -453,6 +527,7 @@ pub(super) fn execute(
             Ok(Executed {
                 content,
                 write: Some(report),
+                command: None,
             })
         }
         Arguments::Read { offset, limit } => {
@@ -634,7 +709,7 @@ mod tests {
     }
 
     fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
-        execute(call, workspace).map(|executed| executed.content)
+        execute(call, workspace, &[]).map(|executed| executed.content)
     }
 
     fn read(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
@@ -919,6 +994,7 @@ mod tests {
                     },
                 },
                 &workspace,
+                &[],
             )
         };
         let write = |path: &str, content: &str, overwrite| {
@@ -932,6 +1008,7 @@ mod tests {
                     },
                 },
                 &workspace,
+                &[],
             )
         };
         // Ambiguous, then unique, then replace_all.
@@ -1052,6 +1129,143 @@ mod tests {
         assert_eq!(
             write("state/models.json", "{}", true).err(),
             Some("path is inside ahi's own directories, which tools cannot read")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_arguments_are_strict_and_rendered_for_the_prompt() {
+        let ok = |args| prepare(&call("c", RUN_COMMAND, args)).unwrap();
+        let prepared = ok(json!({"argv": ["cargo", "test", "--all-features"], "path": "crates/x"}));
+        assert_eq!(prepared.target(), "crates/x");
+        assert_eq!(prepared.grant_prefix(), "crates/x");
+        assert_eq!(prepared.argv(), ["cargo", "test", "--all-features"]);
+        assert_eq!(prepared.detail(), "cargo test --all-features");
+        assert_eq!(
+            ok(json!({"argv": ["sh", "-c", "echo 'a b'"], "timeout": 5000})).arguments,
+            Arguments::Command {
+                argv: vec!["sh".into(), "-c".into(), "echo 'a b'".into()],
+                timeout_secs: run_command::MAX_TIMEOUT_SECS
+            },
+            "timeout is clamped"
+        );
+        assert_eq!(
+            ok(json!({"argv": ["printf", "a b\tc"]})).detail(),
+            "printf 'a b?c'",
+            "whitespace quoted, control characters replaced"
+        );
+        assert_eq!(ok(json!({"argv": ["x"]})).detail(), "x");
+        assert!(ok(json!({"argv": ["x".repeat(300)]}))
+            .detail()
+            .ends_with("..."));
+        for (args, expected) in [
+            (json!({}), INVALID),
+            (json!({"argv": []}), "argv must have 1 to 64 elements"),
+            (
+                json!({"argv": [""]}),
+                "argv tokens must be text without NUL and the program non-empty",
+            ),
+            (
+                json!({"argv": ["a\u{0}b"]}),
+                "argv tokens must be text without NUL and the program non-empty",
+            ),
+            (json!({"argv": ["x"], "timeout": 0}), INVALID),
+            (json!({"argv": ["x"], "content": "y"}), INVALID),
+            (
+                json!({"argv": ["x"], "path": "../up"}),
+                "path must be relative to the working directory, without `..`",
+            ),
+            (json!({"argv": "x"}), INVALID),
+        ] {
+            assert_eq!(
+                prepare(&call("c", RUN_COMMAND, args.clone())),
+                Err(expected),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            prepare(&call("c", READ_FILE, json!({"path": "a", "argv": ["x"]}))),
+            Err(INVALID),
+            "argv belongs to run_command only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_run_without_a_shell_with_a_scrubbed_environment_and_a_timeout() {
+        let (root, workspace) = fixture("tools-command");
+        fs::create_dir(root.join("sub")).unwrap();
+        let run = |argv: &[&str], path: &str, timeout| {
+            execute(
+                &PreparedCall {
+                    tool: RUN_COMMAND,
+                    path: path.into(),
+                    arguments: Arguments::Command {
+                        argv: argv.iter().map(|t| t.to_string()).collect(),
+                        timeout_secs: timeout,
+                    },
+                },
+                &workspace,
+                &["AHI_TEST_TOOLCHAIN".to_string()],
+            )
+        };
+        std::env::set_var("AHI_TEST_SECRET_TOKEN", "leak");
+        std::env::set_var("AHI_TEST_TOOLCHAIN", "kept");
+        let both = run(
+            &["sh", "-c", "printf out; printf err >&2; pwd; exit 3"],
+            "sub",
+            30,
+        )
+        .unwrap();
+        let cwd = fs::canonicalize(root.join("sub")).unwrap();
+        assert_eq!(
+            both.content,
+            format!("exit 3\n--- stdout\nout{}\n--- stderr\nerr", cwd.display()),
+        );
+        let report = both.command.unwrap();
+        assert_eq!(report.exit_code, Some(3));
+        assert!(report.env_names.contains(&"PATH".to_string()));
+        assert!(report.env_names.contains(&"AHI_TEST_TOOLCHAIN".to_string()));
+        assert!(!report
+            .env_names
+            .contains(&"AHI_TEST_SECRET_TOKEN".to_string()));
+        let env = run(
+            &[
+                "sh",
+                "-c",
+                "echo ${AHI_TEST_SECRET_TOKEN:-scrubbed} $AHI_TOOL $PRE_COMMIT",
+            ],
+            "",
+            30,
+        )
+        .unwrap();
+        assert_eq!(env.content, "exit 0\n--- stdout\nscrubbed run_command");
+        assert_eq!(
+            run(&["true"], "", 30).unwrap().content,
+            "exit 0 (no output)"
+        );
+        assert_eq!(
+            run(&["ahi-no-such-program-xyz"], "", 30).err(),
+            Some("cannot start the program (not found or not executable)")
+        );
+        assert_eq!(
+            run(&["sh", "-c", "sleep 5"], "", 1).err(),
+            Some("command timed out and was killed")
+        );
+        let big = run(&["sh", "-c", "yes | head -c 100000"], "", 30).unwrap();
+        assert!(
+            big.content.contains("[stdout truncated at 32768 bytes]"),
+            "{}",
+            &big.content[..60]
+        );
+        assert!(big.content.len() < 34 * 1024);
+        assert_eq!(
+            run(&["true"], "state", 30).err(),
+            Some("path is inside ahi's own directories, which tools cannot read")
+        );
+        assert_eq!(
+            run(&["true"], "missing", 30).err(),
+            Some("path does not exist or cannot be read")
         );
         fs::remove_dir_all(root).unwrap();
     }
