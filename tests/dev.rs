@@ -3,7 +3,9 @@
 //! runtime, recorded by a stand-in script.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 #[path = "support/fixture_directory.rs"]
