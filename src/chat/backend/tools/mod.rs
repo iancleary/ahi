@@ -733,49 +733,75 @@ mod timing {
     #[test]
     #[ignore]
     fn walk_and_search_this_repository() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = std::env::var_os("AHI_TIMING_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         let workspace = Workspace::open(
             &root,
             &crate::directories::Directories::single_root(root.join("target/ahi-timing-state")),
         )
         .unwrap();
-        let started = Instant::now();
-        let entries = walk::walk(&workspace, &root, "").unwrap();
-        println!("walk: {} entries in {:?}", entries.len(), started.elapsed());
-        let started = Instant::now();
-        let found = find_files::run(&workspace, &root, "", "*.rs", 1000).unwrap();
-        println!(
-            "find *.rs: {} lines in {:?}",
-            found.lines().count(),
-            started.elapsed()
-        );
-        let started = Instant::now();
-        let query = search_files::Query {
-            pattern: "fn main",
-            literal: true,
-            ignore_case: false,
-            glob: None,
-            limit: 500,
-        };
-        let hits = search_files::run(&workspace, &root, "", &query).unwrap();
-        println!(
-            "search 'fn main': {} lines in {:?}",
-            hits.lines().count(),
-            started.elapsed()
-        );
-        let started = Instant::now();
-        let query = search_files::Query {
-            pattern: r"pub\s+fn\s+\w+",
-            literal: false,
-            ignore_case: false,
-            glob: Some("*.rs"),
-            limit: 500,
-        };
-        let hits = search_files::run(&workspace, &root, "", &query).unwrap();
-        println!(
-            "search regex in *.rs: {} lines in {:?}",
-            hits.lines().count(),
-            started.elapsed()
-        );
+        for round in 1..=3 {
+            println!("round {round}");
+            let started = Instant::now();
+            let entries = walk::walk(&workspace, &root, "").unwrap();
+            println!(
+                "  walk: {} entries in {:?}",
+                entries.len(),
+                started.elapsed()
+            );
+            let started = Instant::now();
+            let mut bytes = 0usize;
+            let mut buffer = Vec::new();
+            let mut path = PathBuf::new();
+            for relative in entries.files() {
+                buffer.clear();
+                walk::absolute(&workspace, relative, &mut path);
+                if let Ok(mut file) = std::fs::File::open(&path) {
+                    use std::io::Read;
+                    let _ = file.read_to_end(&mut buffer);
+                    bytes += buffer.len();
+                }
+            }
+            println!(
+                "  baseline open+read all files: {bytes} bytes in {:?}",
+                started.elapsed()
+            );
+            let started = Instant::now();
+            let found = find_files::run(&workspace, &root, "", "*.rs", 1000).unwrap();
+            println!(
+                "  find *.rs: {} lines in {:?}",
+                found.lines().count(),
+                started.elapsed()
+            );
+            let started = Instant::now();
+            let query = search_files::Query {
+                pattern: "fn main",
+                literal: true,
+                ignore_case: false,
+                glob: None,
+                limit: 500,
+            };
+            let hits = search_files::run(&workspace, &root, "", &query).unwrap();
+            println!(
+                "  search 'fn main': {} lines in {:?}",
+                hits.lines().count(),
+                started.elapsed()
+            );
+            let started = Instant::now();
+            let query = search_files::Query {
+                pattern: r"pub\s+fn\s+\w+",
+                literal: false,
+                ignore_case: false,
+                glob: Some("*.rs"),
+                limit: 500,
+            };
+            let hits = search_files::run(&workspace, &root, "", &query).unwrap();
+            println!(
+                "  search regex in *.rs: {} lines in {:?}",
+                hits.lines().count(),
+                started.elapsed()
+            );
+        }
     }
 }
