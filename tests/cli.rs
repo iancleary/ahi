@@ -554,7 +554,7 @@ fn remote_and_language_hooks_are_not_skipped() {
     let dir = fixture();
     write(
         &dir.join(".pre-commit-config.yaml"),
-        b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: true\n    language: system\n- repo: https://example.invalid/hooks\n  rev: abc\n  hooks:\n  - id: remote-hook\n- repo: meta\n  hooks:\n  - id: identity\n",
+        b"repos:\n- repo: local\n  hooks:\n  - id: local-py\n    name: Local Python\n    entry: python hook.py\n    language: python\n  - id: local-node\n    name: Local Node\n    entry: node hook.js\n    language: node\n  - id: local-sys\n    name: Local System\n    entry: 'true'\n    language: system\n- repo: https://example.invalid/hooks\n  rev: abc\n  hooks:\n  - id: remote-hook\n- repo: meta\n  hooks:\n  - id: identity\n",
     );
     let output = run(&dir, &["run", "--all-files"]);
     assert_eq!(output.status.code(), Some(1));

@@ -149,8 +149,7 @@ pub struct RepoPreferences {
 /// Parse `ahi.dev.yaml`. Unknown keys are errors, like every ahi file.
 pub fn parse_repo_preferences(src: &str, origin: &str) -> Result<RepoPreferences> {
     check_config_yaml(src, origin)?;
-    let prefs: RepoPreferences =
-        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
+    let prefs: RepoPreferences = crate::yaml_safe::typed(src, origin)?;
     if prefs.version != 1 {
         return Err(Error::new(format!(
             "{origin}: {REPO_FILE_NAME} version {} is not supported (expected 1)",

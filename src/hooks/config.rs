@@ -185,8 +185,7 @@ pub fn load_config(path: &Path) -> Result<Config> {
 
 pub fn parse_config_str(src: &str, origin: &str) -> Result<Config> {
     check_config_yaml(src, origin)?;
-    let raw: RawConfig =
-        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
+    let raw: RawConfig = crate::yaml_safe::typed(src, origin)?;
     materialize_config(raw, origin)
 }
 

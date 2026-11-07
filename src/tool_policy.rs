@@ -273,8 +273,7 @@ const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
 
 pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
     check_config_yaml(src, origin)?;
-    let raw: RawPolicy =
-        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
+    let raw: RawPolicy = crate::yaml_safe::typed(src, origin)?;
     if raw.version != 1 {
         return Err(Error::new(format!(
             "{origin}: {FILE_NAME} version {} is not supported (expected 1)",

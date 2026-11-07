@@ -1600,7 +1600,7 @@ fn command_rules_match_argv_prefixes_show_the_command_and_grant_the_rule_prefix(
     ]);
     let policy = "version: 1\nrules:\n\
         - {id: shell, action: command, match: {argv: [sh]}, effect: approve, ask: true}\n\
-        - {id: noop, action: command, match: {argv: [true]}, effect: approve}\n\
+        - {id: noop, action: command, match: {argv: ['true']}, effect: approve}\n\
         - {id: no-rm, action: command, match: {argv: [rm]}, effect: deny}\n";
     let fixture = ToolFixture::new(&url, policy, json!({"id": "vendor/model"}));
     let (events, approvals) = collect_answering(

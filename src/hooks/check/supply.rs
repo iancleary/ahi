@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use regex::Regex;
-use serde_yaml::Value;
+use yaml_rust2::yaml::{Hash, Yaml};
 
 use super::{flag_values, Check, CheckContext, CheckOutcome, Finding};
 
@@ -35,7 +35,10 @@ impl Check for GithubActions {
             let Ok(bytes) = ctx.read(file) else {
                 continue;
             };
-            let value: Value = match serde_yaml::from_slice(&bytes) {
+            let value = match std::str::from_utf8(&bytes)
+                .map_err(|err| err.to_string())
+                .and_then(crate::yaml_safe::load_first_document)
+            {
                 Ok(value) => value,
                 Err(err) => {
                     findings.push(Finding::at(file, None, format!("workflow YAML: {err}")));
@@ -129,14 +132,14 @@ impl Check for ShellStrict {
     }
 }
 
-fn check_workflow(file: &str, value: &Value, allow_write: &[String]) -> Vec<Finding> {
-    let Some(root) = value.as_mapping() else {
+fn check_workflow(file: &str, value: &Yaml, allow_write: &[String]) -> Vec<Finding> {
+    let Some(root) = value.as_hash() else {
         return vec![Finding::at(file, None, "workflow root must be a mapping")];
     };
     let mut findings = Vec::new();
     let on = root
-        .get(Value::String("on".to_string()))
-        .or_else(|| root.get(Value::Bool(true)));
+        .get(&Yaml::String("on".to_string()))
+        .or_else(|| root.get(&Yaml::Boolean(true)));
     let pr_target = on.map(uses_pull_request_target).unwrap_or(false);
     let mut uses = Vec::new();
     collect_uses(value, &mut uses);
@@ -168,21 +171,21 @@ fn check_workflow(file: &str, value: &Value, allow_write: &[String]) -> Vec<Find
     findings
 }
 
-fn uses_pull_request_target(value: &Value) -> bool {
+fn uses_pull_request_target(value: &Yaml) -> bool {
     match value {
-        Value::String(text) => text == "pull_request_target",
-        Value::Sequence(items) => items.iter().any(uses_pull_request_target),
-        Value::Mapping(map) => map.keys().any(|key| match key {
-            Value::String(text) => text == "pull_request_target",
+        Yaml::String(text) => text == "pull_request_target",
+        Yaml::Array(items) => items.iter().any(uses_pull_request_target),
+        Yaml::Hash(map) => map.keys().any(|key| match key {
+            Yaml::String(text) => text == "pull_request_target",
             _ => false,
         }),
         _ => false,
     }
 }
 
-fn collect_uses(value: &Value, out: &mut Vec<String>) {
+fn collect_uses(value: &Yaml, out: &mut Vec<String>) {
     match value {
-        Value::Mapping(map) => {
+        Yaml::Hash(map) => {
             for (key, child) in map {
                 if key.as_str() == Some("uses") {
                     if let Some(text) = child.as_str() {
@@ -192,7 +195,7 @@ fn collect_uses(value: &Value, out: &mut Vec<String>) {
                 collect_uses(child, out);
             }
         }
-        Value::Sequence(items) => {
+        Yaml::Array(items) => {
             for item in items {
                 collect_uses(item, out);
             }
@@ -229,21 +232,18 @@ fn uses_problem(uses: &str) -> Option<String> {
     ))
 }
 
-fn permissions_problem(
-    root: &serde_yaml::Mapping,
-    allow_write: &[String],
-) -> std::result::Result<(), String> {
-    let root_perms = root.get(Value::String("permissions".to_string()));
+fn permissions_problem(root: &Hash, allow_write: &[String]) -> std::result::Result<(), String> {
+    let root_perms = root.get(&Yaml::String("permissions".to_string()));
     if let Some(perms) = root_perms {
         check_perm_value(perms, allow_write)?;
     }
-    let Some(jobs) = root.get(Value::String("jobs".to_string())) else {
+    let Some(jobs) = root.get(&Yaml::String("jobs".to_string())) else {
         if root_perms.is_none() {
             return Err("workflow is missing permissions".to_string());
         }
         return Ok(());
     };
-    let Some(jobs) = jobs.as_mapping() else {
+    let Some(jobs) = jobs.as_hash() else {
         return Err("jobs must be a mapping".to_string());
     };
     if jobs.is_empty() && root_perms.is_none() {
@@ -251,8 +251,8 @@ fn permissions_problem(
     }
     for (name, job) in jobs {
         let job_perms = job
-            .as_mapping()
-            .and_then(|map| map.get(Value::String("permissions".to_string())));
+            .as_hash()
+            .and_then(|map| map.get(&Yaml::String("permissions".to_string())));
         match job_perms {
             Some(perms) => check_perm_value(perms, allow_write)?,
             None if root_perms.is_none() => {
@@ -267,16 +267,16 @@ fn permissions_problem(
     Ok(())
 }
 
-fn check_perm_value(value: &Value, allow_write: &[String]) -> std::result::Result<(), String> {
+fn check_perm_value(value: &Yaml, allow_write: &[String]) -> std::result::Result<(), String> {
     match value {
-        Value::String(text) if text == "write-all" => {
+        Yaml::String(text) if text == "write-all" => {
             Err("permissions write-all is not least privilege".to_string())
         }
-        Value::String(_) => {
+        Yaml::String(_) => {
             Err("permissions must be a mapping whose values are read or none".to_string())
         }
-        Value::Mapping(map) if map.is_empty() => Ok(()),
-        Value::Mapping(map) => {
+        Yaml::Hash(map) if map.is_empty() => Ok(()),
+        Yaml::Hash(map) => {
             for (key, perm) in map {
                 let name = key.as_str().unwrap_or("");
                 let value = perm.as_str().unwrap_or("");
@@ -294,25 +294,25 @@ fn check_perm_value(value: &Value, allow_write: &[String]) -> std::result::Resul
     }
 }
 
-fn checkout_of_pr_head(value: &Value) -> bool {
-    let Value::Mapping(map) = value else {
-        if let Value::Sequence(items) = value {
+fn checkout_of_pr_head(value: &Yaml) -> bool {
+    let Yaml::Hash(map) = value else {
+        if let Yaml::Array(items) = value {
             return items.iter().any(checkout_of_pr_head);
         }
         return false;
     };
     let uses = map
-        .get(Value::String("uses".to_string()))
-        .and_then(Value::as_str)
+        .get(&Yaml::String("uses".to_string()))
+        .and_then(Yaml::as_str)
         .unwrap_or("");
     if uses.starts_with("actions/checkout@") {
         if let Some(with) = map
-            .get(Value::String("with".to_string()))
-            .and_then(Value::as_mapping)
+            .get(&Yaml::String("with".to_string()))
+            .and_then(Yaml::as_hash)
         {
             if let Some(reference) = with
-                .get(Value::String("ref".to_string()))
-                .and_then(Value::as_str)
+                .get(&Yaml::String("ref".to_string()))
+                .and_then(Yaml::as_str)
             {
                 if reference.contains("pull_request.head")
                     || reference.contains("head.sha")
@@ -326,12 +326,12 @@ fn checkout_of_pr_head(value: &Value) -> bool {
     map.values().any(checkout_of_pr_head)
 }
 
-fn run_uses_secrets(value: &Value) -> bool {
+fn run_uses_secrets(value: &Yaml) -> bool {
     match value {
-        Value::Mapping(map) => {
+        Yaml::Hash(map) => {
             if let Some(run) = map
-                .get(Value::String("run".to_string()))
-                .and_then(Value::as_str)
+                .get(&Yaml::String("run".to_string()))
+                .and_then(Yaml::as_str)
             {
                 if run.contains("secrets.") {
                     return true;
@@ -339,7 +339,7 @@ fn run_uses_secrets(value: &Value) -> bool {
             }
             map.values().any(run_uses_secrets)
         }
-        Value::Sequence(items) => items.iter().any(run_uses_secrets),
+        Yaml::Array(items) => items.iter().any(run_uses_secrets),
         _ => false,
     }
 }

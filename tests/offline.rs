@@ -380,7 +380,7 @@ fn secret_toolchain_name_is_refused_before_the_hook_runs() {
     let dir = temp_repo("secret-env");
     write(
         &dir.join(".pre-commit-config.yaml"),
-        b"repos:\n- repo: local\n  hooks:\n  - id: envcheck\n    name: Env\n    entry: true\n    language: system\n    pass_filenames: false\n    always_run: true\n",
+        b"repos:\n- repo: local\n  hooks:\n  - id: envcheck\n    name: Env\n    entry: 'true'\n    language: system\n    pass_filenames: false\n    always_run: true\n",
     );
     write(
         &dir.join("ahi.hooks.yaml"),
