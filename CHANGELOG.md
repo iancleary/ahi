@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.0 (2026-11-06)
+
 ### Added
 
 - `ahi dev run -- <command>` runs a command in the development image with the same single mount as the shell, pulling first when the image is missing, and exits with the command's code. On Unix `AHI_HOST_UID` and `AHI_HOST_GID` are passed for an entrypoint that remaps its user.
