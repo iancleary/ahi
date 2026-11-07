@@ -1,6 +1,8 @@
 [package]
 name = "ahi"
-description = "Fail-closed pre-commit runner. Reads .pre-commit-config.yaml and runs offline builtin checks."
+description = "Fail-closed pre-commit runner with a terminal chat for OpenAI and OpenAI-compatible gateways. Runs offline builtin checks from .pre-commit-config.yaml; streams model replies with policy-gated, read-only workspace tools."
+keywords = ["pre-commit", "git-hooks", "tui", "chat", "openai"]
+categories = ["development-tools", "command-line-utilities"]
 version = "0.6.0"
 edition = "2021"
 license = "MIT"
