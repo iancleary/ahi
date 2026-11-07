@@ -365,6 +365,8 @@ ahi is not a package manager, for actions as for hooks. Every tool an agent can 
 
 ### Implemented subset (`tool_call`)
 
+[Tool catalog](TOOL_CATALOG.md) surveys the built-in tools and permission grammars of nine harnesses and proposes the next tools for this file.
+
 Gateway Chat Completions implements `action: tool_call` for the builtin, read-only tools `read_file` and `list_dir`. [Chat screen](CHAT_SCREEN.md#tool-calls) documents the behavior. The schema:
 
 | Field | Meaning |
