@@ -136,9 +136,14 @@ struct DevArgs {
     rebuild: bool,
     /// Image reference. Overrides AHI_DEV_IMAGE, the repository's ahi.dev.yaml,
     /// and the `dev-image` file in the config directory.
-    /// Default: ghcr.io/iancleary/ahi-dev:latest.
+    /// Default: ghcr.io/iancleary/ahi-dev.
     #[arg(long, global = true, value_name = "REF")]
     image: Option<String>,
+    /// Image tag, such as latest, edge, or a dated tag. Overrides `tag` in the
+    /// repository's ahi.dev.yaml. Default: latest. An image reference that
+    /// already names a tag cannot be combined with this flag.
+    #[arg(long, global = true, value_name = "TAG")]
+    tag: Option<String>,
     /// Shell to run inside the container. Default: the repository's `shell` in ahi.dev.yaml, else the basename of SHELL, else /bin/zsh.
     #[arg(long, global = true, value_name = "CMD")]
     shell: Option<String>,
@@ -278,6 +283,7 @@ fn dev(cli: &Cli, args: &DevArgs) -> ExitCode {
     };
     let options = Options {
         image: args.image.clone(),
+        tag: args.tag.clone(),
         shell: args.shell.clone(),
         runtime: args.runtime.clone(),
         rebuild: args.rebuild,

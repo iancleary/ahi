@@ -162,19 +162,51 @@ fn the_image_flag_outranks_the_environment_which_outranks_the_file() {
         .output()
         .unwrap();
     assert!(
-        text(&from_env).contains("image: example.invalid/ahi-dev:env (from AHI_DEV_IMAGE)"),
+        text(&from_env).contains(
+            "image: example.invalid/ahi-dev:env (from AHI_DEV_IMAGE, tag from the image reference)"
+        ),
         "{}",
         text(&from_env)
     );
     assert!(
-        text(&from_flag).contains("image: example.invalid/ahi-dev:flag (from --image)"),
+        text(&from_flag).contains(
+            "image: example.invalid/ahi-dev:flag (from --image, tag from the image reference)"
+        ),
         "{}",
         text(&from_flag)
     );
     assert!(
-        text(&from_file).contains("image: example.invalid/ahi-dev:file (from dev-image)"),
+        text(&from_file).contains(
+            "image: example.invalid/ahi-dev:file (from dev-image, tag from the image reference)"
+        ),
         "{}",
         text(&from_file)
+    );
+
+    let tagged = fixture
+        .ahi()
+        .env("AHI_DEV_IMAGE", "example.invalid/ahi-dev")
+        .args(["dev", "status", "--tag", "edge", "--runtime"])
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    assert!(
+        text(&tagged)
+            .contains("image: example.invalid/ahi-dev:edge (from AHI_DEV_IMAGE, tag from --tag)"),
+        "{}",
+        text(&tagged)
+    );
+    let conflict = fixture
+        .ahi()
+        .args(["dev", "status", "--tag", "edge", "--runtime"])
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    assert_eq!(conflict.status.code(), Some(1));
+    assert!(
+        text(&conflict).contains("already has a tag"),
+        "{}",
+        text(&conflict)
     );
 }
 
@@ -191,7 +223,7 @@ fn the_repository_file_outranks_the_user_file_and_yields_to_the_environment() {
     .unwrap();
     fs::write(
         fixture.0.join("ahi.dev.yaml"),
-        "version: 1\nimage: example.invalid/ahi-dev:repo\nshell: bash\n",
+        "version: 1\nimage: example.invalid/ahi-dev\ntag: repo\nshell: bash\n",
     )
     .unwrap();
 
@@ -203,7 +235,9 @@ fn the_repository_file_outranks_the_user_file_and_yields_to_the_environment() {
         .unwrap();
     let text_repo = text(&from_repo);
     assert!(
-        text_repo.contains("image: example.invalid/ahi-dev:repo (from ahi.dev.yaml)"),
+        text_repo.contains(
+            "image: example.invalid/ahi-dev:repo (from ahi.dev.yaml, tag from ahi.dev.yaml)"
+        ),
         "{text_repo}"
     );
     assert!(text_repo.contains("shell: bash"), "{text_repo}");
@@ -216,7 +250,9 @@ fn the_repository_file_outranks_the_user_file_and_yields_to_the_environment() {
         .output()
         .unwrap();
     assert!(
-        text(&from_env).contains("image: example.invalid/ahi-dev:env (from AHI_DEV_IMAGE)"),
+        text(&from_env).contains(
+            "image: example.invalid/ahi-dev:env (from AHI_DEV_IMAGE, tag from the image reference)"
+        ),
         "{}",
         text(&from_env)
     );

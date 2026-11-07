@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi dev --tag <tag>` and `tag` in `ahi.dev.yaml` choose the image tag (`latest`, `edge`, a dated tag) separately from the image name; the flag outranks the file, which outranks the default `latest`. A reference that already names a tag or digest is used unchanged; `--tag` against it is an error, and a repository `tag` yields to a tagged `--image` or `AHI_DEV_IMAGE`. `ahi dev status` reports where the tag came from.
+
 ## 0.9.0 (2026-11-07)
 
 ### Changed
