@@ -2,16 +2,17 @@
 
 ## Unreleased
 
+## 0.7.0 (2026-11-06)
+
+### Added
+
+- `ahi dev` opens a shell in the development image `ghcr.io/iancleary/ahi-dev:latest` from iancleary/ahi-images through `podman` or `docker`, with the working directory mounted at `/work` and nothing else. `ahi dev build`, `shell`, `status`, and `clean` manage the image; `--image`, `AHI_DEV_IMAGE`, and a `dev-image` file in the config directory override the reference, `--shell`, `--runtime`, `--rebuild`, and `--from <ahi-images checkout>` adjust the run. `ahi doctor` reports the container runtime it would use. Closes #28.
+- `ahi.dev.yaml` in the working directory lets a repository prefer an `image`, `shell`, and `runtime` for `ahi dev`. Flags and environment outrank it; it grants nothing.
+
 ### Changed
 
 - The repository-level files are named for what they decide, one file per job, with one rule grammar (`id`, `action`, `match`, `effect`, optional `ask`) across the allowlists. `ahi.policy.yaml` is now `ahi.hooks.yaml`: local `system`/`script` hooks are approved by `action: hook` rules matching the hook id and exact entry, a deny rule beats approve, `ask` is refused, and the unused `repo_allow`, `runtime_allow`, and `network_hooks` keys are gone. `ahi.actions.yaml` is now `ahi.tools.yaml` with the same contents, `ahi tui --actions` is `--tools`, and `examples/actions` is `examples/tools`. A retired filename in the repository root is an error with the new name, never silently ignored. `ahi doctor` prints `hooks policy:` and the approve/deny rule counts.
 - The `.pre-commit-hooks.yaml` manifest parser is removed from the library. ahi never fetches a hook repository, so nothing read it.
-
-### Added
-
-- `ahi.dev.yaml` in the working directory lets a repository prefer an `image`, `shell`, and `runtime` for `ahi dev`. Flags and environment outrank it; it grants nothing.
-
-- `ahi dev` opens a shell in the development image `ghcr.io/iancleary/ahi-dev:latest` from iancleary/ahi-images through `podman` or `docker`, with the working directory mounted at `/work` and nothing else. `ahi dev build`, `shell`, `status`, and `clean` manage the image; `--image`, `AHI_DEV_IMAGE`, and a `dev-image` file in the config directory override the reference, `--shell`, `--runtime`, `--rebuild`, and `--from <ahi-images checkout>` adjust the run. `ahi doctor` reports the container runtime it would use. Closes #28.
 
 ## 0.6.1 (2026-11-06)
 
