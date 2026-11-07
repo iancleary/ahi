@@ -111,11 +111,7 @@ impl DiscoveredGateway {
         let snapshot = CatalogSnapshot {
             provider: self.provider_id.clone(),
             source: Some(catalog_url(&self.base_url)?),
-            retrieved_at: Some(
-                time::OffsetDateTime::now_utc()
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .map_err(|error| Error::new(format!("catalog timestamp: {error}")))?,
-            ),
+            retrieved_at: Some(crate::util::rfc3339::now()),
             models: self.catalog.models.clone(),
             metadata: self.catalog.metadata.clone(),
         };

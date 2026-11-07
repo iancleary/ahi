@@ -31,7 +31,7 @@ fn valid_secret(value: &str) -> bool {
 }
 
 fn now() -> i64 {
-    time::OffsetDateTime::now_utc().unix_timestamp()
+    crate::util::rfc3339::unix_now()
 }
 
 pub(super) fn catalog_source(base_url: &str) -> Result<String> {

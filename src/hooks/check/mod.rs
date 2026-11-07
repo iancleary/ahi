@@ -217,11 +217,12 @@ fn create_excl_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        if let Some(flag) = crate::util::nofollow::o_nofollow() {
+            options.custom_flags(flag);
+        }
+        options.open(path)
     }
     #[cfg(not(unix))]
     {
@@ -266,10 +267,12 @@ fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
         use std::fs::OpenOptions;
         use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        if let Some(flag) = crate::util::nofollow::o_nofollow() {
+            options.custom_flags(flag);
+        }
+        let mut file = options.open(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)

@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Three direct dependencies replaced by small in-repo modules with tests against published vectors: `base64` (encoding only, RFC 4648 vectors and a 256-byte round trip through a reference decoder), `libc` (the `O_NOFOLLOW` constant per platform, with an open-a-symlink test), and `time` (RFC 3339 format and parse via the proleptic Gregorian algorithms, round-tripped over every day of two 400-year cycles). Catalog timestamps are now written at second precision; stamps with fractional seconds or offsets still parse. `time` itself stays in the lockfile because ratatui's widgets enable it by default.
 - Dependencies: ratatui builds with only its `crossterm` feature, ureq moved from 2.12 to 3.5 (one TLS root store, `http` types), `thiserror` was removed as unused, and `base64` moved to 0.23. The lockfile shrank from 285 entries to 193, and every remaining duplicate version (`foldhash`, `hashbrown`, `syn`) lives inside ratatui's tree.
 - `deny.toml` now fails on unsound or unmaintained advisories for any crate unless ignored with a reason; RUSTSEC-2026-0253 (`lru`, pulled by ratatui-core, unused by ahi) is ignored with a review date. CI and publish run clippy, test, doc, and build with `--locked`.
 - The crate description and README no longer mention the retired `ahi.policy.yaml` or describe the chat tools as read-only.

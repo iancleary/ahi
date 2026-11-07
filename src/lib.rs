@@ -18,6 +18,7 @@ mod shlex;
 mod tool_policy;
 pub mod tui;
 pub mod update;
+mod util;
 mod yaml_safe;
 
 #[cfg(test)]
