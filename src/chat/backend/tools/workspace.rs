@@ -31,6 +31,13 @@ impl Workspace {
         &self.root
     }
 
+    /// Whether a canonical-or-lexical absolute path lies in one of ahi's own
+    /// directories. Used by the walk to prune without canonicalizing every
+    /// entry; `resolve` remains the check before any read.
+    pub(super) fn is_excluded(&self, absolute: &Path) -> bool {
+        self.excluded.iter().any(|dir| absolute.starts_with(dir))
+    }
+
     /// Resolve a normalized relative path. The canonical result must equal the
     /// lexical join, so no symbolic link is followed, inside or outside, and a
     /// differently cased spelling of a real path (which `realpath` corrects on

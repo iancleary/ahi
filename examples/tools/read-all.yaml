@@ -1,4 +1,4 @@
-# Read and list anywhere in the working tree, never .env; no prompts.
+# Read, list, find, and search anywhere in the working tree, never .env; no prompts.
 version: 1
 default: deny
 rules:
@@ -9,6 +9,14 @@ rules:
   - id: list-tree
     action: tool_call
     match: {tool: list_dir}
+    effect: approve
+  - id: find-tree
+    action: tool_call
+    match: {tool: find_files}
+    effect: approve
+  - id: search-tree
+    action: tool_call
+    match: {tool: search_files}
     effect: approve
   - id: read-tree
     action: tool_call
