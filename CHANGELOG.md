@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi dev` opens a shell in the development image `ghcr.io/iancleary/ahi-dev:latest` from iancleary/ahi-images through `podman` or `docker`, with the working directory mounted at `/work` and nothing else. `ahi dev build`, `shell`, `status`, and `clean` manage the image; `--image`, `AHI_DEV_IMAGE`, and a `dev-image` file in the config directory override the reference, `--shell`, `--runtime`, `--rebuild`, and `--from <ahi-images checkout>` adjust the run. `ahi doctor` reports the container runtime it would use. Closes #28.
+
 ## 0.6.1 (2026-11-06)
 
 ### Changed
