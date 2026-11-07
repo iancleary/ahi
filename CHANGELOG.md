@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+## 0.6.1 (2026-11-06)
+
+### Changed
+
 - The crate description, `--help` summary, and README opening now describe both the hook runner and the terminal chat; crates.io keywords and categories added.
+- README: current installation instructions for 0.6.0 and later, one section per subcommand with a linked summary table, and sections ordered for users (Installation, Getting started, Commands, Files and directories, Verifying downloads, Development).
 
 ## 0.6.0 (2026-11-06)
 
