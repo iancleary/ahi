@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- A weekly `dependency audit` workflow runs cargo-deny and cargo-audit against `main` and opens or updates one issue when either fails. Dependabot updates Cargo pins and GitHub Actions weekly in grouped pull requests, security updates alone; merges stay manual.
+
 ## 0.11.0 (2026-11-07)
 
 ### Added
