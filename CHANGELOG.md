@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0 (2026-11-07)
+
 ### Changed
 
 - `ahi dev` opens `/bin/zsh` when neither `--shell`, the repository's `shell` in `ahi.dev.yaml`, nor `SHELL` says otherwise, matching the login shell of the ahi-dev images. A repository that wants bash sets `shell: bash`.
