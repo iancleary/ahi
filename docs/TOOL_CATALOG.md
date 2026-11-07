@@ -1,6 +1,6 @@
 # Tool catalog: what coding-agent harnesses let a model call
 
-Status: survey, 2026-11-07. Input to the `ahi.tools.yaml` build-out beyond `read_file` and `list_dir`. Section 5.1, the read side, shipped after this survey as `read_file` paging, `find_files`, and `search_files`; the rest of section 5 remains proposal. Names are spelled as each harness spells them. Details marked *unverified* were not confirmed on a page or source file read during the survey.
+Status: survey, 2026-11-07. Input to the `ahi.tools.yaml` build-out beyond `read_file` and `list_dir`. Sections 5.1 and 5.2 shipped after this survey: `read_file` paging, `find_files`, `search_files`, and `edit_file` and `write_file` under `action: file_write` (in process for the alpha, with `match.tool` so creation and editing are approved separately). Section 5.3 remains proposal. Names are spelled as each harness spells them. Details marked *unverified* were not confirmed on a page or source file read during the survey.
 
 Harnesses surveyed: pi (earendil-works/pi, formerly badlogic/pi-mono), Claude Code, OpenAI Codex CLI, OpenCode, Gemini CLI, Aider, Goose, Amp, Cline and Roo Code.
 

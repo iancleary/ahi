@@ -1,10 +1,15 @@
-//! Builtin, read-only model tools. Tools are compiled into ahi; repository
-//! configuration may only select and bound them (see `crate::tool_policy`).
+//! Builtin model tools. Tools are compiled into ahi; repository configuration
+//! may only select and bound them (see `crate::tool_policy`). Four read, two
+//! write; nothing runs a program.
 //!
 //! Preparation is lexical and touches no file, so an unapproved call learns
 //! nothing about the workspace. Execution re-checks containment on disk.
-//! Every tool is deterministic: sorted output, fixed caps, no shell.
+//! Every tool is deterministic: sorted output, fixed caps, no shell. Writes
+//! are atomic, never follow a symbolic link, and are confined to the working
+//! directory; a few paths are protected from the model whatever the rules
+//! say, because a model that could edit its own policy would have none.
 
+mod edit_file;
 mod find_files;
 mod glob;
 mod ignore;
@@ -13,11 +18,13 @@ mod read_file;
 mod search_files;
 mod walk;
 mod workspace;
+mod write_file;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub(super) use workspace::Workspace;
+pub(crate) use write_file::WriteReport;
 
 use super::ToolCall;
 use crate::tool_policy::normalize_relative_path;
@@ -26,7 +33,34 @@ pub(crate) const READ_FILE: &str = "read_file";
 pub(crate) const LIST_DIR: &str = "list_dir";
 pub(crate) const FIND_FILES: &str = "find_files";
 pub(crate) const SEARCH_FILES: &str = "search_files";
-pub(crate) const BUILTIN: [&str; 4] = [READ_FILE, LIST_DIR, FIND_FILES, SEARCH_FILES];
+pub(crate) const EDIT_FILE: &str = "edit_file";
+pub(crate) const WRITE_FILE: &str = "write_file";
+pub(crate) const BUILTIN: [&str; 6] = [
+    READ_FILE,
+    LIST_DIR,
+    FIND_FILES,
+    SEARCH_FILES,
+    EDIT_FILE,
+    WRITE_FILE,
+];
+
+/// Files the model may never change, whatever `ahi.tools.yaml` says: the
+/// policy files themselves, the hook configuration, the ignore file the walk
+/// trusts, and everything under `.git`. Matched on the normalized path.
+pub(crate) const PROTECTED: [&str; 7] = [
+    "ahi.tools.yaml",
+    "ahi.hooks.yaml",
+    "ahi.dev.yaml",
+    "ahi.actions.yaml",
+    "ahi.policy.yaml",
+    ".pre-commit-config.yaml",
+    ".gitignore",
+];
+
+fn protected(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    PROTECTED.contains(&name) || path.split('/').any(|part| part == ".git")
+}
 
 /// Arguments beyond the path, already validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +80,15 @@ pub(super) enum Arguments {
         ignore_case: bool,
         glob: Option<String>,
         limit: usize,
+    },
+    Edit {
+        old: String,
+        new: String,
+        replace_all: bool,
+    },
+    Write {
+        content: String,
+        overwrite: bool,
     },
 }
 
@@ -70,11 +113,34 @@ impl PreparedCall {
         }
     }
 
+    /// What the call would do, from its arguments alone, for the approval
+    /// prompt: line counts for a write, nothing for a read. No file is
+    /// touched and no argument text is repeated.
+    pub(super) fn detail(&self) -> String {
+        match &self.arguments {
+            Arguments::Edit { old, new, .. } => format!(
+                "+{} -{} lines",
+                write_file::line_count(new),
+                write_file::line_count(old)
+            ),
+            Arguments::Write { content, overwrite } => format!(
+                "{} {} lines",
+                if *overwrite {
+                    "replace with"
+                } else {
+                    "new file,"
+                },
+                write_file::line_count(content)
+            ),
+            _ => String::new(),
+        }
+    }
+
     /// The narrowest useful session-grant prefix for this call: the parent
     /// directory of a file, or the directory listed or searched.
     pub(super) fn grant_prefix(&self) -> String {
         match self.tool {
-            READ_FILE => self
+            READ_FILE | EDIT_FILE | WRITE_FILE => self
                 .path
                 .rsplit_once('/')
                 .map(|(parent, _)| parent.to_string())
@@ -139,7 +205,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
                     "additionalProperties": false
                 }),
             },
-            _ => ToolSchema {
+            SEARCH_FILES => ToolSchema {
                 name: SEARCH_FILES,
                 description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending; binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.",
                 parameters: json!({
@@ -153,6 +219,35 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
                         "limit": integer("Maximum matching lines", 1)
                     },
                     "required": ["pattern"],
+                    "additionalProperties": false
+                }),
+            },
+            EDIT_FILE => ToolSchema {
+                name: EDIT_FILE,
+                description: "Replace text in a UTF-8 file inside the working directory. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Fails with the count when old is absent or ambiguous.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": string("File path relative to the working directory"),
+                        "old": string("Exact text to replace"),
+                        "new": string("Replacement text"),
+                        "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one"}
+                    },
+                    "required": ["path", "old", "new"],
+                    "additionalProperties": false
+                }),
+            },
+            _ => ToolSchema {
+                name: WRITE_FILE,
+                description: "Create a UTF-8 file inside the working directory with the given content. Fails if the file exists unless overwrite is true; with overwrite the file must already exist. Parent directories must exist. Prefer edit_file for changes to an existing file.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": string("File path relative to the working directory"),
+                        "content": string("Entire file content"),
+                        "overwrite": {"type": "boolean", "description": "Replace an existing file"}
+                    },
+                    "required": ["path", "content"],
                     "additionalProperties": false
                 }),
             },
@@ -181,6 +276,11 @@ struct RawArguments {
     glob: Option<String>,
     literal: Option<bool>,
     ignore_case: Option<bool>,
+    old: Option<String>,
+    new: Option<String>,
+    replace_all: Option<bool>,
+    content: Option<String>,
+    overwrite: Option<bool>,
 }
 
 const INVALID: &str = "invalid tool arguments";
@@ -208,31 +308,30 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         }
     };
     let only = |allowed: bool| if allowed { Ok(()) } else { Err(INVALID) };
+    // Keys that belong to other tools are rejected per tool below.
+    let no_search = raw.pattern.is_none()
+        && raw.glob.is_none()
+        && raw.literal.is_none()
+        && raw.ignore_case.is_none();
+    let no_write = raw.old.is_none()
+        && raw.new.is_none()
+        && raw.replace_all.is_none()
+        && raw.content.is_none()
+        && raw.overwrite.is_none();
+    let no_paging = raw.offset.is_none() && raw.limit.is_none();
     let arguments = match tool {
         READ_FILE => {
             if path.is_empty() {
                 return Err("read_file needs a file path");
             }
-            only(
-                raw.pattern.is_none()
-                    && raw.glob.is_none()
-                    && raw.literal.is_none()
-                    && raw.ignore_case.is_none(),
-            )?;
+            only(no_search && no_write)?;
             Arguments::Read {
                 offset: small(raw.offset)?,
                 limit: small(raw.limit)?,
             }
         }
         LIST_DIR => {
-            only(
-                raw.offset.is_none()
-                    && raw.limit.is_none()
-                    && raw.pattern.is_none()
-                    && raw.glob.is_none()
-                    && raw.literal.is_none()
-                    && raw.ignore_case.is_none(),
-            )?;
+            only(no_paging && no_search && no_write)?;
             Arguments::List
         }
         FIND_FILES => {
@@ -240,7 +339,8 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                 raw.offset.is_none()
                     && raw.glob.is_none()
                     && raw.literal.is_none()
-                    && raw.ignore_case.is_none(),
+                    && raw.ignore_case.is_none()
+                    && no_write,
             )?;
             let pattern = raw.pattern.ok_or(INVALID)?;
             glob::Glob::new(&pattern).ok_or("invalid glob pattern")?;
@@ -249,8 +349,48 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
                 limit: small(raw.limit)?.unwrap_or(find_files::DEFAULT_LIMIT),
             }
         }
+        EDIT_FILE | WRITE_FILE => {
+            if path.is_empty() {
+                return Err("a file path is required");
+            }
+            if protected(&path) {
+                return Err("path is protected: ahi policy files, hook configuration, .gitignore, and .git are never written by tools");
+            }
+            only(no_paging && no_search)?;
+            if tool == EDIT_FILE {
+                only(raw.content.is_none() && raw.overwrite.is_none())?;
+                let old = raw.old.ok_or(INVALID)?;
+                let new = raw.new.ok_or(INVALID)?;
+                if old.is_empty() {
+                    return Err("old must not be empty");
+                }
+                if old.len() > write_file::MAX_WRITE_BYTES
+                    || new.len() > write_file::MAX_WRITE_BYTES
+                {
+                    return Err("text is larger than 8 MiB");
+                }
+                Arguments::Edit {
+                    old,
+                    new,
+                    replace_all: raw.replace_all.unwrap_or(false),
+                }
+            } else {
+                only(raw.old.is_none() && raw.new.is_none() && raw.replace_all.is_none())?;
+                let content = raw.content.ok_or(INVALID)?;
+                if content.len() > write_file::MAX_WRITE_BYTES {
+                    return Err("text is larger than 8 MiB");
+                }
+                if content.contains('\0') {
+                    return Err("content must be text without NUL");
+                }
+                Arguments::Write {
+                    content,
+                    overwrite: raw.overwrite.unwrap_or(false),
+                }
+            }
+        }
         _ => {
-            only(raw.offset.is_none())?;
+            only(raw.offset.is_none() && no_write)?;
             let pattern = raw.pattern.ok_or(INVALID)?;
             if pattern.is_empty() || pattern.len() > 512 {
                 return Err("pattern must be 1 to 512 bytes");
@@ -274,14 +414,60 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
     })
 }
 
+/// A finished call: what the model receives, and for a write, what changed.
+pub(super) struct Executed {
+    pub(super) content: String,
+    pub(super) write: Option<WriteReport>,
+}
+
 /// Run an approved call. `Err` text is safe to show and to send to the model.
-pub(super) fn execute(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
-    let path = workspace.resolve(&call.path)?;
+pub(super) fn execute(
+    call: &PreparedCall,
+    workspace: &Workspace,
+) -> Result<Executed, &'static str> {
+    let read_only = |content: Result<String, &'static str>| {
+        content.map(|content| Executed {
+            content,
+            write: None,
+        })
+    };
     match &call.arguments {
-        Arguments::Read { offset, limit } => read_file::run(&path, *offset, *limit),
-        Arguments::List => list_dir::run(&path),
+        Arguments::Edit {
+            old,
+            new,
+            replace_all,
+        } => {
+            let (path, exists) = workspace.resolve_for_write(&call.path)?;
+            if !exists {
+                return Err("path does not exist or cannot be read");
+            }
+            let (content, report) = edit_file::run(&path, old, new, *replace_all)?;
+            Ok(Executed {
+                content,
+                write: Some(report),
+            })
+        }
+        Arguments::Write { content, overwrite } => {
+            let (path, exists) = workspace.resolve_for_write(&call.path)?;
+            let (content, report) = write_file::run(&path, content, *overwrite, exists)?;
+            Ok(Executed {
+                content,
+                write: Some(report),
+            })
+        }
+        Arguments::Read { offset, limit } => {
+            let path = workspace.resolve(&call.path)?;
+            read_only(read_file::run(&path, *offset, *limit))
+        }
+        Arguments::List => {
+            let path = workspace.resolve(&call.path)?;
+            read_only(list_dir::run(&path))
+        }
         Arguments::Find { pattern, limit } => {
-            find_files::run(workspace, &path, &call.path, pattern, *limit)
+            let path = workspace.resolve(&call.path)?;
+            read_only(find_files::run(
+                workspace, &path, &call.path, pattern, *limit,
+            ))
         }
         Arguments::Search {
             pattern,
@@ -289,18 +475,21 @@ pub(super) fn execute(call: &PreparedCall, workspace: &Workspace) -> Result<Stri
             ignore_case,
             glob,
             limit,
-        } => search_files::run(
-            workspace,
-            &path,
-            &call.path,
-            &search_files::Query {
-                pattern,
-                literal: *literal,
-                ignore_case: *ignore_case,
-                glob: glob.as_deref(),
-                limit: *limit,
-            },
-        ),
+        } => {
+            let path = workspace.resolve(&call.path)?;
+            read_only(search_files::run(
+                workspace,
+                &path,
+                &call.path,
+                &search_files::Query {
+                    pattern,
+                    literal: *literal,
+                    ignore_case: *ignore_case,
+                    glob: glob.as_deref(),
+                    limit: *limit,
+                },
+            ))
+        }
     }
 }
 
@@ -444,8 +633,12 @@ mod tests {
         (root, workspace)
     }
 
+    fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
+        execute(call, workspace).map(|executed| executed.content)
+    }
+
     fn read(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
-        execute(
+        run_text(
             &PreparedCall {
                 tool: READ_FILE,
                 path: path.into(),
@@ -459,7 +652,7 @@ mod tests {
     }
 
     fn list(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
-        execute(
+        run_text(
             &PreparedCall {
                 tool: LIST_DIR,
                 path: path.into(),
@@ -541,7 +734,7 @@ mod tests {
         fs::write(root.join("no-newline.txt"), "a\nb").unwrap();
         fs::write(root.join("empty.txt"), "").unwrap();
         let page = |path: &str, offset, limit| {
-            execute(
+            run_text(
                 &PreparedCall {
                     tool: READ_FILE,
                     path: path.into(),
@@ -618,7 +811,7 @@ mod tests {
         )
         .unwrap();
         let find = |path: &str, pattern: &str, limit| {
-            execute(
+            run_text(
                 &PreparedCall {
                     tool: FIND_FILES,
                     path: path.into(),
@@ -656,7 +849,7 @@ mod tests {
         );
         let search =
             |path: &str, pattern: &str, literal, ignore_case, glob: Option<&str>, limit| {
-                execute(
+                run_text(
                     &PreparedCall {
                         tool: SEARCH_FILES,
                         path: path.into(),
@@ -702,6 +895,163 @@ mod tests {
         assert_eq!(
             search("src/main.rs", "x", true, false, None, 1),
             Err("not a directory")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn writes_are_exact_atomic_confined_and_protected() {
+        let (root, workspace) = fixture("tools-write");
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "fn a() {}\nfn b() {}\nfn a() {}\n").unwrap();
+        fs::write(root.join("ahi.tools.yaml"), "version: 1\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("src/lib.rs"), root.join("link.rs")).unwrap();
+        let edit = |path: &str, old: &str, new: &str, replace_all| {
+            execute(
+                &PreparedCall {
+                    tool: EDIT_FILE,
+                    path: path.into(),
+                    arguments: Arguments::Edit {
+                        old: old.into(),
+                        new: new.into(),
+                        replace_all,
+                    },
+                },
+                &workspace,
+            )
+        };
+        let write = |path: &str, content: &str, overwrite| {
+            execute(
+                &PreparedCall {
+                    tool: WRITE_FILE,
+                    path: path.into(),
+                    arguments: Arguments::Write {
+                        content: content.into(),
+                        overwrite,
+                    },
+                },
+                &workspace,
+            )
+        };
+        // Ambiguous, then unique, then replace_all.
+        assert_eq!(
+            edit("src/lib.rs", "fn a() {}", "fn c() {}", false).err(),
+            Some("old text occurs more than once; include more context or set replace_all")
+        );
+        let done = edit("src/lib.rs", "fn b() {}", "fn b() {}\nfn d() {}", false).unwrap();
+        assert_eq!(done.content, "edited lib.rs: 1 replacement, +2 -1 lines");
+        let report = done.write.unwrap();
+        assert!(report.before.is_some());
+        assert_eq!((report.lines_added, report.lines_removed), (2, 1));
+        assert_eq!(
+            fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+            "fn a() {}\nfn b() {}\nfn d() {}\nfn a() {}\n"
+        );
+        let all = edit("src/lib.rs", "fn a() {}", "fn z() {}", true).unwrap();
+        assert_eq!(all.content, "edited lib.rs: 2 replacements, +2 -2 lines");
+        assert_eq!(
+            edit("src/lib.rs", "nowhere", "x", false).err(),
+            Some("old text not found in the file")
+        );
+        assert_eq!(
+            edit("src/missing.rs", "a", "b", false).err(),
+            Some("path does not exist or cannot be read")
+        );
+        // Create, refuse to clobber, then overwrite explicitly.
+        let created = write("src/new.rs", "pub fn n() {}\n", false).unwrap();
+        assert_eq!(created.content, "created new.rs: 1 lines");
+        assert!(created.write.unwrap().before.is_none());
+        assert_eq!(
+            write("src/new.rs", "x", false).err(),
+            Some("file exists; set overwrite to replace it")
+        );
+        let replaced = write("src/new.rs", "a\nb\nc\n", true).unwrap();
+        assert_eq!(replaced.content, "replaced new.rs: 3 lines (was 1)");
+        assert_eq!(
+            write("src/other.rs", "x", true).err(),
+            Some("file does not exist; overwrite applies to an existing file")
+        );
+        assert_eq!(
+            write("nodir/x.rs", "x", false).err(),
+            Some("path does not exist or cannot be read")
+        );
+        assert_eq!(
+            write("src", "x", true).err(),
+            Some("path is not a regular file")
+        );
+        // Protected paths are refused at preparation, before any policy.
+        for path in [
+            "ahi.tools.yaml",
+            "ahi.hooks.yaml",
+            ".pre-commit-config.yaml",
+            ".gitignore",
+            ".git/config",
+            "sub/.git/HEAD",
+            "sub/ahi.dev.yaml",
+        ] {
+            let error = prepare(&call(
+                "c",
+                WRITE_FILE,
+                json!({"path": path, "content": "x"}),
+            ))
+            .unwrap_err();
+            assert!(error.starts_with("path is protected"), "{path}: {error}");
+        }
+        assert_eq!(
+            prepare(&call(
+                "c",
+                EDIT_FILE,
+                json!({"path": "a", "old": "", "new": "b"})
+            ))
+            .err(),
+            Some("old must not be empty")
+        );
+        assert_eq!(
+            prepare(&call(
+                "c",
+                WRITE_FILE,
+                json!({"path": "a", "content": "x", "old": "y"})
+            ))
+            .err(),
+            Some(INVALID)
+        );
+        let detail = |name, args| prepare(&call("c", name, args)).unwrap().detail();
+        assert_eq!(
+            detail(EDIT_FILE, json!({"path": "a", "old": "1\n2\n", "new": "x"})),
+            "+1 -2 lines"
+        );
+        assert_eq!(
+            detail(WRITE_FILE, json!({"path": "a", "content": "1\n2\n3"})),
+            "new file, 3 lines"
+        );
+        assert_eq!(
+            detail(
+                WRITE_FILE,
+                json!({"path": "a", "content": "", "overwrite": true})
+            ),
+            "replace with 0 lines"
+        );
+        assert_eq!(detail(READ_FILE, json!({"path": "a"})), "");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                write("link.rs", "x", true).err(),
+                Some("path is a symbolic link; writes never follow links")
+            );
+            assert_eq!(
+                edit("link.rs", "a", "b", false).err(),
+                Some("path is a symbolic link; writes never follow links")
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+                "fn z() {}\nfn b() {}\nfn d() {}\nfn z() {}\n",
+                "the link target is untouched"
+            );
+        }
+        assert_eq!(
+            write("state/models.json", "{}", true).err(),
+            Some("path is inside ahi's own directories, which tools cannot read")
         );
         fs::remove_dir_all(root).unwrap();
     }

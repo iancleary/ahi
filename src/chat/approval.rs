@@ -210,8 +210,13 @@ impl PendingApproval {
                 Some(_) => "✓",
                 None => " ",
             };
+            let detail = if call.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", call.detail)
+            };
             lines.push(format!(
-                "{marker} {}. {} {}{status}",
+                "{marker} {}. {} {}{detail}{status}",
                 index + 1,
                 call.tool,
                 call.target

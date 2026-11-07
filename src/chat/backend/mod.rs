@@ -121,6 +121,9 @@ pub(crate) struct ProposedAction {
     pub(crate) target: String,
     /// Workspace-relative prefix a session grant would cover; `""` is the root.
     pub(crate) grant_prefix: String,
+    /// What the call would do, from its arguments alone: line counts for a
+    /// write, empty for a read. Never file contents or raw arguments.
+    pub(crate) detail: String,
 }
 
 /// The operator's answer for one proposed action.

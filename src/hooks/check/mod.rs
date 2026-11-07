@@ -154,7 +154,9 @@ fn path_without_symlinks(root: &Path, rel: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Write `bytes` to a sibling temporary file, fsync it, and rename it over
+/// `path`, which must already be a regular file and not a symbolic link.
+pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let parent = path
         .parent()
@@ -196,6 +198,19 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// Create `path`, which must not exist, write `bytes`, and fsync. Nothing is
+/// followed: a symbolic link at `path` makes creation fail.
+pub(crate) fn create_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = create_excl_nofollow(path)?;
+    if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn create_excl_nofollow(path: &Path) -> std::io::Result<std::fs::File> {

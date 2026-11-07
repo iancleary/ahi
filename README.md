@@ -98,7 +98,7 @@ A repository can carry up to four ahi-related files, one per job. The two allowl
 | --- | --- | --- |
 | `.pre-commit-config.yaml` | Which hooks run; upstream pre-commit format | `ahi run`, `ahi migrate` |
 | `ahi.hooks.yaml` | Which local `system`/`script` hooks may execute, by id and exact entry (`action: hook`) | `ahi run` |
-| `ahi.tools.yaml` | Which builtin read-only tools (`read_file`, `list_dir`, `find_files`, `search_files`) the model may call, where, and whether to ask (`action: tool_call`) | `ahi tui` |
+| `ahi.tools.yaml` | Which builtin tools the model may call, where, and whether to ask: `action: tool_call` for `read_file`, `list_dir`, `find_files`, `search_files`; `action: file_write` for `edit_file`, `write_file` | `ahi tui` |
 | `ahi.dev.yaml` | The development image, tag, shell, and runtime this repository prefers; grants nothing | `ahi dev` |
 
 ## Commands
@@ -212,7 +212,7 @@ Press **`/`** in **Chat, Models, or Catalog** to open the same **Commands** popu
 
 #### Tools and policy
 
-Tools are off unless the working directory has an `ahi.tools.yaml` rule that approves one, for every provider. Only builtin, read-only tools exist: `read_file` (whole or a window of lines, with a continuation offset when the 64 KiB cap is hit), `list_dir`, `find_files` (glob over names or paths, honoring `.gitignore`), and `search_files` (regular expression or literal, `path:line:text`). They are compiled into ahi, run in process with no `rg`, `fd`, or `git` subprocess, use software path checks within the working directory, exclude ahi's own directories, and return sorted, bounded output. These in-process checks are not an OS sandbox. A rule with `ask: true` shows an approval prompt in chat that lists the answers for each call: move the highlight with **↑/↓** and apply it with **Enter**, jump to another numbered call with **Shift+↑/↓**, or press the answer's letter (**y** once, **s** for this session under the shown directory and destination, **n** deny, **a** approve the rest, **Esc** deny the rest). Dismissing the prompt cancels the whole batch, including calls a rule had approved. Model output and tool results never grant authority. Without the file, no `tools` are sent and requested calls fail with `tool execution is disabled`. `ahi tui --tools <file>` uses that policy file instead of the working directory's `ahi.tools.yaml`; it must exist and parse, and its rule paths still apply to the working directory. `examples/tools` holds ready-made policies for trying the tools. Approved file contents are sent to the selected provider. Invalid/incomplete calls fail closed; raw tool arguments are not printed in notices or errors. See [Chat screen](docs/CHAT_SCREEN.md#tool-calls).
+Tools are off unless the working directory has an `ahi.tools.yaml` rule that approves one, for every provider. Only builtin tools exist, compiled into ahi and run in process with no `rg`, `fd`, `git`, or shell subprocess. Read-only, under `action: tool_call`: `read_file` (whole or a window of lines, with a continuation offset when the 64 KiB cap is hit), `list_dir`, `find_files` (glob over names or paths, honoring `.gitignore`), and `search_files` (regular expression or literal, `path:line:text`). File-changing, under `action: file_write`: `edit_file` (replace text that occurs exactly once, or every occurrence with `replace_all`) and `write_file` (create a file, or replace one with `overwrite`). A `file_write` rule names `edit_file`, `write_file`, or neither for both, so creating files and editing existing ones are approved separately. All tools use software path checks within the working directory, never follow symbolic links, exclude ahi's own directories, and return bounded output; writes are atomic, append a hash-only line to `audit.log`, and can never touch `ahi.tools.yaml`, `ahi.hooks.yaml`, `ahi.dev.yaml`, `.pre-commit-config.yaml`, `.gitignore`, or `.git`. The approval prompt for a write shows the path and line counts, never the text. These in-process checks are not an OS sandbox. A rule with `ask: true` shows an approval prompt in chat that lists the answers for each call: move the highlight with **↑/↓** and apply it with **Enter**, jump to another numbered call with **Shift+↑/↓**, or press the answer's letter (**y** once, **s** for this session under the shown directory and destination, **n** deny, **a** approve the rest, **Esc** deny the rest). Dismissing the prompt cancels the whole batch, including calls a rule had approved. Model output and tool results never grant authority. Without the file, no `tools` are sent and requested calls fail with `tool execution is disabled`. `ahi tui --tools <file>` uses that policy file instead of the working directory's `ahi.tools.yaml`; it must exist and parse, and its rule paths still apply to the working directory. `examples/tools` holds ready-made policies for trying the tools. Approved file contents are sent to the selected provider. Invalid/incomplete calls fail closed; raw tool arguments are not printed in notices or errors. See [Chat screen](docs/CHAT_SCREEN.md#tool-calls).
 
 ```yaml
 # ahi.tools.yaml
@@ -228,6 +228,11 @@ rules:
     action: tool_call
     match: {tool: read_file, path: .env}
     effect: deny
+  - id: edit-sources
+    action: file_write
+    match: {tool: edit_file, path: src}
+    effect: approve
+    ask: true
 ```
 
 #### Requests and limits

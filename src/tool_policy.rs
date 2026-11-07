@@ -19,14 +19,33 @@ pub(crate) const FILE_NAME: &str = "ahi.tools.yaml";
 /// The name this file had before 0.7.0. Its presence is an error, never silence.
 pub(crate) const RETIRED_FILE_NAME: &str = "ahi.actions.yaml";
 
+/// Builtin tools that change files. They are governed by `action: file_write`
+/// rules, never by `tool_call`, so the filename states the trust boundary.
+pub(crate) const WRITE_TOOLS: [&str; 2] = ["edit_file", "write_file"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionKind {
+    ToolCall,
+    FileWrite,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRule {
     pub(crate) id: String,
-    pub(crate) tool: String,
+    pub(crate) action: ActionKind,
+    /// The tools this rule governs. One for `tool_call`; one or both write
+    /// tools for `file_write` (`match.tool` omitted means both).
+    pub(crate) tools: Vec<String>,
     /// Normalized workspace-relative prefix. Empty means the whole workspace.
     pub(crate) path: Option<String>,
     pub(crate) effect: Effect,
     pub(crate) ask: bool,
+}
+
+impl ToolRule {
+    fn governs(&self, tool: &str) -> bool {
+        self.tools.iter().any(|t| t == tool)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -55,8 +74,12 @@ impl ActionPolicy {
     pub(crate) fn advertised_tools(&self) -> Vec<String> {
         let mut tools: Vec<String> = Vec::new();
         for rule in &self.rules {
-            if rule.effect == Effect::Approve && !tools.contains(&rule.tool) {
-                tools.push(rule.tool.clone());
+            if rule.effect == Effect::Approve {
+                for tool in &rule.tools {
+                    if !tools.contains(tool) {
+                        tools.push(tool.clone());
+                    }
+                }
             }
         }
         tools
@@ -65,7 +88,7 @@ impl ActionPolicy {
     pub(crate) fn evaluate(&self, tool: &str, path: &str) -> Verdict {
         let matching = || {
             self.rules.iter().filter(move |rule| {
-                rule.tool == tool
+                rule.governs(tool)
                     && rule
                         .path
                         .as_deref()
@@ -79,7 +102,7 @@ impl ActionPolicy {
         let folded = path.to_lowercase();
         if let Some(rule) = self.rules.iter().find(|rule| {
             rule.effect == Effect::Deny
-                && rule.tool == tool
+                && rule.governs(tool)
                 && rule
                     .path
                     .as_deref()
@@ -207,18 +230,14 @@ struct RawRule {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMatch {
-    tool: String,
+    /// Required for `tool_call`; optional for `file_write`.
+    #[serde(default)]
+    tool: Option<String>,
     #[serde(default)]
     path: Option<String>,
 }
 
-const PLANNED_KINDS: [&str; 5] = [
-    "command",
-    "file_write",
-    "vcs_push",
-    "outbound_message",
-    "pre_commit",
-];
+const PLANNED_KINDS: [&str; 4] = ["command", "vcs_push", "outbound_message", "pre_commit"];
 
 pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<ActionPolicy> {
     check_config_yaml(src, origin)?;
@@ -247,20 +266,50 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         if rules.iter().any(|existing| existing.id == id) {
             return Err(fail("duplicate rule id".into()));
         }
-        if rule.action != "tool_call" {
-            return Err(fail(if PLANNED_KINDS.contains(&rule.action.as_str()) {
-                format!("action `{}` is not implemented yet", rule.action)
-            } else {
-                format!("unknown action `{}` (expected tool_call)", rule.action)
-            }));
-        }
-        if !builtin_tools.contains(&rule.matcher.tool.as_str()) {
-            return Err(fail(format!(
-                "`{}` is not a builtin tool (expected one of: {})",
-                rule.matcher.tool,
-                builtin_tools.join(", ")
-            )));
-        }
+        let (action, tools) = match rule.action.as_str() {
+            "tool_call" => {
+                let Some(tool) = rule.matcher.tool else {
+                    return Err(fail("match.tool is required for action: tool_call".into()));
+                };
+                if WRITE_TOOLS.contains(&tool.as_str()) {
+                    return Err(fail(format!(
+                        "`{tool}` changes files; govern it with action: file_write"
+                    )));
+                }
+                if !builtin_tools.contains(&tool.as_str()) {
+                    let readers: Vec<&str> = builtin_tools
+                        .iter()
+                        .copied()
+                        .filter(|t| !WRITE_TOOLS.contains(t))
+                        .collect();
+                    return Err(fail(format!(
+                        "`{tool}` is not a builtin tool (expected one of: {})",
+                        readers.join(", ")
+                    )));
+                }
+                (ActionKind::ToolCall, vec![tool])
+            }
+            "file_write" => {
+                let tools = match rule.matcher.tool {
+                    None => WRITE_TOOLS.iter().map(|t| t.to_string()).collect(),
+                    Some(tool) if WRITE_TOOLS.contains(&tool.as_str()) => vec![tool],
+                    Some(tool) => {
+                        return Err(fail(format!(
+                            "`{tool}` is not a file-writing tool (expected {}, or omit match.tool for both)",
+                            WRITE_TOOLS.join(" or ")
+                        )));
+                    }
+                };
+                (ActionKind::FileWrite, tools)
+            }
+            other => {
+                return Err(fail(if PLANNED_KINDS.contains(&other) {
+                    format!("action `{other}` is not implemented yet")
+                } else {
+                    format!("unknown action `{other}` (expected tool_call or file_write)")
+                }));
+            }
+        };
         if rule.ask && rule.effect == Effect::Deny {
             return Err(fail("ask applies only to effect: approve".into()));
         }
@@ -283,7 +332,8 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         };
         rules.push(ToolRule {
             id,
-            tool: rule.matcher.tool,
+            action,
+            tools,
             path,
             effect: rule.effect,
             ask: rule.ask,
@@ -296,7 +346,14 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
 mod tests {
     use super::*;
 
-    const TOOLS: [&str; 4] = ["read_file", "list_dir", "find_files", "search_files"];
+    const TOOLS: [&str; 6] = [
+        "read_file",
+        "list_dir",
+        "find_files",
+        "search_files",
+        "edit_file",
+        "write_file",
+    ];
 
     fn policy(src: &str) -> ActionPolicy {
         parse(src, "ahi.tools.yaml", &TOOLS).unwrap()
@@ -356,6 +413,61 @@ mod tests {
     }
 
     #[test]
+    fn file_write_rules_cover_one_or_both_write_tools_by_path() {
+        let policy = policy(
+            "version: 1\nrules:\n\
+             - {id: edit-src, action: file_write, match: {tool: edit_file, path: src}, effect: approve}\n\
+             - {id: new-docs, action: file_write, match: {tool: write_file, path: docs}, effect: approve, ask: true}\n\
+             - {id: any-tests, action: file_write, match: {path: tests}, effect: approve}\n\
+             - {id: no-lock, action: file_write, match: {path: Cargo.lock}, effect: deny}\n",
+        );
+        assert_eq!(
+            policy.advertised_tools(),
+            ["edit_file", "write_file"],
+            "both advertised, in first-seen order"
+        );
+        assert_eq!(policy.rules[2].tools, ["edit_file", "write_file"]);
+        assert_eq!(policy.rules[0].action, ActionKind::FileWrite);
+        let approve = |rule: &str| Verdict::Approve {
+            rule_id: rule.into(),
+        };
+        assert_eq!(
+            policy.evaluate("edit_file", "src/main.rs"),
+            approve("edit-src")
+        );
+        assert_eq!(
+            policy.evaluate("write_file", "src/main.rs"),
+            Verdict::Deny { rule_id: None },
+            "edit-src governs edit_file only"
+        );
+        assert_eq!(
+            policy.evaluate("write_file", "docs/new.md"),
+            Verdict::Ask {
+                rule_id: "new-docs".into()
+            }
+        );
+        assert_eq!(
+            policy.evaluate("write_file", "tests/x.rs"),
+            approve("any-tests")
+        );
+        assert_eq!(
+            policy.evaluate("edit_file", "tests/x.rs"),
+            approve("any-tests")
+        );
+        assert_eq!(
+            policy.evaluate("edit_file", "Cargo.lock"),
+            Verdict::Deny {
+                rule_id: Some("no-lock".into())
+            }
+        );
+        assert_eq!(
+            policy.evaluate("read_file", "src/main.rs"),
+            Verdict::Deny { rule_id: None },
+            "write rules never approve reads"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_fields_kinds_tools_profiles_and_escaping_paths() {
         let rule = |body: &str| format!("version: 1\nrules:\n- {{id: r, {body}}}\n");
         for (src, expected) in [
@@ -369,6 +481,22 @@ mod tests {
             (
                 rule("action: tool_call, match: {tool: bash}, effect: approve"),
                 "`bash` is not a builtin tool",
+            ),
+            (
+                rule("action: tool_call, match: {tool: edit_file}, effect: approve"),
+                "govern it with action: file_write",
+            ),
+            (
+                rule("action: file_write, match: {tool: read_file}, effect: approve"),
+                "is not a file-writing tool",
+            ),
+            (
+                rule("action: tool_call, match: {path: src}, effect: approve"),
+                "match.tool is required",
+            ),
+            (
+                rule("action: vcs_push, match: {tool: read_file}, effect: approve"),
+                "action `vcs_push` is not implemented yet",
             ),
             (
                 rule("action: tool_call, match: {tool: read_file}, effect: deny, ask: true"),
@@ -467,7 +595,7 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 6,
+            seen, 7,
             "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".

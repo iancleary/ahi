@@ -2736,6 +2736,7 @@ mod tests {
                 tool: "read_file".into(),
                 target: target.to_string(),
                 grant_prefix: prefix.to_string(),
+                detail: String::new(),
             })
             .collect();
         let event = ResponseEvent::ToolApprovalRequested(backend::ApprovalRequest {

@@ -52,6 +52,8 @@ pub(super) type SessionGrants = Arc<Mutex<Vec<SessionGrant>>>;
 pub(super) struct ToolRuntime {
     policy: ActionPolicy,
     workspace: Workspace,
+    /// Where `audit.log` lives; every write appends a line there.
+    state_dir: PathBuf,
     advertised: Vec<String>,
     gateway: String,
     destination: String,
@@ -99,6 +101,7 @@ impl ToolRuntime {
         }
         Ok(Some(Self {
             workspace: Workspace::open(directory, state)?,
+            state_dir: state.state.clone(),
             policy,
             advertised,
             gateway: gateway.to_string(),
@@ -241,6 +244,7 @@ impl ToolRuntime {
                     tool: prepared.tool.to_string(),
                     target: prepared.target().to_string(),
                     grant_prefix: prepared.grant_prefix(),
+                    detail: prepared.detail(),
                 }
             })
             .collect();
@@ -296,18 +300,50 @@ impl ToolRuntime {
             );
         }
         match tools::execute(prepared, &self.workspace) {
-            Ok(content) => Outcome {
-                exit_code: EXIT_OK,
-                output: format!(
-                    "{} {}\n{}",
-                    prepared.tool,
-                    prepared.target(),
-                    preview(&content)
-                ),
-                content,
-            },
-            Err(message) => error(prepared.tool, Some(prepared.target()), message),
+            Ok(tools::Executed { content, write }) => {
+                if let Some(report) = write {
+                    self.audit_write(prepared, &report, "ok");
+                }
+                Outcome {
+                    exit_code: EXIT_OK,
+                    output: format!(
+                        "{} {}\n{}",
+                        prepared.tool,
+                        prepared.target(),
+                        preview(&content)
+                    ),
+                    content,
+                }
+            }
+            Err(message) => {
+                if matches!(prepared.tool, tools::EDIT_FILE | tools::WRITE_FILE) {
+                    let none = tools::WriteReport {
+                        before: None,
+                        after: String::new(),
+                        lines_added: 0,
+                        lines_removed: 0,
+                    };
+                    self.audit_write(prepared, &none, message);
+                }
+                error(prepared.tool, Some(prepared.target()), message)
+            }
         }
+    }
+
+    /// One audit line per attempted write: path and hashes, never contents.
+    /// A failure to log does not undo a write that already happened.
+    fn audit_write(&self, prepared: &PreparedCall, report: &tools::WriteReport, outcome: &str) {
+        let event = crate::hooks::audit::WriteEvent {
+            tool: prepared.tool,
+            repo: self.workspace.root(),
+            path: prepared.target(),
+            outcome,
+            before: report.before.as_deref(),
+            after: (!report.after.is_empty()).then_some(report.after.as_str()),
+            lines_added: report.lines_added,
+            lines_removed: report.lines_removed,
+        };
+        let _ = crate::hooks::audit::append_write(&self.state_dir, &event);
     }
 
     /// Charge every result's model-facing content, including denials and
