@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 (2026-11-07)
+
 ### Changed
 
 - `--help` pages group the four global flags under "Global options" at the end of every page instead of interleaving them with a command's own flags, `ahi run` groups its flags into file selection, output, and behavior, every command has a one-line summary with the caveats moved to `--help`, `--format` and `--color` list their accepted values, and the stale "v0.1" phrasing is gone.
