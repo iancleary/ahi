@@ -325,11 +325,48 @@ fn executable_names(name: &str) -> impl Iterator<Item = String> + '_ {
     std::iter::once(name.to_string())
 }
 
+/// The image's short name for use as the container hostname: the last path
+/// component without its tag or digest, reduced to the characters a hostname
+/// allows. `ghcr.io/iancleary/ahi-dev-rust:latest` becomes `ahi-dev-rust`.
+pub fn image_short_name(image: &str) -> String {
+    let last = image.rsplit('/').next().unwrap_or(image);
+    let bare = last.split(['@', ':']).next().unwrap_or(last);
+    let name: String = bare
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = name.trim_matches('-');
+    if trimmed.is_empty() {
+        "ahi-dev".to_string()
+    } else {
+        trimmed.chars().take(63).collect()
+    }
+}
+
+/// The name of the mounted directory, shown by the image's prompt as the
+/// project. Inside the container the directory is only ever `/work`.
+fn project_name(workdir: &Path) -> Option<String> {
+    workdir
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 /// Arguments for `<runtime> run ...` that run `command` in `image` with
 /// `workdir` mounted at [`MOUNT_POINT`]. `-t` is added only when stdin is a
-/// terminal so a pipe does not make the runtime refuse to start. On Unix the
-/// host uid and gid are passed as `AHI_HOST_UID` and `AHI_HOST_GID` for an
-/// entrypoint that remaps its user; an image that ignores them is unchanged.
+/// terminal so a pipe does not make the runtime refuse to start. The
+/// container hostname is the image's short name and `AHI_DEV_PROJECT` is the
+/// mounted directory's name, so the image's prompt can say where the shell
+/// is. On Unix the host uid and gid are passed as `AHI_HOST_UID` and
+/// `AHI_HOST_GID` for an entrypoint that remaps its user; an image that
+/// ignores them is unchanged.
 pub fn run_arguments(
     image: &str,
     command: &[OsString],
@@ -346,6 +383,12 @@ pub fn run_arguments(
     args.push(volume);
     args.push("--workdir".into());
     args.push(MOUNT_POINT.into());
+    args.push("--hostname".into());
+    args.push(image_short_name(image).into());
+    if let Some(project) = project_name(workdir) {
+        args.push("--env".into());
+        args.push(format!("AHI_DEV_PROJECT={project}").into());
+    }
     if let Ok(term) = env::var("TERM") {
         if !term.is_empty() {
             args.push("--env".into());
@@ -742,6 +785,9 @@ mod tests {
         );
         let position = args.iter().position(|a| a == "--workdir").unwrap();
         assert_eq!(args[position + 1], MOUNT_POINT);
+        let position = args.iter().position(|a| a == "--hostname").unwrap();
+        assert_eq!(args[position + 1], "img");
+        assert!(args.contains(&OsString::from("AHI_DEV_PROJECT=repo")));
         let tty = run_arguments("img:tag", &command, Path::new("/repo"), true);
         assert_eq!(&tty[..4], ["run", "--rm", "-i", "-t"]);
         if cfg!(unix) {
@@ -753,6 +799,20 @@ mod tests {
                 .iter()
                 .any(|a| a.to_string_lossy().starts_with("AHI_HOST_UID=")));
         }
+    }
+
+    #[test]
+    fn the_hostname_is_the_image_short_name() {
+        assert_eq!(
+            image_short_name("ghcr.io/iancleary/ahi-dev-rust:latest"),
+            "ahi-dev-rust"
+        );
+        assert_eq!(
+            image_short_name("ghcr.io/iancleary/ahi-dev@sha256:abc"),
+            "ahi-dev"
+        );
+        assert_eq!(image_short_name("Local_Image:1"), "local-image");
+        assert_eq!(image_short_name("registry/:tag"), "ahi-dev");
     }
 
     #[test]
