@@ -271,7 +271,7 @@ Sign in with ChatGPT using the current direct-token browser flow. Prints the URL
 
 ### ahi dev
 
-Opens a shell in the opinionated development image that [iancleary/ahi-images](https://github.com/iancleary/ahi-images) publishes as `ghcr.io/iancleary/ahi-dev:latest` (Fedora, a non-root `dev` user with sudo, git, ripgrep, fd, bat, jq, tmux, vim, zsh). ahi does not contain a Containerfile; it drives a container runtime, `podman` or `docker`, found on `PATH`. Without a subcommand it pulls the image when it is missing and runs it interactively with the working directory mounted at `/work`. Only the working directory is mounted: the ahi directories, the home directory, and the container socket stay outside, and the image runs as its own `dev` user.
+Opens a shell in the opinionated development image that [iancleary/ahi-images](https://github.com/iancleary/ahi-images) publishes as `ghcr.io/iancleary/ahi-dev:latest` (Fedora, a non-root `dev` user with sudo, git, ripgrep, fd, bat, jq, tmux, vim, zsh). ahi does not contain a Containerfile; it drives a container runtime, `podman` or `docker`, found on `PATH`. Without a subcommand it pulls the image when it is missing and runs it interactively with the working directory mounted at `/work`. Only the working directory is mounted: the ahi directories, the home directory, and the container socket stay outside, and the image runs as its own `dev` user. `ahi dev` is a reproducible shell, not a security boundary; its properties are the container runtime's. [Development container and sandbox](docs/DEV_CONTAINER.md) explains how it relates to the planned `ahi sandbox`.
 
 | Command | Effect |
 | --- | --- |
