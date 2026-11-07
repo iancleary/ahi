@@ -29,8 +29,11 @@ use crate::directories::Directories;
 use crate::error::{Error, Result};
 use crate::yaml_safe::check_config_yaml;
 
-/// The image the `ahi-images` repository publishes.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/iancleary/ahi-dev:latest";
+/// The image the `ahi-images` repository publishes, without a tag.
+pub const DEFAULT_IMAGE: &str = "ghcr.io/iancleary/ahi-dev";
+/// Tag appended to an image reference that has none, unless `--tag` or the
+/// repository's `ahi.dev.yaml` chooses another.
+pub const DEFAULT_TAG: &str = "latest";
 /// Environment variable that overrides the image reference.
 pub const IMAGE_ENV: &str = "AHI_DEV_IMAGE";
 /// Environment variable that names the container runtime.
@@ -71,6 +74,8 @@ pub enum Action {
 pub struct Options {
     /// `--image`.
     pub image: Option<String>,
+    /// `--tag`.
+    pub tag: Option<String>,
     /// `--shell`.
     pub shell: Option<String>,
     /// `--runtime`: a name looked up on `PATH` or a path.
@@ -105,6 +110,27 @@ impl ImageSource {
     }
 }
 
+/// Where the tag came from, for `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagSource {
+    Flag,
+    RepoFile,
+    Default,
+    /// The image reference carried its own tag or digest.
+    Image,
+}
+
+impl TagSource {
+    fn label(self) -> &'static str {
+        match self {
+            TagSource::Flag => "--tag",
+            TagSource::RepoFile => REPO_FILE_NAME,
+            TagSource::Default => "default",
+            TagSource::Image => "the image reference",
+        }
+    }
+}
+
 /// `ahi.dev.yaml`: the repository's preferences for `ahi dev`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +138,8 @@ pub struct RepoPreferences {
     pub version: u32,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
     #[serde(default)]
     pub shell: Option<String>,
     #[serde(default)]
@@ -170,6 +198,52 @@ pub fn resolve_image(
         return (image, ImageSource::ConfigFile);
     }
     (DEFAULT_IMAGE.to_string(), ImageSource::Default)
+}
+
+/// Resolve the tag: `--tag`, then the repository's `ahi.dev.yaml`, then
+/// `latest`. Empty values are skipped.
+pub fn resolve_tag(flag: Option<&str>, repo: Option<&str>) -> (String, TagSource) {
+    if let Some(tag) = clean(flag) {
+        return (tag.to_string(), TagSource::Flag);
+    }
+    if let Some(tag) = clean(repo) {
+        return (tag.to_string(), TagSource::RepoFile);
+    }
+    (DEFAULT_TAG.to_string(), TagSource::Default)
+}
+
+/// Whether `reference` already names a tag or a digest: a `@`, or a colon
+/// after the last slash (so a registry port such as `host:5000/name` does
+/// not count).
+pub fn has_tag(reference: &str) -> bool {
+    let name = reference.rsplit('/').next().unwrap_or(reference);
+    name.contains(':') || name.contains('@')
+}
+
+/// Join the image name and the tag into one reference. A reference that
+/// already carries a tag or digest is never rewritten: it is kept as is when
+/// the tag is the default, or when the tag is the repository's preference
+/// and the image came from a higher-ranked source (`--image` or the
+/// environment). Any other explicit tag is an error.
+pub fn image_reference(
+    image: &str,
+    image_source: ImageSource,
+    tag: &str,
+    tag_source: TagSource,
+) -> Result<(String, TagSource)> {
+    if !has_tag(image) {
+        return Ok((format!("{image}:{tag}"), tag_source));
+    }
+    let outranked = tag_source == TagSource::RepoFile
+        && matches!(image_source, ImageSource::Flag | ImageSource::Environment);
+    if tag_source == TagSource::Default || outranked {
+        return Ok((image.to_string(), TagSource::Image));
+    }
+    Err(Error::new(format!(
+        "image {image} (from {}) already has a tag; drop the tag {tag} (from {}) or name the image without one",
+        image_source.label(),
+        tag_source.label()
+    )))
 }
 
 /// The first non-empty, non-comment line of the config file.
@@ -308,6 +382,7 @@ pub struct Session {
     pub runtime: PathBuf,
     pub image: String,
     pub source: ImageSource,
+    pub tag_source: TagSource,
     pub shell: String,
     pub workdir: PathBuf,
 }
@@ -331,6 +406,8 @@ impl Session {
             repo.image.as_deref(),
             config_file.as_deref(),
         );
+        let (tag, tag_source) = resolve_tag(options.tag.as_deref(), repo.tag.as_deref());
+        let (image, tag_source) = image_reference(&image, source, &tag, tag_source)?;
         let shell = resolve_shell(
             options.shell.as_deref(),
             repo.shell.as_deref(),
@@ -340,6 +417,7 @@ impl Session {
             runtime,
             image,
             source,
+            tag_source,
             shell,
             workdir,
         })
@@ -426,7 +504,12 @@ impl Session {
     /// Print the resolved settings and the image state.
     pub fn status(&self) -> Result<()> {
         println!("runtime: {}", self.runtime.display());
-        println!("image: {} (from {})", self.image, self.source.label());
+        println!(
+            "image: {} (from {}, tag from {})",
+            self.image,
+            self.source.label(),
+            self.tag_source.label()
+        );
         println!("shell: {}", self.shell);
         println!("mount: {} -> {MOUNT_POINT}", self.workdir.display());
         let output = self
@@ -539,6 +622,82 @@ mod tests {
             resolve_image(None, None, None, None),
             (DEFAULT_IMAGE.to_string(), ImageSource::Default)
         );
+    }
+
+    #[test]
+    fn the_tag_follows_flag_repo_default_and_never_rewrites_a_tagged_image() {
+        assert_eq!(
+            resolve_tag(Some("edge"), Some("2026.11.07.01")),
+            ("edge".to_string(), TagSource::Flag)
+        );
+        assert_eq!(
+            resolve_tag(Some(" "), Some("2026.11.07.01")),
+            ("2026.11.07.01".to_string(), TagSource::RepoFile)
+        );
+        assert_eq!(
+            resolve_tag(None, None),
+            (DEFAULT_TAG.to_string(), TagSource::Default)
+        );
+        let (image, source) = resolve_image(None, None, None, None);
+        assert_eq!(source, ImageSource::Default);
+        assert_eq!(
+            image_reference(&image, source, DEFAULT_TAG, TagSource::Default).unwrap(),
+            (
+                "ghcr.io/iancleary/ahi-dev:latest".to_string(),
+                TagSource::Default
+            )
+        );
+        assert_eq!(
+            image_reference(
+                "localhost:5000/ahi-dev",
+                ImageSource::Flag,
+                "edge",
+                TagSource::Flag
+            )
+            .unwrap(),
+            ("localhost:5000/ahi-dev:edge".to_string(), TagSource::Flag)
+        );
+        assert_eq!(
+            image_reference(
+                "ahi-dev:pinned",
+                ImageSource::ConfigFile,
+                DEFAULT_TAG,
+                TagSource::Default
+            )
+            .unwrap(),
+            ("ahi-dev:pinned".to_string(), TagSource::Image)
+        );
+        assert_eq!(
+            image_reference(
+                "ahi-dev@sha256:abcd",
+                ImageSource::Flag,
+                DEFAULT_TAG,
+                TagSource::Default
+            )
+            .unwrap(),
+            ("ahi-dev@sha256:abcd".to_string(), TagSource::Image)
+        );
+        // The repository's tag yields to a tagged image from a higher source.
+        assert_eq!(
+            image_reference(
+                "ahi-dev:env",
+                ImageSource::Environment,
+                "repo",
+                TagSource::RepoFile
+            )
+            .unwrap(),
+            ("ahi-dev:env".to_string(), TagSource::Image)
+        );
+        // ...but not to one from the same file or from the user's config file.
+        for image_source in [ImageSource::RepoFile, ImageSource::ConfigFile] {
+            let err = image_reference("ahi-dev:pinned", image_source, "repo", TagSource::RepoFile)
+                .unwrap_err();
+            assert!(err.to_string().contains("already has a tag"), "{err}");
+        }
+        // `--tag` never rewrites a tagged image, whatever its source.
+        let err = image_reference("ahi-dev:pinned", ImageSource::Flag, "edge", TagSource::Flag)
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a tag"), "{err}");
     }
 
     #[test]

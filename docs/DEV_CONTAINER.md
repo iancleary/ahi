@@ -24,7 +24,7 @@ run --rm -i [-t] --volume <cwd>:/work --workdir /work [--env TERM=...] <image> <
 ```
 
 - **One mount.** The current working directory, not the git root, bind-mounted read-write at `/work`. Nothing else: no home directory, no ssh agent, no git credentials, no ahi directories, no container socket. Opt-ins, if any arrive, are explicit flags, never defaults.
-- **Image resolution.** `--image`, then `AHI_DEV_IMAGE`, then `image` in the working directory's `ahi.dev.yaml`, then `dev-image` in the config directory, then the default.
+- **Image resolution.** `--image`, then `AHI_DEV_IMAGE`, then `image` in the working directory's `ahi.dev.yaml`, then `dev-image` in the config directory, then the default name. The tag is `--tag`, then `tag` in `ahi.dev.yaml`, then `latest`, and is appended to a name that has none; a reference that already carries a tag is never rewritten.
 - **Not a boundary.** The container runs as the image's `dev` user with passwordless sudo and an open network, through a daemon that is root-equivalent on the host. `ahi dev` is a reproducible shell.
 
 ### Consequences of the single mount
