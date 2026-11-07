@@ -231,3 +231,75 @@ fn the_repository_file_outranks_the_user_file_and_yields_to_the_environment() {
     assert_eq!(invalid.status.code(), Some(1));
     assert!(text(&invalid).contains("mount"), "{}", text(&invalid));
 }
+
+#[cfg(unix)]
+#[test]
+fn run_passes_the_command_through_untouched_and_pulls_first() {
+    let fixture = Fixture::new("dev-run");
+    let runtime = fake_runtime(&fixture.0);
+    // The stand-in reports every image as present, so `run` goes straight to
+    // the command. The hyphenated and quoted arguments must survive intact.
+    let output = fixture
+        .ahi()
+        .args([
+            "dev",
+            "run",
+            "--image",
+            "example.invalid/ahi-dev:run",
+            "--runtime",
+        ])
+        .arg(&runtime)
+        .args([
+            "--",
+            "cargo",
+            "test",
+            "--all-features",
+            "--nocapture",
+            "a b",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    let log = fs::read_to_string(fixture.0.join("runtime.log")).unwrap();
+    let calls: Vec<Vec<&str>> = log
+        .split("--\n")
+        .filter(|call| !call.trim().is_empty())
+        .map(|call| call.lines().collect())
+        .collect();
+    // `ensure` checks for the image, then `exec` checks again before running.
+    assert_eq!(calls.len(), 3, "{log}");
+    assert_eq!(
+        calls[0],
+        ["image", "inspect", "example.invalid/ahi-dev:run"]
+    );
+    assert_eq!(calls[1], calls[0]);
+    let run = &calls[2];
+    assert_eq!(
+        &run[run.len() - 6..],
+        [
+            "example.invalid/ahi-dev:run",
+            "cargo",
+            "test",
+            "--all-features",
+            "--nocapture",
+            "a b"
+        ]
+    );
+    assert!(
+        run.iter().any(|a| a.starts_with("AHI_HOST_UID=")),
+        "{run:?}"
+    );
+
+    let missing = fixture
+        .ahi()
+        .args(["dev", "run", "--runtime"])
+        .arg(&runtime)
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        text(&missing).contains("needs a command"),
+        "{}",
+        text(&missing)
+    );
+}

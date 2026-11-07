@@ -156,6 +156,16 @@ struct DevArgs {
 enum DevCommand {
     /// Pull the image, or build it from --from.
     Build,
+    /// Run a command in the image, pulling first when it is missing, and exit
+    /// with its code. Everything after `--` is the command.
+    Run {
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "COMMAND"
+        )]
+        command: Vec<std::ffi::OsString>,
+    },
     /// Open a shell in an image that is already present; never pulls.
     Shell,
     /// Show the runtime, the image reference and where it came from, and the local image id.
@@ -261,6 +271,7 @@ fn dev(cli: &Cli, args: &DevArgs) -> ExitCode {
     let action = match args.command {
         None => Action::Enter,
         Some(DevCommand::Build) => Action::Build,
+        Some(DevCommand::Run { .. }) => Action::Run,
         Some(DevCommand::Shell) => Action::Shell,
         Some(DevCommand::Status) => Action::Status,
         Some(DevCommand::Clean) => Action::Clean,
@@ -271,6 +282,10 @@ fn dev(cli: &Cli, args: &DevArgs) -> ExitCode {
         runtime: args.runtime.clone(),
         rebuild: args.rebuild,
         from: args.from.clone(),
+        command: match &args.command {
+            Some(DevCommand::Run { command }) => command.clone(),
+            _ => Vec::new(),
+        },
     };
     let dirs = match directories(cli) {
         Ok(dirs) => dirs,
