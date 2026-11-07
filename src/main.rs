@@ -139,7 +139,7 @@ struct DevArgs {
     /// Default: ghcr.io/iancleary/ahi-dev:latest.
     #[arg(long, global = true, value_name = "REF")]
     image: Option<String>,
-    /// Shell to run inside the container. Default: the basename of SHELL, else /bin/bash.
+    /// Shell to run inside the container. Default: the repository's `shell` in ahi.dev.yaml, else the basename of SHELL, else /bin/zsh.
     #[arg(long, global = true, value_name = "CMD")]
     shell: Option<String>,
     /// Container runtime: a name on PATH or a path. Overrides AHI_DEV_RUNTIME.
