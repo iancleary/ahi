@@ -233,8 +233,17 @@ fn parse_toolchain_names(names: &[String], origin: &str, what: &str) -> Result<V
 
 pub fn policy_snippet(hook_id: &str, entry: &str, language: &str) -> String {
     format!(
-        "hook `{hook_id}` uses language `{language}` with entry {entry_quoted}, which is refused unless an {FILE_NAME} rule approves this id and exact entry.\nAdd:\n\nrules:\n  - id: {hook_id}\n    action: hook\n    match: {{id: {hook_id}, entry: {quoted}}}\n    effect: approve\n",
+        "hook `{hook_id}` uses language `{language}` with entry {entry_quoted}, which is refused unless an {FILE_NAME} rule approves this id and exact entry.\nAdd:\n\nrules:\n{rule}",
         entry_quoted = yaml_double_quote(entry),
+        rule = approve_rule(hook_id, entry),
+    )
+}
+
+/// One approve rule for `rules:` in `ahi.hooks.yaml`, indented as a list
+/// item under that key and ending with a newline.
+pub fn approve_rule(hook_id: &str, entry: &str) -> String {
+    format!(
+        "  - id: {hook_id}\n    action: hook\n    match: {{id: {hook_id}, entry: {quoted}}}\n    effect: approve\n",
         quoted = yaml_double_quote(entry),
     )
 }

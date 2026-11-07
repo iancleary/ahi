@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- `--help` pages group the four global flags under "Global options" at the end of every page instead of interleaving them with a command's own flags, `ahi run` groups its flags into file selection, output, and behavior, every command has a one-line summary with the caveats moved to `--help`, `--format` and `--color` list their accepted values, and the stale "v0.1" phrasing is gone.
+- `ahi migrate` prints a report with aligned columns and counted sections, collects the `ahi.hooks.yaml` rules the local hooks need into one block instead of repeating a snippet per hook, shows the config path relative to the working directory, and prints the "left unchanged" or "wrote" line on stdout at the end.
+
 ### Added
 
 - `ahi dev --tag <tag>` and `tag` in `ahi.dev.yaml` choose the image tag (`latest`, `edge`, a dated tag) separately from the image name; the flag outranks the file, which outranks the default `latest`. A reference that already names a tag or digest is used unchanged; `--tag` against it is an error, and a repository `tag` yields to a tagged `--image` or `AHI_DEV_IMAGE`. `ahi dev status` reports where the tag came from.

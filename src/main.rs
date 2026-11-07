@@ -16,29 +16,41 @@ use ahi::hooks::{config, migrate, policy};
 use ahi::VERSION;
 use clap::{Parser, Subcommand};
 
+const GLOBAL: &str = "Global options";
+
 #[derive(Parser)]
 #[command(
     name = "ahi",
     version,
-    about = "Fail-closed pre-commit runner with a terminal chat for OpenAI and compatible gateways."
+    about = "Offline pre-commit runner, terminal chat, and development container launcher.",
+    long_about = "Offline pre-commit runner, terminal chat, and development container launcher.\n\n\
+        Hooks run only from this binary or from an approved local command; nothing is fetched or \
+        installed by `ahi run`. Repository files: .pre-commit-config.yaml (hooks), ahi.hooks.yaml \
+        (which local hooks may run), ahi.tools.yaml (chat tool calls), ahi.dev.yaml (dev image).",
+    after_help = "Start with `ahi doctor`, then `ahi run`. Each command has `--help`."
 )]
 struct Cli {
-    /// Path to a pre-commit config file.
-    #[arg(long, short = 'c', global = true)]
+    /// Pre-commit config to read instead of .pre-commit-config.yaml in the git root.
+    #[arg(long, short = 'c', global = true, value_name = "PATH", help_heading = GLOBAL)]
     config: Option<PathBuf>,
 
-    /// Cache directory for catalogs and objects. Overrides AHI_HOME and
-    /// XDG_CACHE_HOME.
-    #[arg(long, global = true)]
+    /// Cache directory for catalogs and objects. Outranks AHI_HOME and XDG_CACHE_HOME.
+    #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
     cache_dir: Option<PathBuf>,
 
-    /// Keep config, data, state, and cache under one directory instead of the
-    /// XDG layout. Overrides AHI_STATE_DIR.
-    #[arg(long, global = true)]
+    /// One directory for config, data, state, and cache instead of the XDG layout. Outranks AHI_STATE_DIR.
+    #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
     state_dir: Option<PathBuf>,
 
-    /// Color: auto, always, or never. v0.1 prints plain text either way.
-    #[arg(long, global = true, default_value = "auto")]
+    /// When to color output. Output is plain text in this version either way.
+    #[arg(
+        long,
+        global = true,
+        default_value = "auto",
+        value_name = "WHEN",
+        value_parser = ["auto", "always", "never"],
+        help_heading = GLOBAL
+    )]
     color: String,
 
     #[command(subcommand)]
@@ -47,73 +59,79 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run configured hooks.
+    /// Run the configured hooks on the staged files.
+    ///
+    /// Builtin checks run in this process. A `repo: local` system or script
+    /// hook runs only when a rule in ahi.hooks.yaml approves its id and exact
+    /// entry. Remote hooks are never fetched or executed.
     Run(RunArgs),
-    /// List builtin checks.
+    /// List the builtin checks with their aliases.
     ListChecks {
-        #[arg(long, default_value = "text")]
+        /// Output format.
+        #[arg(long, default_value = "text", value_name = "FORMAT", value_parser = ["text", "json"])]
         format: String,
     },
-    /// Explain one builtin check.
-    Explain { id: String },
-    /// Show the local environment. Sandboxes are not implemented in v0.1.
+    /// Describe one builtin check: what it looks at, its defaults, and the upstream hook it replaces.
+    Explain {
+        /// Builtin id or alias, as `ahi list-checks` prints it.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Show the local environment: versions, config, directories, hook policy, runtime, sandbox.
     Doctor,
-    /// Git hook shim commands.
+    /// Install or remove the git hook shim (not implemented yet).
     Hooks {
         #[command(subcommand)]
         command: HooksCommand,
     },
-    /// Replace this ahi binary from the attested Linux archive of the latest release.
+    /// Replace this binary with the latest release, verified by its build attestation (Linux only).
     ///
-    /// Downloads and verifies `ahi-<version>-sha256sums.txt` and the archive for
-    /// the target against their GitHub build-provenance attestations with the
+    /// Downloads `ahi-<version>-sha256sums.txt` and the archive for this target,
+    /// verifies both against their GitHub build-provenance attestations with the
     /// `gh` CLI, then atomically renames the new binary over the running one.
-    /// Linux only; macOS and Windows stay on `cargo install`. Refuses a target
-    /// it cannot verify. Does not accept a package name. The command is not
-    /// named `self-update`.
+    /// Refuses a target it cannot verify. macOS and Windows use `cargo install
+    /// ahi --locked` instead.
     Update,
-    /// Best-effort config suggestion. Does not guarantee feature parity or the same file scope.
+    /// Suggest an ahi config from the pre-commit config and print it (writes only with --write).
     ///
-    /// Prints a report and a suggested config. Does not fetch remotes and does not
-    /// change `ahi run`. Writes only with `--write`, and refuses to replace an
-    /// existing file unless `--force` is also set.
+    /// Prints a report, the ahi.hooks.yaml rules the local hooks need, and a
+    /// suggested .pre-commit-config.yaml. Best effort: feature parity and file
+    /// scope are not guaranteed, remote repositories are not fetched, and `ahi
+    /// run` does not use the mapping. Not upstream `migrate-config`.
     Migrate {
-        /// Write the suggested config over the file that was read.
-        /// Refuses when that file exists unless `--force` is set.
+        /// Write the suggestion over the config that was read. Refuses an existing file without --force.
         #[arg(long)]
         write: bool,
-        /// Replace an existing file. Does nothing unless `--write` is also set.
-        #[arg(long)]
+        /// With --write, replace an existing file.
+        #[arg(long, requires = "write")]
         force: bool,
     },
-    /// Pick only models curated in models.json. Startup performs no network requests.
+    /// Pick a curated model and open the terminal chat.
     ///
-    /// A terminal opens a picker; Enter saves a selection and opens the local
-    /// echo-backed chat screen. A pipe prints providers and model catalog membership.
+    /// Only models curated in models.json are offered; startup makes no network
+    /// requests. In a terminal, Enter saves the selection and opens the chat.
+    /// In a pipe, the providers and catalog membership are printed instead.
     Tui {
-        /// Explicitly refresh reference catalogs before opening the picker or printing.
+        /// Refresh the reference catalogs first.
         #[arg(long)]
         refresh: bool,
-        /// Tool policy file to use instead of ahi.tools.yaml in the working
-        /// directory. It must exist and parse; rule paths and tool confinement
-        /// stay relative to the working directory. See examples/tools.
+        /// Tool policy file to use instead of ahi.tools.yaml in the working directory (see examples/tools).
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
     },
-    /// Print the OpenAI browser login URL and wait for the redirect.
+    /// Sign in to OpenAI through the browser and store the credential.
     ///
-    /// Opening a browser is attempted and is not required. The credential is
-    /// written under the state directory.
+    /// Prints the login URL, tries to open a browser, and waits for the
+    /// redirect. The credential is written under the data directory.
     Login,
-    /// Open a shell in the opinionated development image with the working
-    /// directory mounted at /work.
+    /// Open a shell, or run a command, in the development image with the working directory at /work.
     ///
-    /// Needs podman or docker on PATH. The image is published by
-    /// iancleary/ahi-images; without a subcommand the image is pulled when it
-    /// is missing and a shell opens. Only the working directory is mounted.
+    /// Needs podman or docker on PATH. The image comes from iancleary/ahi-images.
+    /// Without a subcommand the image is pulled when missing and a shell opens.
+    /// Only the working directory is mounted; this is a reproducible shell, not
+    /// a security boundary.
     Dev(DevArgs),
-    /// Containment for hooks and tool calls. This version only detects what
-    /// the host offers; nothing is confined yet.
+    /// Report the containment this host offers (detection only; nothing is confined yet).
     Sandbox {
         #[command(subcommand)]
         command: SandboxCommand,
@@ -122,8 +140,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SandboxCommand {
-    /// Print the backend `ahi sandbox run` would use, whether an outer
-    /// sandbox such as OpenShell is already active, and the evidence.
+    /// Print the backend `ahi sandbox run` would use, whether an outer sandbox such as OpenShell is active, and the evidence.
     Check,
 }
 
@@ -131,28 +148,22 @@ enum SandboxCommand {
 struct DevArgs {
     #[command(subcommand)]
     command: Option<DevCommand>,
-    /// Pull or build the image again even when it is already present.
-    #[arg(long, global = true)]
-    rebuild: bool,
-    /// Image reference. Overrides AHI_DEV_IMAGE, the repository's ahi.dev.yaml,
-    /// and the `dev-image` file in the config directory.
-    /// Default: ghcr.io/iancleary/ahi-dev.
+    /// Image name without a tag. Outranks AHI_DEV_IMAGE, `image` in ahi.dev.yaml, and ~/.config/ahi/dev-image [default: ghcr.io/iancleary/ahi-dev]
     #[arg(long, global = true, value_name = "REF")]
     image: Option<String>,
-    /// Image tag, such as latest, edge, or a dated tag. Overrides `tag` in the
-    /// repository's ahi.dev.yaml. Default: latest. An image reference that
-    /// already names a tag cannot be combined with this flag.
+    /// Image tag: latest, edge, or a dated tag. Outranks `tag` in ahi.dev.yaml. Not allowed when the image already has a tag [default: latest]
     #[arg(long, global = true, value_name = "TAG")]
     tag: Option<String>,
-    /// Shell to run inside the container. Default: the repository's `shell` in ahi.dev.yaml, else the basename of SHELL, else /bin/zsh.
+    /// Shell to run in the container. Outranks `shell` in ahi.dev.yaml and the basename of SHELL [default: /bin/zsh]
     #[arg(long, global = true, value_name = "CMD")]
     shell: Option<String>,
-    /// Container runtime: a name on PATH or a path. Overrides AHI_DEV_RUNTIME.
-    /// Default: podman, then docker.
+    /// Container runtime, a name on PATH or a path. Outranks AHI_DEV_RUNTIME and `runtime` in ahi.dev.yaml [default: podman, then docker]
     #[arg(long, global = true, value_name = "CMD")]
     runtime: Option<String>,
-    /// Build from this local checkout of iancleary/ahi-images (its images/dev
-    /// directory) instead of pulling, and tag the result with the image reference.
+    /// Pull or build again even when the image is present.
+    #[arg(long, global = true)]
+    rebuild: bool,
+    /// Build images/dev from this local iancleary/ahi-images checkout instead of pulling.
     #[arg(long, global = true, value_name = "DIR")]
     from: Option<PathBuf>,
 }
@@ -161,8 +172,10 @@ struct DevArgs {
 enum DevCommand {
     /// Pull the image, or build it from --from.
     Build,
-    /// Run a command in the image, pulling first when it is missing, and exit
-    /// with its code. Everything after `--` is the command.
+    /// Run a command in the image and exit with its code; pulls first when the image is missing.
+    ///
+    /// Everything after `--` is the command, passed through untouched:
+    /// `ahi dev run -- cargo test --all-features`.
     Run {
         #[arg(
             trailing_var_arg = true,
@@ -173,7 +186,7 @@ enum DevCommand {
     },
     /// Open a shell in an image that is already present; never pulls.
     Shell,
-    /// Show the runtime, the image reference and where it came from, and the local image id.
+    /// Show the runtime, the image and where each part of it came from, the mount, and the local image id.
     Status,
     /// Remove the local image.
     Clean,
@@ -181,51 +194,70 @@ enum DevCommand {
 
 #[derive(Subcommand)]
 enum HooksCommand {
-    /// Install the git hook shim. Not implemented.
+    /// Install the git hook shim (not implemented yet; exits 1).
     Install,
-    /// Remove the git hook shim. Not implemented.
+    /// Remove the git hook shim (not implemented yet; exits 1).
     Uninstall,
 }
 
 #[derive(clap::Args)]
 struct RunArgs {
     /// Run only this hook id or alias.
+    #[arg(value_name = "HOOK")]
     hook: Option<String>,
-    /// Check every tracked file.
-    #[arg(long, short = 'a')]
+
+    /// Check every tracked file instead of the staged set.
+    #[arg(long, short = 'a', help_heading = "File selection")]
     all_files: bool,
     /// Check these paths instead of the staged set.
-    #[arg(long, num_args = 1..)]
+    #[arg(long, num_args = 1.., value_name = "PATH", help_heading = "File selection")]
     files: Vec<String>,
-    /// Together with --to-ref, check files changed between the two refs.
-    #[arg(long)]
+    /// With --to-ref, check the files changed between the two refs.
+    #[arg(
+        long,
+        value_name = "REF",
+        requires = "to_ref",
+        help_heading = "File selection"
+    )]
     from_ref: Option<String>,
-    /// Together with --from-ref, check files changed between the two refs.
-    #[arg(long)]
+    /// With --from-ref, check the files changed between the two refs.
+    #[arg(
+        long,
+        value_name = "REF",
+        requires = "from_ref",
+        help_heading = "File selection"
+    )]
     to_ref: Option<String>,
-    /// Git hook stage to select. Default: pre-commit.
-    #[arg(long, default_value = "pre-commit")]
+    /// Git hook stage whose hooks run.
+    #[arg(
+        long,
+        default_value = "pre-commit",
+        value_name = "STAGE",
+        help_heading = "File selection"
+    )]
     hook_stage: String,
-    /// text, json, or sarif.
-    #[arg(long, default_value = "text")]
-    format: String,
-    /// Stop after the first failing hook.
-    #[arg(long)]
-    fail_fast: bool,
-    /// Show output from a passing local hook. Failures always show output.
-    #[arg(long, short = 'v')]
-    verbose: bool,
-    /// Rewrite end-of-file, trailing-whitespace, and mixed-line-ending.
-    ///
-    /// Other checks stay report-only. A hook argument `--fix` enables the same
-    /// three checks. `--fix=no` on mixed-line-ending stays report-only.
-    /// Writes are atomic, do not follow symlinks, and skip files outside the
-    /// selected set. A file with unstaged changes is left unchanged.
-    #[arg(long)]
-    fix: bool,
-    /// Commit-message path for commit-msg and prepare-commit-msg.
-    #[arg(long)]
+    /// Commit message file, for the commit-msg and prepare-commit-msg stages.
+    #[arg(long, value_name = "PATH", help_heading = "File selection")]
     commit_msg_filename: Option<String>,
+
+    /// Output format.
+    #[arg(long, default_value = "text", value_name = "FORMAT", value_parser = ["text", "json", "sarif"], help_heading = "Output")]
+    format: String,
+    /// Show the output of passing local hooks too. Failures always show output.
+    #[arg(long, short = 'v', help_heading = "Output")]
+    verbose: bool,
+
+    /// Stop after the first failing hook.
+    #[arg(long, help_heading = "Behavior")]
+    fail_fast: bool,
+    /// Rewrite files for end-of-file, trailing-whitespace, and mixed-line-ending; other checks stay report-only.
+    ///
+    /// A hook argument `--fix` enables the same three checks; `--fix=no` on
+    /// mixed-line-ending keeps it report-only. Writes are atomic, do not follow
+    /// symlinks, and skip files outside the selected set. A file with unstaged
+    /// changes is left unchanged.
+    #[arg(long, help_heading = "Behavior")]
+    fix: bool,
 }
 
 fn main() -> ExitCode {
@@ -743,7 +775,12 @@ fn migrate_config(config: Option<&std::path::Path>, write: bool, force: bool) ->
             return ExitCode::from(1);
         }
     };
-    let suggestion = match migrate::suggest(&original, &path.display().to_string()) {
+    let shown = path
+        .strip_prefix(&cwd)
+        .unwrap_or(&path)
+        .display()
+        .to_string();
+    let suggestion = match migrate::suggest(&original, &shown) {
         Ok(suggestion) => suggestion,
         Err(err) => {
             eprintln!("error: {err}");
@@ -752,22 +789,20 @@ fn migrate_config(config: Option<&std::path::Path>, write: bool, force: bool) ->
     };
     print!("{}", suggestion.report);
     print!("{}", suggestion.suggested);
+    println!();
     if !write {
-        eprintln!("left {} unchanged", path.display());
+        println!("Left {shown} unchanged. Rerun with --write --force to replace it with the suggestion above.");
         return ExitCode::from(0);
     }
     if path.exists() && !force {
-        eprintln!(
-            "error: refusing to overwrite {}; pass --write --force to replace it",
-            path.display()
-        );
+        eprintln!("error: refusing to overwrite {shown}; pass --write --force to replace it");
         return ExitCode::from(1);
     }
     if let Err(err) = std::fs::write(&path, &suggestion.suggested) {
         eprintln!("error: {err}");
         return ExitCode::from(1);
     }
-    eprintln!("wrote {}", path.display());
+    println!("Wrote {shown}.");
     ExitCode::from(0)
 }
 
