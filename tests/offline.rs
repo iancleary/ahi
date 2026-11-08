@@ -550,9 +550,10 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
         let index = run(&dir, args);
         let listed = String::from_utf8(index.stdout).unwrap();
         assert_eq!(index.status.code(), Some(0));
-        assert!(listed.starts_with("read-all"), "{listed}");
+        assert!(listed.starts_with("Shipped tool policies"), "{listed}");
+        assert!(listed.contains("\nread-all "), "{listed}");
         assert!(listed.contains("(default)"), "{listed}");
-        assert!(listed.contains("examples show <name>"), "{listed}");
+        assert!(listed.contains("`ahi tools examples show <name>` prints one.\n`ahi tools examples show` prints all.\n"), "{listed}");
         assert!(!listed.contains("== "), "{listed}");
         assert!(!listed.contains("invalid-version"), "{listed}");
     }

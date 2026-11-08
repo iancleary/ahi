@@ -85,7 +85,9 @@ pub fn example(name: &str) -> std::result::Result<&'static Example, String> {
 /// and the commands that show them.
 pub fn render_index() -> String {
     let width = EXAMPLES.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    let mut out = String::new();
+    let mut out = String::from(
+        "Shipped tool policies (examples/tools, embedded in ahi). Each is a complete ahi.tools.yaml.\n\n",
+    );
     for e in EXAMPLES {
         let default = if e.name == DEFAULT_EXAMPLE {
             " (default)"
@@ -95,7 +97,8 @@ pub fn render_index() -> String {
         out.push_str(&format!("{:width$}  {}{default}\n", e.name, e.summary));
     }
     out.push_str(
-        "\n`ahi tools examples show <name>` prints one, `ahi tools examples show` prints all, \
+        "\n`ahi tools examples show <name>` prints one.\n\
+         `ahi tools examples show` prints all.\n\
          `ahi tools init --example <name> --write` copies one into the working directory.\n",
     );
     out
@@ -385,7 +388,8 @@ mod tests {
         assert!(line_with("version: 1").starts_with("version: 1"));
         assert!(painted.lines().last().unwrap().contains("approve"));
         let index = render_index();
-        assert!(index.starts_with("read-all"), "{index}");
+        assert!(index.starts_with("Shipped tool policies"), "{index}");
+        assert!(index.contains("\nread-all "), "{index}");
         assert!(index.contains("examples show <name>"), "{index}");
         let all = render_examples(None, false).unwrap();
         assert!(all.starts_with("== read-all"), "{all}");
