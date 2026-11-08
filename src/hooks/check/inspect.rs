@@ -250,7 +250,7 @@ fn parse_xml(bytes: &[u8]) -> std::result::Result<(), String> {
                 saw_root = true;
             }
             Ok(Event::DocType(body)) => {
-                let text = String::from_utf8_lossy(&body);
+                let text = body.into_inner();
                 let upper = text.to_ascii_uppercase();
                 if upper.contains("SYSTEM") || upper.contains("PUBLIC") || upper.contains("ENTITY")
                 {

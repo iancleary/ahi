@@ -143,7 +143,7 @@
             }
           ],
           "message": {
-            "text": "TOML parse error: TOML parse error at line 1, column 4\n  |\n1 | a =\n  |    ^\ninvalid string\nexpected `\"`, `'`\n"
+            "text": "TOML parse error: TOML parse error at line 1, column 4\n  |\n1 | a =\n  |    ^\nstring values must be quoted, expected literal string\n"
           },
           "ruleId": "ahi/check-toml"
         },

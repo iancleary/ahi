@@ -37,8 +37,7 @@ bad.toml: TOML parse error: TOML parse error at line 1, column 4
   |
 1 | a =
   |    ^
-invalid string
-expected `"`, `'`
+string values must be quoted, expected literal string
 
 Trojan Source............................................................Failed
 - hook id: ahi/trojan-source
