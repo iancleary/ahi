@@ -16,9 +16,9 @@ doctest = false
 
 [dependencies]
 bitflags = "=2.13.2"
-ratatui-core = "=0.1.0"
-unicode-segmentation = "=1.12.0"
-unicode-width = "=0.2.0"
+ratatui-core = "=0.1.2"
+unicode-segmentation = "=1.13.3"
+unicode-width = "=0.2.3"
 
 [lints.rust]
 unsafe_code = "forbid"
