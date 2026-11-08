@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Dependencies: ratatui builds with only its `crossterm` feature, ureq moved from 2.12 to 3.5 (one TLS root store, `http` types), `thiserror` was removed as unused, and `base64` moved to 0.23. The lockfile shrank from 285 entries to 193, and every remaining duplicate version (`foldhash`, `hashbrown`, `syn`) lives inside ratatui's tree.
+- `deny.toml` now fails on unsound or unmaintained advisories for any crate unless ignored with a reason; RUSTSEC-2026-0253 (`lru`, pulled by ratatui-core, unused by ahi) is ignored with a review date. CI and publish run clippy, test, doc, and build with `--locked`.
+- The crate description and README no longer mention the retired `ahi.policy.yaml` or describe the chat tools as read-only.
+
 ## 0.11.0 (2026-11-07)
 
 ### Added

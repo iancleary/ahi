@@ -123,20 +123,28 @@ fn latest_release() -> Result<LatestRelease> {
     })
 }
 
+/// Connect, send, and receive each bounded by `FETCH_TIMEOUT`; redirects
+/// followed as GitHub's release and asset URLs require.
+fn fetch_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(FETCH_TIMEOUT))
+        .timeout_send_request(Some(FETCH_TIMEOUT))
+        .timeout_recv_response(Some(FETCH_TIMEOUT))
+        .timeout_recv_body(Some(FETCH_TIMEOUT))
+        .build()
+        .new_agent()
+}
+
 fn fetch_json(url: &str) -> Result<Vec<u8>> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(FETCH_TIMEOUT)
-        .timeout_read(FETCH_TIMEOUT)
-        .timeout_write(FETCH_TIMEOUT)
-        .build();
+    let agent = fetch_agent();
     let response = match agent
         .get(url)
-        .set("User-Agent", &format!("ahi/{VERSION}"))
-        .set("Accept", "application/vnd.github+json")
+        .header("User-Agent", format!("ahi/{VERSION}"))
+        .header("Accept", "application/vnd.github+json")
         .call()
     {
         Ok(response) => response,
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             let hint = match code {
                 404 => "; no published release was found".to_string(),
                 403 => "; the GitHub API rate limit may be exhausted".to_string(),
@@ -148,13 +156,14 @@ fn fetch_json(url: &str) -> Result<Vec<u8>> {
         }
         Err(err) => return Err(Error::new(format!("release lookup {url}: {err}"))),
     };
-    let status = response.status();
+    let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(Error::new(format!("release lookup {url}: status {status}")));
     }
     let cap = 1024 * 1024;
     let mut buf = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(cap + 1)
         .read_to_end(&mut buf)
@@ -166,23 +175,19 @@ fn fetch_json(url: &str) -> Result<Vec<u8>> {
 }
 
 fn download_file(url: &str, dest: &Path, cap: u64) -> Result<()> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(FETCH_TIMEOUT)
-        .timeout_read(FETCH_TIMEOUT)
-        .timeout_write(FETCH_TIMEOUT)
-        .build();
+    let agent = fetch_agent();
     let response = match agent.get(url).call() {
         Ok(response) => response,
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             return Err(Error::new(format!("download {url}: status {code}")))
         }
         Err(err) => return Err(Error::new(format!("download {url}: {err}"))),
     };
-    let status = response.status();
+    let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(Error::new(format!("download {url}: status {status}")));
     }
-    let mut reader = response.into_reader().take(cap + 1);
+    let mut reader = response.into_body().into_reader().take(cap + 1);
     let mut file = fs::File::create(dest)
         .map_err(|err| Error::new(format!("failed to create {}: {err}", dest.display())))?;
     let written = std::io::copy(&mut reader, &mut file)

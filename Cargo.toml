@@ -1,6 +1,6 @@
 [package]
 name = "ahi"
-description = "Fail-closed pre-commit runner with a terminal chat for OpenAI and OpenAI-compatible gateways. Runs offline builtin checks from ahi.hooks.yaml; streams model replies with tool policy defined by ahi.policy.yaml."
+description = "Offline pre-commit runner, terminal chat, and development container launcher. Builtin checks and approved local hooks run from .pre-commit-config.yaml and ahi.hooks.yaml; chat tools (read, search, edit, write, run) are gated by ahi.tools.yaml; ahi dev opens the project in a container."
 keywords = ["pre-commit", "git-hooks", "tui", "chat", "openai"]
 categories = ["development-tools", "command-line-utilities"]
 version = "0.11.0"
@@ -24,26 +24,25 @@ path = "src/main.rs"
 
 # Exact pins. Caret ranges resolve to releases whose MSRV is above 1.88.
 [dependencies]
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 clap = { version = "=4.5.23", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.10"
 getrandom = "=0.2.16"
 quick-xml = "=0.41.0"
 # 0.30.0 is the release that no longer depends on the unmaintained paste crate.
-ratatui = "=0.30.0"
+ratatui = { version = "=0.30.0", default-features = false, features = ["crossterm"] }
 regex = "=1.11.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.134", features = ["preserve_order"] }
 serde_yaml = "=0.9.34"
 sha2 = "=0.10.8"
 tar = "=0.4.46"
-thiserror = "=1.0.69"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
 toml = "=0.8.23"
 unicode-segmentation = "=1.12.0"
 unicode-width = "=0.2.0"
-ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
 yaml-rust2 = "=0.10.0"
 
 # In-repo Win32 clipboard; the only crate in the workspace with unsafe code.

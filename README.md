@@ -1,6 +1,6 @@
 # ahi
 
-`ahi` is a Rust library and command-line tool with two jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration file (`.pre-commit-config.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model call read-only workspace tools only where an `ahi.tools.yaml` rule approves them.
+`ahi` is a Rust library and command-line tool with three jobs. As a hook runner it reads the [pre-commit](https://pre-commit.com/) configuration file (`.pre-commit-config.yaml`) and runs fast, offline checks: it parses that config, filters files the way pre-commit does, and executes checks compiled into the binary. It does not download runtimes, and it does not clone or run someone else's hook repository. As a terminal chat (`ahi tui`) it signs in to OpenAI with the browser, registers OpenAI-compatible gateways from `models.json`, curates their models, streams replies, and lets the model read, search, edit, create, and run commands in the working directory only where an `ahi.tools.yaml` rule approves each one. As a development container launcher (`ahi dev`) it opens the working directory in a published image through podman or docker.
 
 ## Installation
 
@@ -114,7 +114,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi migrate`](#ahi-migrate) | Suggest an ahi config from an existing `.pre-commit-config.yaml`. |
 | [`ahi hooks install`, `ahi hooks uninstall`](#ahi-hooks) | Hook shim commands; not implemented, exit 1. |
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
-| [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read-only tools. |
+| [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 | [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
@@ -174,7 +174,7 @@ It also prints the environment names a local hook receives by default; see the t
 
 ### ahi doctor
 
-Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, policy summary. Sandbox detection is not in v0.1.
+Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, hook policy summary, the container runtime `ahi dev` would use, and the sandbox backend `ahi sandbox check` detects.
 
 It warns about any ahi directory or file that other users can read; see [Files and directories](#files-and-directories).
 

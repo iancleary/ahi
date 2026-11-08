@@ -57,7 +57,7 @@ pub(crate) fn inference_response(
     state: &Path,
     body: &[u8],
     client: &ureq::Agent,
-) -> Result<ureq::Response> {
+) -> Result<ureq::http::Response<ureq::Body>> {
     inference_response_at(state, body, INFERENCE_URL, OPENAI_TOKEN, client)
 }
 
@@ -67,11 +67,12 @@ pub(crate) fn fixture_inference_response(
     body: &[u8],
     inference_url: &str,
     token_url: &str,
-) -> Result<ureq::Response> {
-    let client = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(Duration::from_secs(120))
-        .build();
+) -> Result<ureq::http::Response<ureq::Body>> {
+    let client = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(120)))
+        .build()
+        .new_agent();
     inference_response_at(state, body, inference_url, token_url, &client)
 }
 
@@ -81,22 +82,22 @@ fn inference_response_at(
     inference_url: &str,
     token_url: &str,
     client: &ureq::Agent,
-) -> Result<ureq::Response> {
+) -> Result<ureq::http::Response<ureq::Body>> {
     authenticated(state, token_url, |token| {
         match client
             .post(inference_url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "text/event-stream")
-            .set("Authorization", &format!("Bearer {token}"))
-            .send_bytes(body)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("Authorization", format!("Bearer {token}"))
+            .send(body)
         {
-            Ok(response) if response.status() == 200 => Ok(response),
+            Ok(response) if response.status().as_u16() == 200 => Ok(response),
             Ok(response) => Err(FetchError::Other(status_error(
                 "inference",
-                response.status(),
+                response.status().as_u16(),
             ))),
-            Err(ureq::Error::Status(401, _)) => Err(FetchError::Unauthorized),
-            Err(ureq::Error::Status(status, _)) => {
+            Err(ureq::Error::StatusCode(401)) => Err(FetchError::Unauthorized),
+            Err(ureq::Error::StatusCode(status)) => {
                 Err(FetchError::Other(status_error("inference", status)))
             }
             Err(_) => Err(FetchError::Other(Error::transport(
@@ -177,25 +178,26 @@ impl FetchError {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(FETCH_TIMEOUT)
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .timeout_global(Some(FETCH_TIMEOUT))
         .build()
+        .new_agent()
 }
 
 fn fetch_models(url: &str, token: &str) -> std::result::Result<Vec<String>, FetchError> {
     let response = match agent()
         .get(url)
-        .set("Accept", "application/json")
-        .set("Authorization", &format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
         .call()
     {
         Ok(response) => response,
-        Err(ureq::Error::Status(401, _)) => return Err(FetchError::Unauthorized),
-        Err(ureq::Error::Status(403, _)) => {
+        Err(ureq::Error::StatusCode(401)) => return Err(FetchError::Unauthorized),
+        Err(ureq::Error::StatusCode(403)) => {
             return Err(FetchError::Other(Error::new(CATALOG_FORBIDDEN)))
         }
-        Err(ureq::Error::Status(status, _)) => {
+        Err(ureq::Error::StatusCode(status)) => {
             return Err(FetchError::Other(status_error("catalog", status)))
         }
         Err(_) => {
@@ -204,13 +206,13 @@ fn fetch_models(url: &str, token: &str) -> std::result::Result<Vec<String>, Fetc
             )))
         }
     };
-    if !(200..300).contains(&response.status()) {
+    if !(200..300).contains(&response.status().as_u16()) {
         return Err(FetchError::Other(status_error(
             "catalog",
-            response.status(),
+            response.status().as_u16(),
         )));
     }
-    let bytes = bounded_read(response.into_reader()).map_err(FetchError::Other)?;
+    let bytes = bounded_read(response.into_body().into_reader()).map_err(FetchError::Other)?;
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Response {
@@ -275,17 +277,17 @@ fn request_token(url: &str, fields: &[(&str, &str)]) -> Result<Value> {
         .join("&");
     let response = agent()
         .post(url)
-        .set("Accept", "application/json")
-        .set("Content-Type", "application/x-www-form-urlencoded")
-        .send_string(&body)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(body.as_str())
         .map_err(|error| match error {
-            ureq::Error::Status(status, _) => status_error("token request", status),
+            ureq::Error::StatusCode(status) => status_error("token request", status),
             _ => Error::new("OpenAI token request network or TLS error"),
         })?;
-    if !(200..300).contains(&response.status()) {
-        return Err(status_error("token request", response.status()));
+    if !(200..300).contains(&response.status().as_u16()) {
+        return Err(status_error("token request", response.status().as_u16()));
     }
-    serde_json::from_slice(&bounded_read(response.into_reader())?)
+    serde_json::from_slice(&bounded_read(response.into_body().into_reader())?)
         .map_err(|_| Error::new("invalid OpenAI token response"))
 }
 
@@ -1099,7 +1101,9 @@ mod tests {
         );
         let requests = requests.join().unwrap();
         assert!(requests[0].starts_with("GET /v1/models HTTP/1.1"));
-        assert!(requests[0].contains("Authorization: Bearer fixture-secret\r\n"));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer fixture-secret\r\n"));
         assert!(!requests[0]
             .to_ascii_lowercase()
             .contains("chatgpt-account-id"));
@@ -1139,7 +1143,9 @@ mod tests {
         let requests = requests.join().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with("GET /v1/models HTTP/1.1"));
-        assert!(requests[0].contains("Authorization: Bearer fixture-secret\r\n"));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer fixture-secret\r\n"));
         assert!(!requests[0]
             .to_ascii_lowercase()
             .contains("chatgpt-account-id"));
@@ -1171,7 +1177,9 @@ mod tests {
         ] {
             assert!(requests[1].contains(field));
         }
-        assert!(requests[2].contains("Authorization: Bearer new-secret"));
+        assert!(requests[2]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer new-secret"));
         assert_eq!(
             read_credential(&dir).unwrap().refresh_token,
             "rotated-secret"
@@ -1218,7 +1226,9 @@ mod tests {
                 );
                 let inference = &requests[token_index + 1];
                 assert!(inference.starts_with("POST /responses"));
-                assert!(inference.contains("Authorization: Bearer new-secret"));
+                assert!(inference
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer new-secret"));
                 assert!(inference.ends_with("{\"store\":false}"));
                 assert_eq!(
                     read_credential(&dir).unwrap().refresh_token,

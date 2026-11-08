@@ -54,10 +54,11 @@ impl HttpBackend {
             workspace: None,
             actions: None,
             grants: SessionGrants::default(),
-            agent: ureq::AgentBuilder::new()
-                .redirects(0)
-                .timeout(Duration::from_secs(120))
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .max_redirects(0)
+                .timeout_global(Some(Duration::from_secs(120)))
+                .build()
+                .new_agent(),
             cancel: Arc::new(AtomicBool::new(false)),
             worker: None,
         }
@@ -298,7 +299,7 @@ fn send(
     body: &[u8],
     sender: &Sender<ResponseEvent>,
     cancel: &Arc<AtomicBool>,
-) -> Result<ureq::Response> {
+) -> Result<ureq::http::Response<ureq::Body>> {
     match &connection.transport {
         CompletionTransport::OpenAiResponses => {
             crate::harness::inference_response(&state.data, body, agent)
@@ -308,19 +309,19 @@ fn send(
             loop {
                 let mut call = agent
                     .post(url)
-                    .set("Content-Type", "application/json")
-                    .set("Accept", "text/event-stream");
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream");
                 for (name, value) in headers {
-                    call = call.set(name, value);
+                    call = call.header(name, value);
                 }
-                match call.send_bytes(body) {
-                    Ok(response) if response.status() == 200 => return Ok(response),
-                    Ok(response) => return Err(http_error(response.status())),
-                    Err(ureq::Error::Status(status, _)) => return Err(http_error(status)),
+                match call.send(body) {
+                    Ok(response) if response.status().as_u16() == 200 => return Ok(response),
+                    Ok(response) => return Err(http_error(response.status().as_u16())),
+                    Err(ureq::Error::StatusCode(status)) => return Err(http_error(status)),
                     // DNS and connection failures never reached the server, so
                     // another attempt cannot bill twice. Anything else might
                     // have, and is not retried.
-                    Err(ureq::Error::Transport(transport)) if unreachable(transport.kind()) => {
+                    Err(error) if unreachable(&error) => {
                         if attempt >= CONNECT_ATTEMPTS {
                             return Err(Error::transport(format!(
                                 "cannot reach the gateway after {CONNECT_ATTEMPTS} connection attempts (DNS or connection failure); check its baseUrl and that it is running"
@@ -349,11 +350,24 @@ fn send(
     }
 }
 
-fn unreachable(kind: ureq::ErrorKind) -> bool {
-    matches!(
-        kind,
-        ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::ProxyConnect
-    )
+/// Failures that happen before any byte reaches the server, so a retry
+/// cannot cause a second billed request.
+fn unreachable(error: &ureq::Error) -> bool {
+    use std::io::ErrorKind;
+    match error {
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Timeout(timeout) => matches!(timeout, ureq::Timeout::Connect),
+        ureq::Error::Io(io) => matches!(
+            io.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::NotConnected
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::HostUnreachable
+        ),
+        _ => false,
+    }
 }
 
 /// Park through a backoff. `cancel` sets the flag and unparks this thread,
@@ -383,12 +397,17 @@ fn http_error(status: u16) -> Error {
 fn decode(
     protocol: Protocol,
     metadata: &crate::harness::ModelMetadata,
-    response: ureq::Response,
+    response: ureq::http::Response<ureq::Body>,
     sender: &Sender<ResponseEvent>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<StreamOutcome> {
-    let status = response.status();
-    let media_type = media_type_category(response.header("Content-Type"));
+    let status = response.status().as_u16();
+    let media_type = media_type_category(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+    );
     if status != 200 {
         return Err(Error::transport(format!(
             "model inference failed (HTTP {status}; Content-Type: {media_type})"
@@ -398,7 +417,7 @@ fn decode(
         return Err(Error::protocol("model response must be text/event-stream"));
     }
     let reader = CancelReader {
-        inner: response.into_reader(),
+        inner: response.into_body().into_reader(),
         cancel: Arc::clone(cancel),
     };
     protocol::read_stream(protocol, reader, sender, metadata).map_err(|error| {
