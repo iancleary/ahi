@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.0 (2026-11-07)
+
 ### Added
 
 - Chat transcript formatting ([#52](https://github.com/iancleary/ahi/issues/52)). Assistant text renders a markdown subset (headings, emphasis, inline and fenced code with a `copy` affordance, lists, quotes, rules, links, tables) with in-repo per-line syntax highlighting for eleven languages; `/plain` shows text as written. Tool results open with one header grammar, `tool target · summary · duration`: `edit_file`/`write_file` show a unified diff with red/green backgrounds and word-level emphasis, `run_command` shows the approved argv with `stdout`/`stderr` blocks, and `search_files` rows are clickable `path:line` references. URLs and workspace file references are underlined; a click (or `Enter` in keyboard selection) opens a URL in the browser or a file in the editor chosen by `/editor` (`code`, `cursor`, `zed`, `subl`, `idea`, or an argv template), with `$AHI_EDITOR`, `$VISUAL`, `$EDITOR`, then `code` on `PATH` as defaults. The activity line counts the turn's elapsed time, each tool header carries its call's duration, and a completed turn ends with a right-aligned footer `done in 1m 12s · 14:02` in local time from a TZif reader (`/clock utc` for UTC). Selections copy rendered text by default; `Y` or `/copy raw` copies the model's markdown source. A fresh transcript opens with a text wordmark header showing the version, model, thinking level, and workspace. Preferences persist in `<state>/preferences`. No new dependencies: the markdown parser, lexers, Myers diff, link scanner, and TZif reader are in-repo modules with tests.
