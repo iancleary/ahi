@@ -18,7 +18,7 @@ mod scroll_navigation;
 mod selection;
 mod status;
 mod thinking;
-mod transcript;
+pub(crate) mod transcript;
 mod usage;
 
 use std::path::Path;

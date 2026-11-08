@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi tools init` paints each rule in a terminal with the chat's colors for its outcome: approve green, ask gray, deny red, the same backgrounds the transcript uses for added and removed diff lines, with a legend. `--color never` prints plain text, `auto` honours `NO_COLOR`, and the written file is always plain. This is the first command to use `--color`, which was validated and ignored before.
+
+### Changed
+
+- `ahi tools --help` and `ahi tools init --help` state the confinement: every tool is confined to the working directory, rule paths are relative to it, absolute paths, `..`, and symbolic links are refused, `run_command` runs only inside it, and no rule can widen access above it.
+
 ## 0.14.0 (2026-11-08)
 
 ### Added

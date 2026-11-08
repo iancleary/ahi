@@ -103,7 +103,7 @@ A repository can carry up to four ahi-related files, one per job. The two allowl
 
 ## Commands
 
-Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME` and `XDG_CACHE_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR` and keeps every ahi directory under one root, and `--color auto|always|never` is validated but this version prints plain text either way.
+Every subcommand also accepts global flags: `-c/--config <path>` selects the config file, `--cache-dir <dir>` overrides `AHI_HOME` and `XDG_CACHE_HOME`, `--state-dir <dir>` overrides `AHI_STATE_DIR` and keeps every ahi directory under one root, and `--color auto|always|never` controls color, which only `ahi tools init` uses so far (`auto` colors a terminal unless `NO_COLOR` is set).
 
 | Command | Summary |
 | --- | --- |
@@ -197,7 +197,7 @@ Installation and the manual verification steps are under [Installation](#install
 
 ### ahi tools
 
-Tools in the chat are off until the directory `ahi tui` starts in has an `ahi.tools.yaml` with an approve rule. `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere, with the root `.env` denied) and, like `ahi migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy and `ahi tools list` names them with what each lets the model do. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves.
+Tools in the chat are off until the directory `ahi tui` starts in has an `ahi.tools.yaml` with an approve rule. `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere, with the root `.env` denied) and, like `ahi migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy and `ahi tools list` names them with what each lets the model do. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves. In a terminal, `init` paints each rule with the chat's colors for its outcome, green for approve, gray for ask, red for deny, with a legend; `--color never` prints plain text and the written file is always plain. Every tool is confined to the working directory: rule paths are relative to it, absolute paths, `..`, and symbolic links are refused before any read, write, or command, and `run_command` runs only in a directory inside it, so a rule's `path` narrows access and can never reach above the working directory.
 
 ### ahi tui
 

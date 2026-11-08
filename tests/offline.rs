@@ -601,3 +601,23 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
     assert!(report.contains("tools policy: absent"), "{report}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn tools_init_colors_only_when_asked_on_a_pipe() {
+    let dir = fixture_directory::create_unique_fixture_directory("tools-init-color");
+    let plain = run(&dir, &["tools", "init"]);
+    let plain_out = String::from_utf8(plain.stdout).unwrap();
+    assert!(!plain_out.contains("\x1b["), "{plain_out}");
+    let colored = run(&dir, &["--color", "always", "tools", "init", "--write"]);
+    let colored_out = String::from_utf8(colored.stdout).unwrap();
+    assert!(colored_out.contains("\x1b[48;2;"), "{colored_out}");
+    assert!(colored_out.contains("approve"), "{colored_out}");
+    // The file on disk is never colored.
+    assert_eq!(
+        fs::read_to_string(dir.join("ahi.tools.yaml")).unwrap(),
+        example("tools/read-all.yaml")
+    );
+    let never = run(&dir, &["--color", "never", "tools", "list"]);
+    assert!(!String::from_utf8(never.stdout).unwrap().contains("\x1b["));
+    let _ = fs::remove_dir_all(&dir);
+}

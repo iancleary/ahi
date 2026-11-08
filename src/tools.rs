@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use crate::chat::backend::tools::BUILTIN;
+use crate::chat::transcript::theme;
 use crate::error::Result;
 use crate::tool_policy::{self, Effect};
 
@@ -92,6 +93,110 @@ pub fn render_list() -> String {
         };
         out.push_str(&format!("{:width$}  {}{default}\n", e.name, e.summary));
     }
+    out
+}
+
+/// How `init` paints a rule, by its outcome for the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Approve,
+    Ask,
+    Deny,
+}
+
+impl Outcome {
+    fn background(self) -> (u8, u8, u8) {
+        match self {
+            Outcome::Approve => theme::APPROVE_BG,
+            Outcome::Ask => theme::ASK_BG,
+            Outcome::Deny => theme::DENY_BG,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Outcome::Approve => "approve",
+            Outcome::Ask => "ask",
+            Outcome::Deny => "deny",
+        }
+    }
+}
+
+/// Whether `line` starts a rule in a `rules:` list.
+fn starts_rule(line: &str) -> bool {
+    line.trim_start().starts_with("- id:")
+}
+
+/// Whether `line` continues the rule begun above it: deeper indentation,
+/// not a comment at the list's own indentation.
+fn continues_rule(line: &str) -> bool {
+    let indent = line.len() - line.trim_start().len();
+    !line.trim().is_empty() && indent >= 4 && !line.trim_start().starts_with('#')
+}
+
+/// Read a rule's outcome from its lines. A rule the parser would reject
+/// still gets a color here; the parse is the chat screen's job.
+fn outcome(block: &[&str]) -> Outcome {
+    let has = |key: &str| {
+        block
+            .iter()
+            .any(|line| line.trim_start().trim_start_matches("- ").starts_with(key))
+    };
+    if has("effect: deny") {
+        Outcome::Deny
+    } else if has("ask: true") {
+        Outcome::Ask
+    } else {
+        Outcome::Approve
+    }
+}
+
+fn paint(line: &str, width: usize, (r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b[48;2;{r};{g};{b}m{line:<width$}\x1b[0m")
+}
+
+/// The policy text for `init`. With `color`, every rule's lines carry a
+/// background the transcript uses for the same outcome (deny like a removed
+/// diff line, approve like an added one, ask in gray), padded to the widest
+/// line so each rule reads as one block, and a legend follows. Comments and
+/// the header keep the terminal's colors. Without `color` the text is the
+/// file exactly.
+pub fn render_policy(text: &str, color: bool) -> String {
+    if !color {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let mut out = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if !starts_rule(lines[index]) {
+            out.push_str(lines[index]);
+            out.push('\n');
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < lines.len() && continues_rule(lines[index]) {
+            index += 1;
+        }
+        let block = &lines[start..index];
+        let background = outcome(block).background();
+        for line in block {
+            out.push_str(&paint(line, width, background));
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    let legend: Vec<String> = [Outcome::Approve, Outcome::Ask, Outcome::Deny]
+        .iter()
+        .map(|o| paint(&format!(" {} ", o.label()), 0, o.background()))
+        .collect();
+    out.push_str(&format!(
+        "{}  the model gets the call, is asked in chat first, or is refused\n",
+        legend.join(" ")
+    ));
     out
 }
 
@@ -205,6 +310,43 @@ mod tests {
         for rule in &root.rules[shared..] {
             assert_eq!(rule.action, tool_policy::ActionKind::Command, "{}", rule.id);
         }
+    }
+
+    #[test]
+    fn render_policy_paints_each_rule_by_outcome_and_leaves_comments_plain() {
+        let text = example("commands").unwrap().text;
+        assert_eq!(render_policy(text, false), text);
+        let painted = render_policy(text, true);
+        let bg = |(r, g, b): (u8, u8, u8)| format!("\x1b[48;2;{r};{g};{b}m");
+        let line_with = |needle: &str| {
+            painted
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}"))
+                .to_string()
+        };
+        assert!(line_with("id: no-env").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("match: {tool: read_file, path: .env}").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("id: cargo-check").starts_with(&bg(theme::APPROVE_BG)));
+        assert!(line_with("toolchain_env: [CARGO_TARGET_DIR]").starts_with(&bg(theme::APPROVE_BG)));
+        assert!(line_with("id: cargo-other").starts_with(&bg(theme::ASK_BG)));
+        assert!(line_with("id: no-publish").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("# Reads anywhere").starts_with("# Reads"));
+        assert!(line_with("version: 1").starts_with("version: 1"));
+        assert!(painted.lines().last().unwrap().contains("approve"));
+        // The repository policy's section comments sit between rules and
+        // stay unpainted; every rule still gets its own outcome.
+        let root = render_policy(include_str!("../ahi.tools.yaml"), true);
+        let section = root
+            .lines()
+            .find(|l| l.contains("Repository commands"))
+            .unwrap();
+        assert!(section.starts_with("  #"), "{section}");
+        assert!(root
+            .lines()
+            .find(|l| l.contains("id: no-git-push"))
+            .unwrap()
+            .starts_with(&bg(theme::DENY_BG)));
     }
 
     #[test]
