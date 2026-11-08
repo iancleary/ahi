@@ -27,21 +27,21 @@ pub(crate) fn discover_gateway(text: &str) -> Result<DiscoveredGateway> {
     {
         return Err(Error::new("enter a URL without whitespace, backslashes, or control characters (maximum 8192 bytes)"));
     }
-    let request = ureq::get(text)
-        .request_url()
+    let url = super::parse_http_url(text)
         .map_err(|_| Error::new("enter a valid HTTP or HTTPS gateway base URL"))?;
-    let url = request.as_url();
-    if !url.username().is_empty() || url.password().is_some() || text.contains('@') {
+    // `http::Uri` keeps userinfo inside the authority; `@` anywhere in the
+    // text is refused outright, so no credential can ride along.
+    if text.contains('@') {
         return Err(Error::new(
             "gateway URL must not contain userinfo or credentials",
         ));
     }
-    if url.query().is_some() || url.fragment().is_some() {
+    if url.query().is_some() || text.contains('#') {
         return Err(Error::new(
             "gateway URL must not contain a query or fragment",
         ));
     }
-    let base_url = url.as_str().trim_end_matches('/').to_string();
+    let base_url = text.trim_end_matches('/').to_string();
     origin_of(&base_url)?;
     let catalog = fetch_gateway_catalog(&base_url, None)?;
     let base_url = catalog.base_url.clone();

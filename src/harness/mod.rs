@@ -732,13 +732,9 @@ fn fetch_gateway_catalog(base_url: &str, registered: Option<&str>) -> Result<Gat
     let catalog: Catalog = serde_json::from_value(document).map_err(|_| Error::new("invalid gateway catalog schema or provider compat (expected openai-completions, apiKey, model objects and supported compatibility fields)"))?;
     let inference_url = catalog.base_url.as_deref().unwrap_or(base_url);
     validate_inference_url(inference_url)?;
-    let input_url = ureq::get(base_url)
-        .request_url()
-        .map_err(|_| Error::new("invalid gateway URL"))?;
-    let returned_url = ureq::get(inference_url)
-        .request_url()
-        .map_err(|_| Error::new("invalid catalog baseUrl"))?;
-    if input_url.as_url().origin() != returned_url.as_url().origin() {
+    parse_http_url(base_url).map_err(|_| Error::new("invalid gateway URL"))?;
+    parse_http_url(inference_url).map_err(|_| Error::new("invalid catalog baseUrl"))?;
+    if origin_of(base_url)? != origin_of(inference_url)? {
         return Err(Error::new(
             "catalog baseUrl must have the same origin as the entered gateway URL",
         ));
@@ -788,30 +784,27 @@ fn http_get(url: &str) -> Result<Vec<u8>> {
 /// Bounded JSON GET. With headers, the response is authenticated and its
 /// error text can carry upstream content, so transport errors are generic.
 fn http_get_with_headers(url: &str, headers: &BTreeMap<String, String>) -> Result<Vec<u8>> {
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(FETCH_TIMEOUT)
-        .timeout_read(FETCH_TIMEOUT)
-        .timeout_write(FETCH_TIMEOUT)
-        .build();
-    let mut request = agent.get(url).set("Accept", "application/json");
+    let agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .timeout_connect(Some(FETCH_TIMEOUT))
+        .timeout_send_request(Some(FETCH_TIMEOUT))
+        .timeout_recv_response(Some(FETCH_TIMEOUT))
+        .timeout_recv_body(Some(FETCH_TIMEOUT))
+        .build()
+        .new_agent();
+    let mut request = agent.get(url).header("Accept", "application/json");
     for (name, value) in headers {
-        request = request.set(name, value);
+        request = request.header(name, value);
     }
     let authenticated = !headers.is_empty();
     let response = match request.call() {
         Ok(response) => response,
-        Err(ureq::Error::Status(code, _)) if (300..400).contains(&code) => {
-            return Err(Error::transport(format!(
-                "redirects are not followed ({code} from {url})"
-            )));
-        }
-        Err(ureq::Error::Status(401 | 403, _)) if authenticated => {
+        Err(ureq::Error::StatusCode(401 | 403)) if authenticated => {
             return Err(Error::auth(format!(
                 "catalog fetch {url}: authentication rejected; check the configured key"
             )));
         }
-        Err(ureq::Error::Status(code, _)) if authenticated => {
+        Err(ureq::Error::StatusCode(code)) if authenticated => {
             return Err(Error::transport(format!(
                 "catalog fetch {url}: status {code}"
             )));
@@ -823,20 +816,21 @@ fn http_get_with_headers(url: &str, headers: &BTreeMap<String, String>) -> Resul
         }
         Err(err) => return Err(Error::new(format!("catalog fetch {url}: {err}"))),
     };
-    if (300..400).contains(&response.status()) {
+    if (300..400).contains(&response.status().as_u16()) {
         return Err(Error::new(format!(
             "redirects are not followed ({} from {url})",
-            response.status()
+            response.status().as_u16()
         )));
     }
-    if !(200..300).contains(&response.status()) {
+    if !(200..300).contains(&response.status().as_u16()) {
         return Err(Error::new(format!(
             "catalog fetch {url}: status {}",
-            response.status()
+            response.status().as_u16()
         )));
     }
     let mut buf = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(BODY_CAP + 1)
         .read_to_end(&mut buf)
@@ -1045,12 +1039,25 @@ fn validate_inference_url(url: &str) -> Result<()> {
             "baseUrl must be an HTTP(S) URL without credentials, whitespace, query or fragment",
         ));
     }
-    ureq::get(url)
-        .request_url()
-        .map_err(|_| Error::new("invalid inference baseUrl"))?;
+    parse_http_url(url).map_err(|_| Error::new("invalid inference baseUrl"))?;
     origin_of(url)
         .map(|_| ())
         .map_err(|_| Error::new("baseUrl requires HTTPS or loopback HTTP"))
+}
+
+/// Parse an absolute `http` or `https` URL. `http::Uri` rejects whitespace,
+/// control characters, and `#`, and this check adds the scheme and host
+/// requirements; callers inspect userinfo and query on the result.
+pub(crate) fn parse_http_url(text: &str) -> std::result::Result<ureq::http::Uri, ()> {
+    let uri: ureq::http::Uri = text.parse().map_err(|_| ())?;
+    match uri.scheme_str() {
+        Some("http") | Some("https") => {}
+        _ => return Err(()),
+    }
+    if uri.host().is_none_or(str::is_empty) {
+        return Err(());
+    }
+    Ok(uri)
 }
 
 fn origin_of(base_url: &str) -> Result<String> {

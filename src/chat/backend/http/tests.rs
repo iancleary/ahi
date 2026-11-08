@@ -649,9 +649,11 @@ fn gateway_streams_model_text_and_real_usage_with_conversation_history() {
     assert!(headers
         .to_ascii_lowercase()
         .contains("authorization: bearer gateway\r\n"));
-    assert!(headers
-        .to_ascii_lowercase()
-        .contains("x-gateway: gateway\r\n"));
+    // The last header line has no trailing CRLF after the split.
+    assert!(
+        format!("{}\r\n", headers.to_ascii_lowercase()).contains("x-gateway: gateway\r\n"),
+        "{headers}"
+    );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(body).unwrap(),
         json!({
