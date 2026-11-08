@@ -6,7 +6,8 @@
 //! upstream `migrate-config` (it does not rewrite `sha`, `python_venv`, or
 //! legacy stage names).
 
-use serde_yaml::{Mapping, Value};
+use yaml_rust2::yaml::{Hash, Yaml};
+use yaml_rust2::YamlEmitter;
 
 use crate::error::{Error, Result};
 use crate::hooks::policy;
@@ -237,9 +238,8 @@ impl Notes {
 
 pub fn suggest(src: &str, origin: &str) -> Result<Suggestion> {
     check_config_yaml(src, origin)?;
-    let value: Value =
-        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
-    let Some(root) = value.as_mapping() else {
+    let value = crate::yaml_safe::load_single(src, origin)?;
+    let Some(root) = value.as_hash() else {
         let mut notes = Notes::default();
         notes.skip(
             origin,
@@ -253,12 +253,12 @@ pub fn suggest(src: &str, origin: &str) -> Result<Suggestion> {
     let mut notes = Notes::default();
     let mut builtin_hooks = Vec::new();
     let mut local_hooks = Vec::new();
-    let repos_key = Value::String("repos".to_string());
-    let Some(repos) = root.get(&repos_key).and_then(Value::as_sequence) else {
+    let repos_key = Yaml::String("repos".to_string());
+    let Some(repos) = root.get(&repos_key).and_then(Yaml::as_vec) else {
         return Err(Error::new(format!("{origin}: config has no repos")));
     };
     for repo in repos {
-        let Some(map) = repo.as_mapping() else {
+        let Some(map) = repo.as_hash() else {
             notes.skip("a repo entry", "not a mapping");
             continue;
         };
@@ -270,16 +270,16 @@ pub fn suggest(src: &str, origin: &str) -> Result<Suggestion> {
 }
 
 fn classify_repo(
-    map: &Mapping,
-    builtin_hooks: &mut Vec<Value>,
-    local_hooks: &mut Vec<Value>,
+    map: &Hash,
+    builtin_hooks: &mut Vec<Yaml>,
+    local_hooks: &mut Vec<Yaml>,
     notes: &mut Notes,
 ) {
     let url = mapping_str(map, "repo").unwrap_or_default();
     let rev = mapping_str(map, "rev").unwrap_or_default();
     let hooks = map
-        .get(Value::String("hooks".to_string()))
-        .and_then(Value::as_sequence);
+        .get(&Yaml::String("hooks".to_string()))
+        .and_then(Yaml::as_vec);
     let Some(hooks) = hooks else {
         notes.skip(format!("repo {url}"), "has no hooks");
         return;
@@ -298,7 +298,7 @@ fn classify_repo(
         "meta" => {
             for hook in hooks {
                 let id = hook
-                    .as_mapping()
+                    .as_hash()
                     .and_then(|hook| mapping_str(hook, "id"))
                     .unwrap_or_else(|| "(missing id)".to_string());
                 notes.skip(id, "repo: meta hooks are not executed by ahi");
@@ -318,8 +318,8 @@ fn classify_repo(
     }
 }
 
-fn copy_builtin_already(hook: &Value, builtin_hooks: &mut Vec<Value>, notes: &mut Notes) {
-    let Some(map) = hook.as_mapping() else {
+fn copy_builtin_already(hook: &Yaml, builtin_hooks: &mut Vec<Yaml>, notes: &mut Notes) {
+    let Some(map) = hook.as_hash() else {
         notes.skip("a builtin hook entry", "not a mapping");
         return;
     };
@@ -340,13 +340,13 @@ fn copy_builtin_already(hook: &Value, builtin_hooks: &mut Vec<Value>, notes: &mu
 }
 
 fn copy_remote(
-    hook: &Value,
+    hook: &Yaml,
     url: &str,
     rev: &str,
-    builtin_hooks: &mut Vec<Value>,
+    builtin_hooks: &mut Vec<Yaml>,
     notes: &mut Notes,
 ) {
-    let Some(map) = hook.as_mapping() else {
+    let Some(map) = hook.as_hash() else {
         notes.skip(format!("a hook from {url}"), "not a mapping");
         return;
     };
@@ -382,8 +382,8 @@ fn copy_remote(
     builtin_hooks.push(copy_fields(map, known.builtin_id, BUILTIN_COPY));
 }
 
-fn copy_local(hook: &Value, local_hooks: &mut Vec<Value>, notes: &mut Notes) {
-    let Some(map) = hook.as_mapping() else {
+fn copy_local(hook: &Yaml, local_hooks: &mut Vec<Yaml>, notes: &mut Notes) {
+    let Some(map) = hook.as_hash() else {
         notes.skip("a local hook entry", "not a mapping");
         return;
     };
@@ -448,10 +448,10 @@ fn carries_local(language: &str) -> bool {
     )
 }
 
-fn legacy_stage_in(map: &Mapping) -> Option<String> {
+fn legacy_stage_in(map: &Hash) -> Option<String> {
     let stages = map
-        .get(Value::String("stages".to_string()))
-        .and_then(Value::as_sequence)?;
+        .get(&Yaml::String("stages".to_string()))
+        .and_then(Yaml::as_vec)?;
     for stage in stages {
         let Some(stage) = stage.as_str() else {
             continue;
@@ -463,62 +463,58 @@ fn legacy_stage_in(map: &Mapping) -> Option<String> {
     None
 }
 
-fn copy_fields(map: &Mapping, id: &str, keys: &[&str]) -> Value {
-    let mut out = Mapping::new();
-    out.insert(
-        Value::String("id".to_string()),
-        Value::String(id.to_string()),
-    );
+fn copy_fields(map: &Hash, id: &str, keys: &[&str]) -> Yaml {
+    let mut out = Hash::new();
+    out.insert(Yaml::String("id".to_string()), Yaml::String(id.to_string()));
     for key in keys {
         if *key == "id" {
             continue;
         }
-        if let Some(value) = map.get(Value::String((*key).to_string())) {
-            out.insert(Value::String((*key).to_string()), value.clone());
+        if let Some(value) = map.get(&Yaml::String((*key).to_string())) {
+            out.insert(Yaml::String((*key).to_string()), value.clone());
         }
     }
-    Value::Mapping(out)
+    Yaml::Hash(out)
 }
 
-fn render_suggested(
-    root: &Mapping,
-    builtin_hooks: &[Value],
-    local_hooks: &[Value],
-) -> Result<String> {
-    let mut out = Mapping::new();
+fn render_suggested(root: &Hash, builtin_hooks: &[Yaml], local_hooks: &[Yaml]) -> Result<String> {
+    let mut out = Hash::new();
     for key in TOP_LEVEL {
-        if let Some(value) = root.get(Value::String((*key).to_string())) {
-            out.insert(Value::String((*key).to_string()), value.clone());
+        if let Some(value) = root.get(&Yaml::String((*key).to_string())) {
+            out.insert(Yaml::String((*key).to_string()), value.clone());
         }
     }
     let mut repos = Vec::new();
     if !builtin_hooks.is_empty() {
-        let mut repo = Mapping::new();
+        let mut repo = Hash::new();
         repo.insert(
-            Value::String("repo".to_string()),
-            Value::String("builtin".to_string()),
+            Yaml::String("repo".to_string()),
+            Yaml::String("builtin".to_string()),
         );
         repo.insert(
-            Value::String("hooks".to_string()),
-            Value::Sequence(builtin_hooks.to_vec()),
+            Yaml::String("hooks".to_string()),
+            Yaml::Array(builtin_hooks.to_vec()),
         );
-        repos.push(Value::Mapping(repo));
+        repos.push(Yaml::Hash(repo));
     }
     if !local_hooks.is_empty() {
-        let mut repo = Mapping::new();
+        let mut repo = Hash::new();
         repo.insert(
-            Value::String("repo".to_string()),
-            Value::String("local".to_string()),
+            Yaml::String("repo".to_string()),
+            Yaml::String("local".to_string()),
         );
         repo.insert(
-            Value::String("hooks".to_string()),
-            Value::Sequence(local_hooks.to_vec()),
+            Yaml::String("hooks".to_string()),
+            Yaml::Array(local_hooks.to_vec()),
         );
-        repos.push(Value::Mapping(repo));
+        repos.push(Yaml::Hash(repo));
     }
-    out.insert(Value::String("repos".to_string()), Value::Sequence(repos));
-    let mut body = serde_yaml::to_string(&Value::Mapping(out))
+    out.insert(Yaml::String("repos".to_string()), Yaml::Array(repos));
+    let mut body = String::new();
+    YamlEmitter::new(&mut body)
+        .dump(&Yaml::Hash(out))
         .map_err(|err| Error::new(format!("failed to render the suggested config: {err}")))?;
+    body.push('\n');
     if let Some(rest) = body.strip_prefix("---\n") {
         body = rest.to_string();
     }
@@ -619,9 +615,9 @@ fn push_skips(out: &mut String, skipped: &[Skip]) {
     }
 }
 
-fn mapping_str(map: &Mapping, key: &str) -> Option<String> {
-    map.get(Value::String(key.to_string()))
-        .and_then(Value::as_str)
+fn mapping_str(map: &Hash, key: &str) -> Option<String> {
+    map.get(&Yaml::String(key.to_string()))
+        .and_then(Yaml::as_str)
         .map(str::to_string)
 }
 

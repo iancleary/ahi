@@ -94,7 +94,7 @@
         {
           "column": null,
           "line": null,
-          "message": "YAML parse error: did not find expected node content at line 2 column 1, while parsing a flow node",
+          "message": "YAML parse error: while parsing a node, did not find expected node content at byte 5 line 2 column 1",
           "path": "bad.yml",
           "severity": "error"
         }

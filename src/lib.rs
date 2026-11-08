@@ -15,9 +15,11 @@ pub mod harness;
 pub mod hooks;
 pub mod sandbox;
 mod shlex;
+pub mod term;
 mod tool_policy;
 pub mod tui;
 pub mod update;
+mod util;
 mod yaml_safe;
 
 #[cfg(test)]

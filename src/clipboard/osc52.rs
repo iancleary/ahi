@@ -1,6 +1,5 @@
 //! OSC 52 terminal clipboard writes. The terminal never acknowledges, so
 //! success means the request was sent, not that the terminal accepted it.
-use base64::Engine;
 use std::io::{IsTerminal, Write};
 
 const MAX_ENCODED_LENGTH: usize = 100_000;
@@ -17,7 +16,7 @@ fn write(text: &str, output: &mut impl Write) -> std::io::Result<()> {
     if text.len().div_ceil(3).saturating_mul(4) > MAX_ENCODED_LENGTH {
         return Err(std::io::Error::other("clipboard exceeds OSC 52 size limit"));
     }
-    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let encoded = crate::util::base64::encode_standard(text.as_bytes());
     // Hold stdout's lock over the entire sequence, including the terminator.
     write!(output, "\x1b]52;c;{encoded}\x07")?;
     output.flush()

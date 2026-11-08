@@ -28,7 +28,7 @@ Check YAML...............................................................Failed
 - hook id: ahi/check-yaml
 - exit code: 1
 
-bad.yml: YAML parse error: did not find expected node content at line 2 column 1, while parsing a flow node
+bad.yml: YAML parse error: while parsing a node, did not find expected node content at byte 5 line 2 column 1
 Check TOML...............................................................Failed
 - hook id: ahi/check-toml
 - exit code: 1
