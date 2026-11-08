@@ -394,7 +394,7 @@ fn device_id(state: &Path) -> Result<String> {
     {
         Ok(mut file) => {
             let mut bytes = [0_u8; 16];
-            getrandom::getrandom(&mut bytes)
+            getrandom::fill(&mut bytes)
                 .map_err(|_| Error::new("cannot generate OpenAI device id"))?;
             bytes[6] = (bytes[6] & 15) | 64;
             bytes[8] = (bytes[8] & 63) | 128;

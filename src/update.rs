@@ -313,7 +313,11 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn extract_ahi(archive: &Path) -> Result<Vec<u8>> {
@@ -539,7 +543,7 @@ fn scratch_dir() -> Result<PathBuf> {
 
 fn random_token() -> Result<String> {
     let mut buf = [0_u8; 8];
-    getrandom::getrandom(&mut buf).map_err(|err| Error::new(format!("random: {err}")))?;
+    getrandom::fill(&mut buf).map_err(|err| Error::new(format!("random: {err}")))?;
     Ok(buf.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 

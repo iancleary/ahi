@@ -1115,7 +1115,7 @@ fn try_open_browser(url: &str) {
 
 fn random_token(bytes: usize) -> Result<String> {
     let mut buf = vec![0_u8; bytes];
-    getrandom::getrandom(&mut buf).map_err(|err| Error::new(format!("random: {err}")))?;
+    getrandom::fill(&mut buf).map_err(|err| Error::new(format!("random: {err}")))?;
     Ok(base64url(&buf))
 }
 

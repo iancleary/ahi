@@ -108,7 +108,7 @@
         {
           "column": null,
           "line": null,
-          "message": "TOML parse error: TOML parse error at line 1, column 4\n  |\n1 | a =\n  |    ^\ninvalid string\nexpected `\"`, `'`\n",
+          "message": "TOML parse error: TOML parse error at line 1, column 4\n  |\n1 | a =\n  |    ^\nstring values must be quoted, expected literal string\n",
           "path": "bad.toml",
           "severity": "error"
         }

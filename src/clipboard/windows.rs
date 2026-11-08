@@ -13,8 +13,7 @@ pub(super) struct HandoffFile(pub(super) PathBuf);
 impl HandoffFile {
     pub(super) fn create(text: &str) -> std::io::Result<Self> {
         let mut random = [0; 16];
-        getrandom::getrandom(&mut random)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
         let name = crate::util::base64::encode_url_safe_no_pad(&random);
         let path = std::env::temp_dir().join(format!("ahi-clip-{name}.txt"));
         let mut options = OpenOptions::new();
