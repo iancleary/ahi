@@ -529,3 +529,75 @@ fn the_retired_policy_filename_is_an_error_not_silence() {
     assert!(text.contains("no longer read"), "{text}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn tools_init_prints_a_policy_and_writes_only_with_write() {
+    let dir = fixture_directory::create_unique_fixture_directory("tools-init");
+    let policy = dir.join("ahi.tools.yaml");
+    let list = run(&dir, &["tools", "list"]);
+    let listed = String::from_utf8(list.stdout).unwrap();
+    assert_eq!(list.status.code(), Some(0));
+    assert!(listed.starts_with("read-all"), "{listed}");
+    assert!(listed.contains("(default)"), "{listed}");
+    assert!(listed.contains("deny-all"), "{listed}");
+    assert!(!listed.contains("invalid-version"), "{listed}");
+
+    let dry = run(&dir, &["tools", "init"]);
+    let stdout = String::from_utf8(dry.stdout).unwrap();
+    assert_eq!(dry.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("id: read-tree"), "{stdout}");
+    assert!(stdout.contains("Left ahi.tools.yaml unchanged"), "{stdout}");
+    assert!(!policy.exists());
+
+    let unknown = run(&dir, &["tools", "init", "--example", "nope"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    let err = String::from_utf8(unknown.stderr).unwrap();
+    assert!(err.contains("ahi tools list"), "{err}");
+    assert!(!policy.exists());
+
+    let wrote = run(&dir, &["tools", "init", "--write"]);
+    assert_eq!(wrote.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(&policy).unwrap(),
+        example("tools/read-all.yaml")
+    );
+
+    let refused = run(&dir, &["tools", "init", "--example", "deny-all", "--write"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let err = String::from_utf8(refused.stderr).unwrap();
+    assert!(err.contains("--write --force"), "{err}");
+    assert_eq!(
+        fs::read_to_string(&policy).unwrap(),
+        example("tools/read-all.yaml")
+    );
+
+    let replaced = run(
+        &dir,
+        &[
+            "tools",
+            "init",
+            "--example",
+            "deny-all",
+            "--write",
+            "--force",
+        ],
+    );
+    assert_eq!(replaced.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(&policy).unwrap(),
+        example("tools/deny-all.yaml")
+    );
+
+    let doctor = run(&dir, &["doctor"]);
+    let report = String::from_utf8(doctor.stdout).unwrap();
+    assert!(
+        report.contains("tool rules: 0 approve, 0 ask, 2 deny"),
+        "{report}"
+    );
+    assert!(report.contains("tools advertised: none"), "{report}");
+    fs::remove_file(&policy).unwrap();
+    let doctor = run(&dir, &["doctor"]);
+    let report = String::from_utf8(doctor.stdout).unwrap();
+    assert!(report.contains("tools policy: absent"), "{report}");
+    let _ = fs::remove_dir_all(&dir);
+}

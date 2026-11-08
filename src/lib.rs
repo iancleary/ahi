@@ -17,6 +17,7 @@ pub mod sandbox;
 mod shlex;
 pub mod term;
 mod tool_policy;
+pub mod tools;
 pub mod tui;
 pub mod update;
 mod util;

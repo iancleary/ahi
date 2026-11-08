@@ -23,7 +23,7 @@ pub(crate) fn text(
         if tools_configured {
             "tools approved by ahi.tools.yaml"
         } else {
-            "no ahi.tools.yaml: tools off"
+            "no ahi.tools.yaml: tools off · `ahi tools init` writes one"
         }
     );
     let keys_line = "/ for commands · Ctrl+S selects · /mouse toggles native selection";

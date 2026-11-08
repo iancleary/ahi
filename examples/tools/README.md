@@ -4,8 +4,10 @@ Each file is a complete `ahi.tools.yaml` for the chat screen's builtin,
 tools: the read-only `read_file`, `list_dir`, `find_files`, and `search_files`
 (`action: tool_call`), the file-changing `edit_file` and `write_file`
 (`action: file_write`), and the program-running `run_command`
-(`action: command`, matched on an argv prefix). Copy one to a repository root as
-`ahi.tools.yaml`, or point a session at it without copying:
+(`action: command`, matched on an argv prefix). Write one into the working directory
+with `ahi tools init --example <name> --write` (the examples are embedded in
+the binary; `ahi tools list` names them), copy one by hand, or point a session
+at it without copying:
 
 ```sh
 ahi tui --tools examples/tools/ask-every-read.yaml

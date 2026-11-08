@@ -114,6 +114,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi migrate`](#ahi-migrate) | Suggest an ahi config from an existing `.pre-commit-config.yaml`. |
 | [`ahi hooks install`, `ahi hooks uninstall`](#ahi-hooks) | Hook shim commands; not implemented, exit 1. |
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
+| [`ahi tools init [--example <name>] [--write]`, `ahi tools list`](#ahi-tools) | Write a shipped chat tool policy into the working directory, or list the shipped ones. |
 | [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
@@ -174,7 +175,7 @@ It also prints the environment names a local hook receives by default; see the t
 
 ### ahi doctor
 
-Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, hook policy summary, the container runtime `ahi dev` would use, and the sandbox backend `ahi sandbox check` detects.
+Version, git, config path, the `models.json`, data, state, and cache directories (and whether the cache is writable), scratch directory, hook policy summary, the chat tool policy (`ahi.tools.yaml` in the working directory: present or absent, approve/ask/deny rule counts, and the tools it advertises), the container runtime `ahi dev` would use, and the sandbox backend `ahi sandbox check` detects.
 
 It warns about any ahi directory or file that other users can read; see [Files and directories](#files-and-directories).
 
@@ -193,6 +194,10 @@ Exit 1. They are the hook shim commands and are not implemented. Top-level `inst
 Replaces the running binary with the latest release from the attested archives. Verifies the sha256sums file and the target archive against their GitHub build-provenance attestations with the `gh` CLI, checks the archive sha256, extracts the single `ahi` member, and atomically renames it over the running binary (moving the running executable aside first on Windows). Refuses any target it cannot verify. Covers linux-x86_64, linux-aarch64, and windows-x86_64; macOS and other targets refuse with a `cargo install ahi` pointer. Does not accept a package name and is not named `self-update`.
 
 Installation and the manual verification steps are under [Installation](#installation) and [Verifying downloads](#verifying-downloads).
+
+### ahi tools
+
+Tools in the chat are off until the directory `ahi tui` starts in has an `ahi.tools.yaml` with an approve rule. `ahi tools init` prints one of the shipped policies from `examples/tools` (default `read-all`: read, list, find, and search anywhere except `.env`) and, like `ahi migrate`, writes nothing until `--write`; an existing file is replaced only with `--write --force`. `--example <name>` picks another policy and `ahi tools list` names them with what each lets the model do. The file is written to the working directory, where the chat reads it and where its rule paths are resolved. The chat screen itself never writes `ahi.tools.yaml`: the model's tools cannot touch it whatever the rules say, and no slash command edits it, so the policy changes only through this command or an editor. `ahi doctor` reports the file and what it approves.
 
 ### ahi tui
 
