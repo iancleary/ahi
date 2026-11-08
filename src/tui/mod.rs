@@ -12,13 +12,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use ahi_widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
 };
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_core::layout::{Constraint, Direction, Layout};
+use ratatui_core::style::{Modifier, Style};
 
 use crate::chat;
 use crate::chat::input::{EditorKey, InputEditor};
@@ -102,11 +102,12 @@ pub fn run(state: &Directories, refresh: bool, actions: Option<&Path>) -> Result
 }
 
 fn pick(state: &Directories, picker: &mut Picker, refresh: bool) -> Result<PickerOutcome> {
-    let mut terminal = ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
+    let mut terminal =
+        crate::term::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
     let result =
         enable_command_paste().and_then(|()| pick_loop(&mut terminal, state, picker, refresh));
     let cleanup = disable_command_paste();
-    ratatui::restore();
+    crate::term::restore();
     cleanup?;
     result
 }
@@ -421,7 +422,7 @@ impl Picker {
 
     fn refresh(
         &mut self,
-        terminal: &mut ratatui::DefaultTerminal,
+        terminal: &mut crate::term::DefaultTerminal,
         state: &Directories,
     ) -> Result<()> {
         let provider_id = self.registry.providers[self.selected().provider()]
@@ -468,7 +469,7 @@ impl Picker {
         Ok(())
     }
 
-    fn draw(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    fn draw(&mut self, terminal: &mut crate::term::DefaultTerminal) -> Result<()> {
         // A chat copy may still be completing after switching to the picker.
         let stdout = io::stdout();
         let _output = stdout.lock();
@@ -478,7 +479,7 @@ impl Picker {
         Ok(())
     }
 
-    fn draw_frame(&mut self, frame: &mut ratatui::Frame) {
+    fn draw_frame(&mut self, frame: &mut ratatui_core::terminal::Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -564,8 +565,8 @@ impl Picker {
 
     fn draw_list(
         &mut self,
-        frame: &mut ratatui::Frame,
-        area: ratatui::layout::Rect,
+        frame: &mut ratatui_core::terminal::Frame,
+        area: ratatui_core::layout::Rect,
         items: Vec<ListItem<'_>>,
         title: &str,
     ) {
@@ -578,7 +579,11 @@ impl Picker {
         );
     }
 
-    fn draw_details(&self, frame: &mut ratatui::Frame, chunks: &[ratatui::layout::Rect]) {
+    fn draw_details(
+        &self,
+        frame: &mut ratatui_core::terminal::Frame,
+        chunks: &[ratatui_core::layout::Rect],
+    ) {
         let provider = &self.registry.providers[self.selected().provider()];
         let detail = if let Some(registration) = self.registration.as_ref().filter(|registration| {
             registration.provider_id == provider.id && matches!(self.screen, Screen::Catalog { .. })
@@ -662,7 +667,7 @@ impl Picker {
         }
         frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), footer[1]);
         if let Some(input) = &self.command_input {
-            let popup_area = ratatui::layout::Rect::new(
+            let popup_area = ratatui_core::layout::Rect::new(
                 chunks[0].x,
                 chunks[0].y,
                 chunks[0].width,
@@ -680,7 +685,7 @@ impl Picker {
 }
 
 fn pick_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::term::DefaultTerminal,
     state: &Directories,
     picker: &mut Picker,
     refresh: bool,
@@ -751,9 +756,9 @@ fn pick_loop(
                     picker.command_menu.reset();
                     if commands::common_action(&command) == Some(CommonAction::Login) {
                         disable_command_paste()?;
-                        ratatui::restore();
+                        crate::term::restore();
                         let result = login::run(state);
-                        *terminal = ratatui::try_init()
+                        *terminal = crate::term::try_init()
                             .map_err(|error| Error::new(format!("terminal resume: {error}")))?;
                         enable_command_paste()?;
                         picker.status = match result {
@@ -774,9 +779,9 @@ fn pick_loop(
                         };
                     } else if commands::common_action(&command) == Some(CommonAction::Gateway) {
                         disable_command_paste()?;
-                        ratatui::restore();
+                        crate::term::restore();
                         let result = gateway::run(state);
-                        *terminal = ratatui::try_init()
+                        *terminal = crate::term::try_init()
                             .map_err(|error| Error::new(format!("terminal resume: {error}")))?;
                         enable_command_paste()?;
                         match result {
@@ -878,9 +883,9 @@ fn pick_loop(
             KeyCode::Char('e') => {
                 // Editor-only reload preserves the editor's bytes; it never resaves JSON.
                 disable_command_paste()?;
-                ratatui::restore();
+                crate::term::restore();
                 let edited = edit_models(state);
-                *terminal = ratatui::try_init()
+                *terminal = crate::term::try_init()
                     .map_err(|err| Error::new(format!("terminal resume: {err}")))?;
                 enable_command_paste()?;
                 match edited.and_then(|exit| {
@@ -1099,8 +1104,8 @@ mod tests {
             catalog_ids(&picker.registry.providers[0]),
             ["missing", "first", "reference-only", "vendor/one/two"]
         );
-        let backend = ratatui::backend::TestBackend::new(140, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let backend = ratatui_core::backend::TestBackend::new(140, 20);
+        let mut terminal = ratatui_core::terminal::Terminal::new(backend).unwrap();
         terminal.draw(|frame| picker.draw_frame(frame)).unwrap();
         let text: String = terminal
             .backend()
@@ -1336,8 +1341,8 @@ mod tests {
         let dir = crate::fixture_directory::create_unique_fixture_directory("picker-render");
         let registry = harness::load_registry(&Directories::single_root(&dir)).unwrap();
         let mut picker = Picker::new(registry);
-        let backend = ratatui::backend::TestBackend::new(120, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let backend = ratatui_core::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui_core::terminal::Terminal::new(backend).unwrap();
         terminal.draw(|frame| picker.draw_frame(frame)).unwrap();
         let text = terminal
             .backend()

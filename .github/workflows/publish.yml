@@ -96,8 +96,8 @@ jobs:
         # The token is mapped only in this step, only in this job, and only
         # after the job condition has matched a tag release in iancleary/ahi.
         # The ci job above does not receive the token. The script publishes
-        # the in-repo ahi-win32 crate first when its pinned version is not on
-        # crates.io yet, then ahi.
+        # the in-repo ahi-win32 and ahi-widgets crates first when their pinned
+        # versions are not on crates.io yet, then ahi.
         run: bash scripts/publish-workspace.sh
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

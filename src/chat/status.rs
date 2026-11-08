@@ -1,7 +1,7 @@
 //! Styled Powerlevel10k-like location row and session row text.
 
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::{Line, Span};
 
 use super::backend::Selection;
 use super::location::GitStatus;
@@ -166,11 +166,12 @@ mod tests {
             changes: Some(super::super::location::GitChanges::default()),
         };
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 1)).unwrap();
+            ratatui_core::terminal::Terminal::new(ratatui_core::backend::TestBackend::new(12, 1))
+                .unwrap();
         terminal
             .draw(|frame| {
                 frame.render_widget(
-                    ratatui::widgets::Paragraph::new(render_location_row(
+                    ahi_widgets::Paragraph::new(render_location_row(
                         12,
                         "",
                         "~/Work/gh/ahi",

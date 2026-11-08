@@ -1,9 +1,9 @@
 //! Floating transcript jump controls and their mouse hit targets.
 
+use ahi_widgets::{Clear, Paragraph};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui_core::layout::{Position, Rect};
+use ratatui_core::style::{Color, Modifier, Style};
 
 use super::key_binding::KeyAction;
 
@@ -32,7 +32,7 @@ impl ScrollNavigation {
 
     pub(super) fn draw(
         &mut self,
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui_core::terminal::Frame,
         area: Rect,
         can_go_up: bool,
         can_go_down: bool,

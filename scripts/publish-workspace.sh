@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Publish the workspace to crates.io in dependency order.
 #
-# ahi depends on the in-repo ahi-win32 crate, so ahi-win32 must exist on the
-# registry at the pinned version before ahi can be published. ahi-win32 rarely
-# changes, so its version is usually already published; that is detected via
-# the sparse index and skipped, because a re-publish of an existing version
-# is an error. cargo publish waits for the index to list a crate before
+# ahi depends on the in-repo ahi-win32 and ahi-widgets crates, so each must
+# exist on the registry at its pinned version before ahi can be published.
+# They rarely change, so their versions are usually already published; that
+# is detected via the sparse index and skipped, because a re-publish of an
+# existing version is an error. cargo publish waits for the index to list a crate before
 # returning, so the second publish sees the first.
 #
 # Needs CARGO_REGISTRY_TOKEN in the environment. Pass --dry-run to verify
@@ -37,14 +37,22 @@ published() {
     | grep --quiet "\"vers\":\"${version}\""
 }
 
-win32_version="$(manifest_version crates/ahi-win32/Cargo.toml)"
-if published ahi-win32 "$win32_version"; then
-  echo "ahi-win32 ${win32_version} is already on crates.io; skipping"
-elif [[ -n "$dry_run" ]]; then
-  cargo publish --verbose --dry-run --package ahi-win32
-else
-  cargo publish --verbose --package ahi-win32
-fi
+publish_member() {
+  # Publish an in-repo crate ahi depends on, unless its pinned version is
+  # already on the registry (a re-publish of an existing version is an error).
+  local name="$1" manifest="$2" version
+  version="$(manifest_version "$manifest")"
+  if published "$name" "$version"; then
+    echo "${name} ${version} is already on crates.io; skipping"
+  elif [[ -n "$dry_run" ]]; then
+    cargo publish --verbose --dry-run --package "$name"
+  else
+    cargo publish --verbose --package "$name"
+  fi
+}
+
+publish_member ahi-win32 crates/ahi-win32/Cargo.toml
+publish_member ahi-widgets crates/ahi-widgets/Cargo.toml
 
 # shellcheck disable=SC2086
 cargo publish --verbose $dry_run --package ahi
