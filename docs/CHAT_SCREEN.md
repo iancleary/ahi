@@ -1,6 +1,6 @@
 # Chat screen
 
-Status: configured gateways stream real responses over the protocol their `api` declares ([Providers](PROVIDERS.md)), and curated OpenAI selections use the browser-login [Responses transport](OPENAI_INFERENCE.md). Chat, Models, and Catalog share the **Commands** popup and guided gateway onboarding. Builtin read-only tools are policy-gated by `ahi.tools.yaml` on every protocol; conversation persistence remains unimplemented; [Tool calls](TOOL_CALLS.md) separates implemented parsing from the proposed execution lifecycle. The current interaction design and terminal evidence are documented in [Terminal experience](TERMINAL_EXPERIENCE.md); [SPEC.md](SPEC.md) remains the compatibility/security contract.
+Status: configured gateways stream real responses over the protocol their `api` declares ([Providers](PROVIDERS.md)), and curated OpenAI selections use the browser-login [Responses transport](OPENAI_INFERENCE.md). Chat, Models, and Catalog share the **Commands** popup and guided gateway onboarding. Builtin read-only tools are policy-gated by `ahi.tools.yaml` on every protocol; conversation persistence remains unimplemented; [Tool calls](TOOL_CALLS.md) separates implemented parsing from the proposed execution lifecycle. The current interaction design and terminal evidence are documented in [Terminal experience](TERMINAL_EXPERIENCE.md); [SPEC.md](SPEC.md) remains the compatibility/security contract. Planned transcript formatting (markdown, diffs, links, timing, header) is drafted in [Chat formatting plan](CHAT_FORMATTING_PLAN.md).
 
 ## Purpose
 
