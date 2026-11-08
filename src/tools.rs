@@ -35,33 +35,32 @@ pub const EXAMPLES: [Example; 7] = [
     Example {
         name: "read-all",
         text: include_str!("../examples/tools/read-all.yaml"),
-        summary: "read, list, find, and search anywhere; root .env denied; no prompts",
+        summary: "read, list, find, and search the whole working directory; root .env denied; no prompts",
     },
     Example {
         name: "ask-every-read",
         text: include_str!("../examples/tools/ask-every-read.yaml"),
-        summary: "every read, listing, find, and search asks in chat",
+        summary: "every read, listing, find, and search in the working directory asks in chat",
     },
     Example {
         name: "sources-only",
         text: include_str!("../examples/tools/sources-only.yaml"),
-        summary: "list anywhere; read, find, and search only src and docs",
+        summary: "list the whole working directory; read, find, and search only src and docs",
     },
     Example {
         name: "list-only",
         text: include_str!("../examples/tools/list-only.yaml"),
-        summary: "list directories only; reads are denied",
+        summary: "list directories in the working directory only; reads are denied",
     },
     Example {
         name: "edit-sources",
         text: include_str!("../examples/tools/edit-sources.yaml"),
-        summary: "read anywhere; edit under src and tests after a prompt; create under tests",
+        summary: "read the whole working directory; edit under src and tests after a prompt; create under tests",
     },
     Example {
         name: "commands",
         text: include_str!("../examples/tools/commands.yaml"),
-        summary:
-            "read anywhere; cargo check and test run; other cargo asks; publish and install denied",
+        summary: "read the whole working directory; cargo check and test run; other cargo asks; publish and install denied",
     },
     Example {
         name: "deny-all",
@@ -96,6 +95,14 @@ pub fn render_index() -> String {
         };
         out.push_str(&format!("{:width$}  {}{default}\n", e.name, e.summary));
     }
+    out.push_str(
+        "\nEvery builtin tool works inside the directory `ahi tui` starts in: paths are \
+         relative to it, and absolute paths, `..`, and symbolic links are refused.\n\
+         This is not a sandbox. A program approved by a command rule runs on the host \
+         with the operator's access: it can follow symbolic links, read files above the \
+         working directory, and run other programs. Approve commands accordingly, or \
+         run `ahi tui` inside `ahi dev run` for a container boundary.\n",
+    );
     out.push_str(
         "\n`ahi tools examples show <name>` prints one.\n\
          `ahi tools examples show` prints all.\n\

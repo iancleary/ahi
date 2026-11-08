@@ -9,7 +9,7 @@
 
 ### Changed
 
-- `ahi tools --help` and `ahi tools init --help` state the confinement: every tool is confined to the working directory, rule paths are relative to it, absolute paths, `..`, and symbolic links are refused, `run_command` runs only inside it, and no rule can widen access above it.
+- `ahi tools --help`, `ahi tools init --help`, and the `ahi tools examples` list state the boundary: every builtin tool works inside the working directory, rule paths are relative to it, absolute paths, `..`, and symbolic links are refused, and `run_command` starts only inside it; and that this is not a sandbox, since an approved program runs on the host with the operator's access and can follow links, read above the working directory, and run other programs. Example summaries say "the whole working directory" instead of "anywhere".
 
 ## 0.14.0 (2026-11-08)
 

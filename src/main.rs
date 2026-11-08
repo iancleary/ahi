@@ -125,12 +125,18 @@ enum Command {
     /// ahi.tools.yaml with an approve rule. `init` prints a shipped policy and
     /// writes it only with --write, like `ahi migrate`.
     ///
-    /// Every tool is confined to that working directory. Rule paths are
-    /// relative to it; absolute paths, `..`, and symbolic links are refused
-    /// before any read, write, or command, and `run_command` runs only in a
-    /// directory inside it. A rule's `path` narrows access within the
-    /// directory and can never widen it beyond. Nothing above the working
-    /// directory is readable, whatever the policy says.
+    /// Every builtin tool works inside that working directory. Rule paths
+    /// are relative to it; absolute paths, `..`, and symbolic links are
+    /// refused before any read, write, or command, and `run_command` starts
+    /// only in a directory inside it. A rule's `path` narrows access within
+    /// the directory and never widens it.
+    ///
+    /// This is not a sandbox. A program approved by a command rule runs on
+    /// the host with the operator's access: it can follow symbolic links,
+    /// read files above the working directory, and run other programs. The
+    /// read, list, find, search, edit, and write tools cannot. Approve
+    /// commands accordingly, or run `ahi tui` inside `ahi dev run` for a
+    /// container boundary.
     Tools {
         #[command(subcommand)]
         command: ToolsCommand,
@@ -223,7 +229,8 @@ enum ToolsCommand {
     /// In a terminal each rule is painted with the chat's colors for its
     /// outcome: approve green, ask gray, deny red (`--color never` for plain
     /// text; the file is always written plain). `ahi tools list` shows the
-    /// policy in place the same way. Rules confine the model to
+    /// policy in place the same way. Rule paths confine the builtin tools
+    /// to the working directory; an approved command is not confined. Rules confine the model to
     /// the working directory; none can reach above it.
     Init {
         /// Which shipped policy; `ahi tools examples list` names them.
