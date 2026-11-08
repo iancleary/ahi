@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.1 (2026-11-08)
+
 ### Added
 
 - `ahi tools list` now shows the working directory's `ahi.tools.yaml` painted by outcome, followed by the summary `ahi doctor` prints, or says the file is absent. `ahi tools examples list` (the default for bare `ahi tools examples`) names the shipped policies with what each lets the model do, which `list` printed in 0.14.0; `ahi tools examples show` prints every one painted and `ahi tools examples show <name>` prints one.
