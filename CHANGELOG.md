@@ -5,7 +5,7 @@
 ### Added
 
 - A weekly `dependency audit` workflow runs cargo-deny and cargo-audit against `main` and opens or updates one issue when either fails. Dependabot updates Cargo pins and GitHub Actions weekly in grouped pull requests, security updates alone; merges stay manual.
-||||||| eb1f5a3
+
 ### Changed
 
 - Dependencies: ratatui builds with only its `crossterm` feature, ureq moved from 2.12 to 3.5 (one TLS root store, `http` types), `thiserror` was removed as unused, and `base64` moved to 0.23. The lockfile shrank from 285 entries to 193, and every remaining duplicate version (`foldhash`, `hashbrown`, `syn`) lives inside ratatui's tree.
