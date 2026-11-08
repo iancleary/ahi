@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.13.1 (2026-11-07)
+
+### Fixed
+
+- `ahi-widgets` is 0.1.1, re-published with its `ratatui-core =0.1.2` pin. The 0.13.0 crate never reached crates.io: the registry's `ahi-widgets 0.1.0` still pinned `ratatui-core =0.1.0`, which conflicted with ahi's lockfile after a dependency bump changed the widgets crate without bumping its version. The 0.13.0 GitHub release and its binaries are intact; `cargo install ahi` gets 0.13.1 with the same features.
+
 ## 0.13.0 (2026-11-07)
 
 ### Added

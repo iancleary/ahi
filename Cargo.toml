@@ -35,7 +35,7 @@ quick-xml = "=0.42.0"
 # crates/ahi-widgets (MIT; see its FORK.md).
 ratatui-core = { version = "=0.1.2", default-features = false, features = ["std", "underline-color"] }
 ratatui-crossterm = { version = "=0.1.2", default-features = false, features = ["crossterm_0_29", "underline-color"] }
-ahi-widgets = { path = "crates/ahi-widgets", version = "=0.1.0" }
+ahi-widgets = { path = "crates/ahi-widgets", version = "=0.1.1" }
 regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
