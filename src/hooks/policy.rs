@@ -138,8 +138,7 @@ pub fn load_policy(root: &Path) -> Result<Policy> {
 
 pub fn parse_policy_str(src: &str, origin: &str) -> Result<Policy> {
     check_config_yaml(src, origin)?;
-    let raw: RawPolicy =
-        serde_yaml::from_str(src).map_err(|err| Error::new(format!("{origin}: {err}")))?;
+    let raw: RawPolicy = crate::yaml_safe::typed(src, origin)?;
     if raw.version != 1 {
         return Err(Error::new(format!(
             "{origin}: {FILE_NAME} version {} is not supported (expected 1)",

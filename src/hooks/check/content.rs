@@ -250,12 +250,8 @@ impl Check for YamlCheck {
             if bytes.len() > MAX_PARSE {
                 return Err("file is larger than 4 MiB".to_string());
             }
-            for document in serde_yaml::Deserializer::from_slice(bytes) {
-                let value =
-                    serde_yaml::Value::deserialize(document).map_err(|err| err.to_string())?;
-                let _ = value;
-            }
-            Ok(())
+            let text = std::str::from_utf8(bytes).map_err(|_| "file is not UTF-8".to_string())?;
+            crate::yaml_safe::validate_documents(text)
         })
     }
 }
