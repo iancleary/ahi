@@ -28,7 +28,7 @@ pub struct Example {
 /// The default for `ahi tools init`: the policy this repository ships.
 pub const DEFAULT_EXAMPLE: &str = "read-all";
 
-/// Shipped policies, in the order `ahi tools list` prints them. The
+/// Shipped policies, in the order `ahi tools examples` prints them. The
 /// deliberately invalid `invalid-version.yaml` stays in `examples/tools` for
 /// the fail-closed walkthrough and is not offered here.
 pub const EXAMPLES: [Example; 7] = [
@@ -75,14 +75,15 @@ pub fn example(name: &str) -> std::result::Result<&'static Example, String> {
     EXAMPLES.iter().find(|e| e.name == name).ok_or_else(|| {
         let names: Vec<&str> = EXAMPLES.iter().map(|e| e.name).collect();
         format!(
-            "no example named `{name}`; `ahi tools list` prints them: {}",
+            "no example named `{name}`; `ahi tools examples` prints them: {}",
             names.join(", ")
         )
     })
 }
 
-/// `ahi tools list`: one line per example, name then summary.
-pub fn render_list() -> String {
+/// The index at the top of `ahi tools examples`: one line per example,
+/// name then summary.
+pub fn render_index() -> String {
     let width = EXAMPLES.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let mut out = String::new();
     for e in EXAMPLES {
@@ -197,6 +198,47 @@ pub fn render_policy(text: &str, color: bool) -> String {
         "{}  the model gets the call, is asked in chat first, or is refused\n",
         legend.join(" ")
     ));
+    out
+}
+
+/// `ahi tools examples`: the index, then every example with a heading, or
+/// one example when `name` is given.
+pub fn render_examples(name: Option<&str>, color: bool) -> std::result::Result<String, String> {
+    let chosen: Vec<&Example> = match name {
+        Some(name) => vec![example(name)?],
+        None => EXAMPLES.iter().collect(),
+    };
+    let mut out = String::new();
+    if name.is_none() {
+        out.push_str(&render_index());
+        out.push('\n');
+    }
+    for (index, e) in chosen.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("== {} (examples/tools/{}.yaml)\n", e.name, e.name));
+        out.push_str(&render_policy(e.text, color));
+    }
+    Ok(out)
+}
+
+/// `ahi tools list`: the working directory's `ahi.tools.yaml`, painted by
+/// outcome, followed by the doctor summary. Without the file, the doctor
+/// line alone, which names `ahi tools init`. An invalid file is still
+/// shown, with its parse error after it, so the operator sees what to fix.
+pub fn render_current(root: &Path, color: bool) -> String {
+    let path = root.join(FILE_NAME);
+    let mut out = String::new();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        out.push_str(&format!("== {}\n", path.display()));
+        out.push_str(&render_policy(&text, color));
+        out.push('\n');
+    }
+    for line in doctor_lines(root) {
+        out.push_str(&line);
+        out.push('\n');
+    }
     out
 }
 
@@ -334,6 +376,16 @@ mod tests {
         assert!(line_with("# Reads anywhere").starts_with("# Reads"));
         assert!(line_with("version: 1").starts_with("version: 1"));
         assert!(painted.lines().last().unwrap().contains("approve"));
+        let all = render_examples(None, false).unwrap();
+        assert!(all.starts_with("read-all"), "{all}");
+        for e in EXAMPLES {
+            assert!(all.contains(&format!("== {} (examples/tools/{}.yaml)", e.name, e.name)));
+            assert!(all.contains(e.text));
+        }
+        let one = render_examples(Some("deny-all"), false).unwrap();
+        assert!(one.starts_with("== deny-all"), "{one}");
+        assert!(!one.contains("== read-all"));
+        assert!(render_examples(Some("nope"), false).is_err());
         // The repository policy's section comments sit between rules and
         // stay unpainted; every rule still gets its own outcome.
         let root = render_policy(include_str!("../ahi.tools.yaml"), true);
@@ -373,6 +425,12 @@ mod tests {
         assert!(doctor_lines(&dir)[2].ends_with("none (no approve rule)"));
         fs::write(dir.join(FILE_NAME), "version: 2\n").unwrap();
         assert!(doctor_lines(&dir)[0].starts_with("tools policy: "));
+        let current = render_current(&dir, false);
+        assert!(current.starts_with("== "), "{current}");
+        assert!(current.contains("version: 2"), "{current}");
+        assert!(current.contains("tools policy: "), "{current}");
+        fs::remove_file(dir.join(FILE_NAME)).unwrap();
+        assert!(render_current(&dir, false).starts_with("tools policy: absent"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

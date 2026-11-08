@@ -534,13 +534,37 @@ fn the_retired_policy_filename_is_an_error_not_silence() {
 fn tools_init_prints_a_policy_and_writes_only_with_write() {
     let dir = fixture_directory::create_unique_fixture_directory("tools-init");
     let policy = dir.join("ahi.tools.yaml");
-    let list = run(&dir, &["tools", "list"]);
-    let listed = String::from_utf8(list.stdout).unwrap();
-    assert_eq!(list.status.code(), Some(0));
+    let absent = run(&dir, &["tools", "list"]);
+    let absent_out = String::from_utf8(absent.stdout).unwrap();
+    assert_eq!(absent.status.code(), Some(0));
+    assert!(
+        absent_out.starts_with("tools policy: absent"),
+        "{absent_out}"
+    );
+    assert!(absent_out.contains("ahi tools init"), "{absent_out}");
+
+    let all = run(&dir, &["tools", "examples"]);
+    let listed = String::from_utf8(all.stdout).unwrap();
+    assert_eq!(all.status.code(), Some(0));
     assert!(listed.starts_with("read-all"), "{listed}");
     assert!(listed.contains("(default)"), "{listed}");
-    assert!(listed.contains("deny-all"), "{listed}");
+    assert!(
+        listed.contains("== deny-all (examples/tools/deny-all.yaml)"),
+        "{listed}"
+    );
+    assert!(listed.contains(&example("tools/commands.yaml")), "{listed}");
     assert!(!listed.contains("invalid-version"), "{listed}");
+
+    let one = run(&dir, &["tools", "examples", "list-only"]);
+    let one_out = String::from_utf8(one.stdout).unwrap();
+    assert!(one_out.starts_with("== list-only"), "{one_out}");
+    assert!(
+        one_out.contains(&example("tools/list-only.yaml")),
+        "{one_out}"
+    );
+    assert!(!one_out.contains("== read-all"), "{one_out}");
+    let missing = run(&dir, &["tools", "examples", "nope"]);
+    assert_eq!(missing.status.code(), Some(2));
 
     let dry = run(&dir, &["tools", "init"]);
     let stdout = String::from_utf8(dry.stdout).unwrap();
@@ -552,7 +576,7 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
     let unknown = run(&dir, &["tools", "init", "--example", "nope"]);
     assert_eq!(unknown.status.code(), Some(2));
     let err = String::from_utf8(unknown.stderr).unwrap();
-    assert!(err.contains("ahi tools list"), "{err}");
+    assert!(err.contains("ahi tools examples"), "{err}");
     assert!(!policy.exists());
 
     let wrote = run(&dir, &["tools", "init", "--write"]);
@@ -619,5 +643,16 @@ fn tools_init_colors_only_when_asked_on_a_pipe() {
     );
     let never = run(&dir, &["--color", "never", "tools", "list"]);
     assert!(!String::from_utf8(never.stdout).unwrap().contains("\x1b["));
+    let shown = run(&dir, &["--color", "always", "tools", "list"]);
+    assert!(String::from_utf8(shown.stdout)
+        .unwrap()
+        .contains("\x1b[48;2;"));
+    let examples = run(
+        &dir,
+        &["--color", "always", "tools", "examples", "deny-all"],
+    );
+    assert!(String::from_utf8(examples.stdout)
+        .unwrap()
+        .contains("\x1b[48;2;90;35;35m"));
     let _ = fs::remove_dir_all(&dir);
 }

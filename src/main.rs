@@ -119,7 +119,7 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
     },
-    /// Write a chat tool policy (ahi.tools.yaml) into the working directory, or list the shipped ones.
+    /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
     /// Tools are off until the directory `ahi tui` starts in has an
     /// ahi.tools.yaml with an approve rule. `init` prints a shipped policy and
@@ -218,14 +218,15 @@ enum HooksCommand {
 
 #[derive(Subcommand)]
 enum ToolsCommand {
-    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools list`).
+    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools examples`).
     ///
     /// In a terminal each rule is painted with the chat's colors for its
     /// outcome: approve green, ask gray, deny red (`--color never` for plain
-    /// text; the file is always written plain). Rules confine the model to
+    /// text; the file is always written plain). `ahi tools list` shows the
+    /// policy in place the same way. Rules confine the model to
     /// the working directory; none can reach above it.
     Init {
-        /// Which shipped policy; `ahi tools list` prints them.
+        /// Which shipped policy; `ahi tools examples` prints them.
         #[arg(long, value_name = "NAME", default_value = ahi::tools::DEFAULT_EXAMPLE)]
         example: String,
         /// Write ahi.tools.yaml in the working directory. Refuses an existing file without --force.
@@ -235,8 +236,14 @@ enum ToolsCommand {
         #[arg(long, requires = "write")]
         force: bool,
     },
-    /// List the shipped policies with what each lets the model do.
+    /// Show the working directory's ahi.tools.yaml, painted by outcome, with what it approves.
     List,
+    /// Show the shipped policies, painted by outcome: all of them, or one by name.
+    Examples {
+        /// One example to show; omitted, the index and every example are printed.
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -334,9 +341,30 @@ fn main() -> ExitCode {
                 write,
                 force,
             } => tools_init(example, *write, *force, use_color(&cli.color)),
-            ToolsCommand::List => {
-                print!("{}", ahi::tools::render_list());
-                ExitCode::from(0)
+            ToolsCommand::List => match env::current_dir() {
+                Ok(cwd) => {
+                    print!(
+                        "{}",
+                        ahi::tools::render_current(&cwd, use_color(&cli.color))
+                    );
+                    ExitCode::from(0)
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::from(1)
+                }
+            },
+            ToolsCommand::Examples { name } => {
+                match ahi::tools::render_examples(name.as_deref(), use_color(&cli.color)) {
+                    Ok(text) => {
+                        print!("{text}");
+                        ExitCode::from(0)
+                    }
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        ExitCode::from(2)
+                    }
+                }
             }
         },
         Command::Login => login(&cli),
