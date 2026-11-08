@@ -167,7 +167,15 @@ pub fn render_policy(text: &str, color: bool) -> String {
         return text.to_string();
     }
     let lines: Vec<&str> = text.lines().collect();
-    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    // Pad to the widest line so a rule reads as one block, but never to the
+    // terminal's last column: a painted line that reaches the edge wraps and
+    // shows as a blank row. Cut lines wider than the terminal are left as
+    // they are; the terminal wraps those either way.
+    let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let width = match crossterm::terminal::size() {
+        Ok((columns, _)) if columns > 1 => widest.min(usize::from(columns) - 1),
+        _ => widest,
+    };
     let mut out = String::new();
     let mut index = 0;
     while index < lines.len() {
