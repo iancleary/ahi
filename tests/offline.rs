@@ -543,19 +543,30 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
     );
     assert!(absent_out.contains("ahi tools init"), "{absent_out}");
 
-    let all = run(&dir, &["tools", "examples"]);
-    let listed = String::from_utf8(all.stdout).unwrap();
+    for args in [
+        &["tools", "examples"][..],
+        &["tools", "examples", "list"][..],
+    ] {
+        let index = run(&dir, args);
+        let listed = String::from_utf8(index.stdout).unwrap();
+        assert_eq!(index.status.code(), Some(0));
+        assert!(listed.starts_with("read-all"), "{listed}");
+        assert!(listed.contains("(default)"), "{listed}");
+        assert!(listed.contains("examples show <name>"), "{listed}");
+        assert!(!listed.contains("== "), "{listed}");
+        assert!(!listed.contains("invalid-version"), "{listed}");
+    }
+    let all = run(&dir, &["tools", "examples", "show"]);
+    let shown = String::from_utf8(all.stdout).unwrap();
     assert_eq!(all.status.code(), Some(0));
-    assert!(listed.starts_with("read-all"), "{listed}");
-    assert!(listed.contains("(default)"), "{listed}");
+    assert!(shown.starts_with("== read-all"), "{shown}");
     assert!(
-        listed.contains("== deny-all (examples/tools/deny-all.yaml)"),
-        "{listed}"
+        shown.contains("== deny-all (examples/tools/deny-all.yaml)"),
+        "{shown}"
     );
-    assert!(listed.contains(&example("tools/commands.yaml")), "{listed}");
-    assert!(!listed.contains("invalid-version"), "{listed}");
+    assert!(shown.contains(&example("tools/commands.yaml")), "{shown}");
 
-    let one = run(&dir, &["tools", "examples", "list-only"]);
+    let one = run(&dir, &["tools", "examples", "show", "list-only"]);
     let one_out = String::from_utf8(one.stdout).unwrap();
     assert!(one_out.starts_with("== list-only"), "{one_out}");
     assert!(
@@ -563,7 +574,7 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
         "{one_out}"
     );
     assert!(!one_out.contains("== read-all"), "{one_out}");
-    let missing = run(&dir, &["tools", "examples", "nope"]);
+    let missing = run(&dir, &["tools", "examples", "show", "nope"]);
     assert_eq!(missing.status.code(), Some(2));
 
     let dry = run(&dir, &["tools", "init"]);
@@ -576,7 +587,7 @@ fn tools_init_prints_a_policy_and_writes_only_with_write() {
     let unknown = run(&dir, &["tools", "init", "--example", "nope"]);
     assert_eq!(unknown.status.code(), Some(2));
     let err = String::from_utf8(unknown.stderr).unwrap();
-    assert!(err.contains("ahi tools examples"), "{err}");
+    assert!(err.contains("ahi tools examples list"), "{err}");
     assert!(!policy.exists());
 
     let wrote = run(&dir, &["tools", "init", "--write"]);
@@ -649,7 +660,7 @@ fn tools_init_colors_only_when_asked_on_a_pipe() {
         .contains("\x1b[48;2;"));
     let examples = run(
         &dir,
-        &["--color", "always", "tools", "examples", "deny-all"],
+        &["--color", "always", "tools", "examples", "show", "deny-all"],
     );
     assert!(String::from_utf8(examples.stdout)
         .unwrap()

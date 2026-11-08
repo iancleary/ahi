@@ -218,7 +218,7 @@ enum HooksCommand {
 
 #[derive(Subcommand)]
 enum ToolsCommand {
-    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools examples`).
+    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools examples list`).
     ///
     /// In a terminal each rule is painted with the chat's colors for its
     /// outcome: approve green, ask gray, deny red (`--color never` for plain
@@ -226,7 +226,7 @@ enum ToolsCommand {
     /// policy in place the same way. Rules confine the model to
     /// the working directory; none can reach above it.
     Init {
-        /// Which shipped policy; `ahi tools examples` prints them.
+        /// Which shipped policy; `ahi tools examples list` names them.
         #[arg(long, value_name = "NAME", default_value = ahi::tools::DEFAULT_EXAMPLE)]
         example: String,
         /// Write ahi.tools.yaml in the working directory. Refuses an existing file without --force.
@@ -238,9 +238,20 @@ enum ToolsCommand {
     },
     /// Show the working directory's ahi.tools.yaml, painted by outcome, with what it approves.
     List,
-    /// Show the shipped policies, painted by outcome: all of them, or one by name.
+    /// The shipped policies: `list` names them, `show [<name>]` prints them painted by outcome.
     Examples {
-        /// One example to show; omitted, the index and every example are printed.
+        #[command(subcommand)]
+        command: Option<ExamplesCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExamplesCommand {
+    /// Name each shipped policy with what it lets the model do (the default).
+    List,
+    /// Print every shipped policy painted by outcome, or one by name.
+    Show {
+        /// One example to print; omitted, all are printed.
         #[arg(value_name = "NAME")]
         name: Option<String>,
     },
@@ -354,18 +365,24 @@ fn main() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
-            ToolsCommand::Examples { name } => {
-                match ahi::tools::render_examples(name.as_deref(), use_color(&cli.color)) {
-                    Ok(text) => {
-                        print!("{text}");
-                        ExitCode::from(0)
-                    }
-                    Err(err) => {
-                        eprintln!("error: {err}");
-                        ExitCode::from(2)
-                    }
-                }
+            ToolsCommand::Examples {
+                command: None | Some(ExamplesCommand::List),
+            } => {
+                print!("{}", ahi::tools::render_index());
+                ExitCode::from(0)
             }
+            ToolsCommand::Examples {
+                command: Some(ExamplesCommand::Show { name }),
+            } => match ahi::tools::render_examples(name.as_deref(), use_color(&cli.color)) {
+                Ok(text) => {
+                    print!("{text}");
+                    ExitCode::from(0)
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::from(2)
+                }
+            },
         },
         Command::Login => login(&cli),
         Command::Dev(args) => dev(&cli, args),

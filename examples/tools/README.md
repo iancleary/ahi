@@ -6,7 +6,7 @@ tools: the read-only `read_file`, `list_dir`, `find_files`, and `search_files`
 (`action: file_write`), and the program-running `run_command`
 (`action: command`, matched on an argv prefix). Write one into the working directory
 with `ahi tools init --example <name> --write` (the examples are embedded in
-the binary; `ahi tools examples [<name>]` shows them), copy one by hand, or point a session
+the binary; `ahi tools examples list` names them and `ahi tools examples show [<name>]` prints them), copy one by hand, or point a session
 at it without copying:
 
 ```sh

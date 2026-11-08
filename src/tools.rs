@@ -75,14 +75,14 @@ pub fn example(name: &str) -> std::result::Result<&'static Example, String> {
     EXAMPLES.iter().find(|e| e.name == name).ok_or_else(|| {
         let names: Vec<&str> = EXAMPLES.iter().map(|e| e.name).collect();
         format!(
-            "no example named `{name}`; `ahi tools examples` prints them: {}",
+            "no example named `{name}`; `ahi tools examples list` prints them: {}",
             names.join(", ")
         )
     })
 }
 
-/// The index at the top of `ahi tools examples`: one line per example,
-/// name then summary.
+/// `ahi tools examples list`: one line per example, name then summary,
+/// and the commands that show them.
 pub fn render_index() -> String {
     let width = EXAMPLES.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let mut out = String::new();
@@ -94,6 +94,10 @@ pub fn render_index() -> String {
         };
         out.push_str(&format!("{:width$}  {}{default}\n", e.name, e.summary));
     }
+    out.push_str(
+        "\n`ahi tools examples show <name>` prints one, `ahi tools examples show` prints all, \
+         `ahi tools init --example <name> --write` copies one into the working directory.\n",
+    );
     out
 }
 
@@ -209,18 +213,14 @@ pub fn render_policy(text: &str, color: bool) -> String {
     out
 }
 
-/// `ahi tools examples`: the index, then every example with a heading, or
-/// one example when `name` is given.
+/// `ahi tools examples show [<name>]`: every example with a heading, or
+/// one when `name` is given.
 pub fn render_examples(name: Option<&str>, color: bool) -> std::result::Result<String, String> {
     let chosen: Vec<&Example> = match name {
         Some(name) => vec![example(name)?],
         None => EXAMPLES.iter().collect(),
     };
     let mut out = String::new();
-    if name.is_none() {
-        out.push_str(&render_index());
-        out.push('\n');
-    }
     for (index, e) in chosen.iter().enumerate() {
         if index > 0 {
             out.push('\n');
@@ -384,8 +384,11 @@ mod tests {
         assert!(line_with("# Reads anywhere").starts_with("# Reads"));
         assert!(line_with("version: 1").starts_with("version: 1"));
         assert!(painted.lines().last().unwrap().contains("approve"));
+        let index = render_index();
+        assert!(index.starts_with("read-all"), "{index}");
+        assert!(index.contains("examples show <name>"), "{index}");
         let all = render_examples(None, false).unwrap();
-        assert!(all.starts_with("read-all"), "{all}");
+        assert!(all.starts_with("== read-all"), "{all}");
         for e in EXAMPLES {
             assert!(all.contains(&format!("== {} (examples/tools/{}.yaml)", e.name, e.name)));
             assert!(all.contains(e.text));

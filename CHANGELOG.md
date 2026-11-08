@@ -4,7 +4,7 @@
 
 ### Added
 
-- `ahi tools list` now shows the working directory's `ahi.tools.yaml` painted by outcome, followed by the summary `ahi doctor` prints, or says the file is absent. `ahi tools examples` prints the index of shipped policies and then every example, painted; `ahi tools examples <name>` prints one. The index that `list` printed in 0.14.0 moved to `examples`.
+- `ahi tools list` now shows the working directory's `ahi.tools.yaml` painted by outcome, followed by the summary `ahi doctor` prints, or says the file is absent. `ahi tools examples list` (the default for bare `ahi tools examples`) names the shipped policies with what each lets the model do, which `list` printed in 0.14.0; `ahi tools examples show` prints every one painted and `ahi tools examples show <name>` prints one.
 - `ahi tools init`, `list`, and `examples` paint each rule in a terminal with the chat's colors for its outcome: approve green, ask gray, deny red, the same backgrounds the transcript uses for added and removed diff lines, with a legend. `--color never` prints plain text, `auto` honours `NO_COLOR`, and the written file is always plain. This is the first command to use `--color`, which was validated and ignored before.
 
 ### Changed
