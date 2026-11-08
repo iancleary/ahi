@@ -2,7 +2,6 @@
 //! Text travels in a private UTF-8 file: console code pages, `clip.exe` and
 //! PowerShell pipelines would otherwise re-encode it or append newlines.
 use super::command::run_command;
-use base64::Engine;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -16,7 +15,7 @@ impl HandoffFile {
         let mut random = [0; 16];
         getrandom::getrandom(&mut random)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
+        let name = crate::util::base64::encode_url_safe_no_pad(&random);
         let path = std::env::temp_dir().join(format!("ahi-clip-{name}.txt"));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);

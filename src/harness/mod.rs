@@ -295,16 +295,9 @@ impl LoadedProvider {
             None if self.catalog.is_none() => "unavailable".to_string(),
             None => "retrieval time unknown (old catalog format)".to_string(),
             Some(stamp) => {
-                let age = time::OffsetDateTime::parse(
-                    stamp,
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .map(|then| {
-                    (time::OffsetDateTime::now_utc() - then)
-                        .whole_seconds()
-                        .max(0)
-                })
-                .unwrap_or(0);
+                let age = crate::util::rfc3339::parse(stamp)
+                    .map(|then| (crate::util::rfc3339::unix_now() - then).max(0))
+                    .unwrap_or(0);
                 format!("{age}s old (retrieved {stamp})")
             }
         }
@@ -553,11 +546,7 @@ pub fn refresh_provider(state: &Directories, id: &str) -> Result<()> {
         &CatalogSnapshot {
             provider: id.to_string(),
             source: Some(source),
-            retrieved_at: Some(
-                time::OffsetDateTime::now_utc()
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .map_err(|err| Error::new(format!("catalog timestamp: {err}")))?,
-            ),
+            retrieved_at: Some(crate::util::rfc3339::now()),
             models,
             metadata,
         },
@@ -930,13 +919,12 @@ fn read_last_good(state: &Directories, id: &str) -> Result<Option<CatalogSnapsho
         )?;
     }
     if let Some(stamp) = &catalog.retrieved_at {
-        time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
-            .map_err(|_| {
-                Error::new(format!(
-                    "{}: invalid retrieved_at timestamp",
-                    path.display()
-                ))
-            })?;
+        crate::util::rfc3339::parse(stamp).ok_or_else(|| {
+            Error::new(format!(
+                "{}: invalid retrieved_at timestamp",
+                path.display()
+            ))
+        })?;
     }
     Ok(Some(catalog))
 }
