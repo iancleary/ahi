@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi tools init [--example <name>] [--write] [--force]` writes a shipped tool policy from `examples/tools` into the working directory as `ahi.tools.yaml`, following `ahi migrate`: it prints the policy and writes only with `--write`, replacing an existing file only with `--write --force`. The default is `read-all`. `ahi tools list` names the shipped policies with what each lets the model do. The examples are embedded in the binary, so `cargo install` has them; a test keeps the list and the directory in step.
+- `ahi doctor` reports the working directory's `ahi.tools.yaml`: absent, invalid, or present with approve/ask/deny rule counts and the tools it advertises.
+
+### Changed
+
+- The chat startup header's "tools off" line now says that `ahi tools init` writes a policy.
+- The repository's own `ahi.tools.yaml` now begins with the `read-all` example rule for rule (a test keeps them equal) and adds `run_command` rules for the repository workflow: `cargo check`, `cargo test`, `cargo doc`, `git status`, `git diff`, and `git log` run without a prompt; `cargo clippy`, `cargo fmt`, other `cargo` subcommands, and `just` ask; `cargo publish`, `cargo install`, and `git push` are denied.
+- Example policies: `commands.yaml` gains the root `.env` deny the other reading policies have; `ask-every-read.yaml` asks for `find_files` and `search_files` too; `sources-only.yaml` approves find and search under `src` and `docs`. Comments and the examples README now say that `path: .env` names the root file only, since rules match a path prefix, and that the `sh` rule in `commands.yaml` covers any `sh` command run from `scripts`.
+
 ## 0.13.2 (2026-11-08)
 
 ### Added

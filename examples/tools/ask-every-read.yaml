@@ -1,4 +1,4 @@
-# Every read and listing shows an approval prompt in chat.
+# Every read, listing, find, and search shows an approval prompt in chat.
 version: 1
 default: deny
 rules:
@@ -10,5 +10,15 @@ rules:
   - id: ask-read
     action: tool_call
     match: {tool: read_file}
+    effect: approve
+    ask: true
+  - id: ask-find
+    action: tool_call
+    match: {tool: find_files}
+    effect: approve
+    ask: true
+  - id: ask-search
+    action: tool_call
+    match: {tool: search_files}
     effect: approve
     ask: true

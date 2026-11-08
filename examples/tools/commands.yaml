@@ -1,10 +1,16 @@
-# Reads anywhere; cargo check and test run without a prompt; any other
-# cargo subcommand asks; cargo publish and cargo install are denied; a
-# repository script under scripts asks. Commands run on the host with the
-# hook runner's scrubbed environment plus the named toolchain variables.
+# Reads anywhere except the root .env; cargo check and test run without a
+# prompt; any other cargo subcommand asks; cargo publish and cargo install
+# are denied; any sh command whose working directory is scripts asks (an
+# argv prefix cannot name a file, so `sh -c` is included). Commands run on
+# the host with the hook runner's scrubbed environment plus the named
+# toolchain variables.
 version: 1
 default: deny
 rules:
+  - id: no-env
+    action: tool_call
+    match: {tool: read_file, path: .env}
+    effect: deny
   - id: read-tree
     action: tool_call
     match: {tool: read_file}

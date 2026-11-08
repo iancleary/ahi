@@ -6,7 +6,7 @@
 //! `key_binding` before the screen applies them.
 
 mod approval;
-mod backend;
+pub(crate) mod backend;
 mod command;
 mod header;
 pub(crate) mod input;

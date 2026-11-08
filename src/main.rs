@@ -119,6 +119,15 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
     },
+    /// Write a chat tool policy (ahi.tools.yaml) into the working directory, or list the shipped ones.
+    ///
+    /// Tools are off until the directory `ahi tui` starts in has an
+    /// ahi.tools.yaml with an approve rule. `init` prints a shipped policy and
+    /// writes it only with --write, like `ahi migrate`.
+    Tools {
+        #[command(subcommand)]
+        command: ToolsCommand,
+    },
     /// Sign in to OpenAI through the browser and store the credential.
     ///
     /// Prints the login URL, tries to open a browser, and waits for the
@@ -198,6 +207,24 @@ enum HooksCommand {
     Install,
     /// Remove the git hook shim (not implemented yet; exits 1).
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum ToolsCommand {
+    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools list`).
+    Init {
+        /// Which shipped policy; `ahi tools list` prints them.
+        #[arg(long, value_name = "NAME", default_value = ahi::tools::DEFAULT_EXAMPLE)]
+        example: String,
+        /// Write ahi.tools.yaml in the working directory. Refuses an existing file without --force.
+        #[arg(long)]
+        write: bool,
+        /// With --write, replace an existing file.
+        #[arg(long, requires = "write")]
+        force: bool,
+    },
+    /// List the shipped policies with what each lets the model do.
+    List,
 }
 
 #[derive(clap::Args)]
@@ -289,6 +316,17 @@ fn main() -> ExitCode {
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
         Command::Tui { refresh, tools } => tui(&cli, *refresh, tools.as_deref()),
+        Command::Tools { command } => match command {
+            ToolsCommand::Init {
+                example,
+                write,
+                force,
+            } => tools_init(example, *write, *force),
+            ToolsCommand::List => {
+                print!("{}", ahi::tools::render_list());
+                ExitCode::from(0)
+            }
+        },
         Command::Login => login(&cli),
         Command::Dev(args) => dev(&cli, args),
         Command::Sandbox {
@@ -696,6 +734,16 @@ fn doctor(
         },
         Err(err) => println!("hooks policy: {err}"),
     }
+    // Tool policy is read from the directory `ahi tui` starts in, not the
+    // repository root, so the working directory is the one to report.
+    match env::current_dir() {
+        Ok(cwd) => {
+            for line in ahi::tools::doctor_lines(&cwd) {
+                println!("{line}");
+            }
+        }
+        Err(err) => println!("tools policy: {err}"),
+    }
     ExitCode::from(0)
 }
 
@@ -740,6 +788,51 @@ fn login(cli: &Cli) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `ahi tools init`: print a shipped policy; with --write create
+/// ahi.tools.yaml in the working directory, the directory `ahi tui` reads it
+/// from. The file is operator policy, so the chat screen never writes it.
+fn tools_init(example: &str, write: bool, force: bool) -> ExitCode {
+    if force && !write {
+        eprintln!("error: --force does not write a file; pass --write --force to replace one");
+        return ExitCode::from(2);
+    }
+    let example = match ahi::tools::example(example) {
+        Ok(example) => example,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let path = std::path::Path::new(ahi::tools::FILE_NAME);
+    print!("{}", example.text);
+    println!();
+    if !write {
+        println!(
+            "Left {} unchanged. Rerun with --write to create it from `{}`; rule paths are relative to this directory.",
+            path.display(),
+            example.name
+        );
+        return ExitCode::from(0);
+    }
+    if path.exists() && !force {
+        eprintln!(
+            "error: refusing to overwrite {}; pass --write --force to replace it",
+            path.display()
+        );
+        return ExitCode::from(1);
+    }
+    if let Err(err) = std::fs::write(path, example.text) {
+        eprintln!("error: cannot write {}: {err}", path.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "Wrote {} from `{}`. `ahi tui` in this directory advertises the tools it approves; `ahi doctor` lists them.",
+        path.display(),
+        example.name
+    );
+    ExitCode::from(0)
 }
 
 fn migrate_config(config: Option<&std::path::Path>, write: bool, force: bool) -> ExitCode {

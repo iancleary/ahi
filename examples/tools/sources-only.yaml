@@ -1,4 +1,5 @@
-# List anywhere; read only src and docs. Deny rules win over approvals.
+# List anywhere; read, find, and search only under src and docs. Deny rules
+# win over approvals. The .env and target denies are root paths.
 version: 1
 default: deny
 rules:
@@ -21,4 +22,20 @@ rules:
   - id: read-docs
     action: tool_call
     match: {tool: read_file, path: docs}
+    effect: approve
+  - id: find-sources
+    action: tool_call
+    match: {tool: find_files, path: src}
+    effect: approve
+  - id: find-docs
+    action: tool_call
+    match: {tool: find_files, path: docs}
+    effect: approve
+  - id: search-sources
+    action: tool_call
+    match: {tool: search_files, path: src}
+    effect: approve
+  - id: search-docs
+    action: tool_call
+    match: {tool: search_files, path: docs}
     effect: approve

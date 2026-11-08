@@ -1,6 +1,7 @@
 # Read anywhere; edit existing files under src and tests after a prompt;
 # create new files under tests without one. Policy files, hook
 # configuration, .gitignore, and .git are never writable whatever is here.
+# The .env and Cargo.lock rules name root paths; rules match a path prefix.
 version: 1
 default: deny
 rules:
