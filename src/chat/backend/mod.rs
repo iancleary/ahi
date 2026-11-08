@@ -85,6 +85,10 @@ pub(crate) enum ResponseEvent {
         /// The `role: "tool"` content sent back to the model.
         content: String,
         exit_code: i32,
+        /// Screen-only structure: diff texts, command streams, query.
+        detail: Option<tools::ToolDetail>,
+        /// Wall time of the call itself, approval excluded.
+        elapsed: std::time::Duration,
     },
     Completed,
     /// A completion that could not be produced. `kind` is what the screen

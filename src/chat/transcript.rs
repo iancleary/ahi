@@ -1,9 +1,18 @@
 //! Transcript data shared by the screen and completion backends.
 
+pub(crate) mod diff;
+pub(crate) mod format;
+pub(crate) mod highlight;
+pub(crate) mod links;
+pub(crate) mod markdown;
 pub(crate) mod render;
+pub(crate) mod theme;
+
+use std::time::Duration;
 
 use serde_json::Value;
 
+use super::backend::tools::ToolDetail;
 use super::backend::ToolCall;
 use crate::harness::Protocol;
 
@@ -15,6 +24,11 @@ pub(crate) struct ChatMessage {
     pub(crate) text: String,
     /// Structured tool exchange replayed to the model on later requests.
     pub(crate) tool: Option<ToolPayload>,
+    /// Screen-only structure of a tool result (diff texts, command streams,
+    /// query). Never sent to a model.
+    pub(crate) detail: Option<ToolDetail>,
+    /// How long a tool call ran, for its header row.
+    pub(crate) elapsed: Option<Duration>,
 }
 
 /// Provider-native output captured at a terminal event and replayed verbatim
@@ -51,6 +65,8 @@ impl ChatMessage {
             role,
             text: text.into(),
             tool: None,
+            detail: None,
+            elapsed: None,
         }
     }
 }

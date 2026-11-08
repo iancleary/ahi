@@ -24,7 +24,7 @@ mod write_file;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-pub(crate) use run_command::CommandReport;
+pub(crate) use run_command::{render as render_argv, CommandReport};
 pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 
@@ -473,11 +473,48 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
 }
 
 /// A finished call: what the model receives, and for a write or a command,
-/// what happened, for the audit log.
+/// what happened, for the audit log and for the screen.
 pub(super) struct Executed {
     pub(super) content: String,
     pub(super) write: Option<WriteReport>,
     pub(super) command: Option<CommandReport>,
+    pub(super) detail: Option<ToolDetail>,
+}
+
+/// What the screen draws for a finished call beyond its text: the exact
+/// texts a write replaced, the separated streams of a command, or the
+/// query a search ran. Never sent to a model; `content` already carries
+/// what the model needs. Bounded by the caps of the tool that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolDetail {
+    Write {
+        /// `None` for a created file.
+        before: Option<String>,
+        after: String,
+    },
+    Command {
+        argv: Vec<String>,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        stdout_cut: bool,
+        stderr_cut: bool,
+    },
+    Search {
+        pattern: String,
+        literal: bool,
+        glob: Option<String>,
+        matches: usize,
+    },
+    Find {
+        pattern: String,
+        matches: usize,
+    },
+    Read {
+        offset: Option<usize>,
+        limit: Option<usize>,
+        lines: usize,
+    },
 }
 
 /// Run an approved call. `toolchain_env` is the approving command rule's
@@ -488,19 +525,24 @@ pub(super) fn execute(
     workspace: &Workspace,
     toolchain_env: &[String],
 ) -> Result<Executed, &'static str> {
-    let read_only = |content: Result<String, &'static str>| {
-        content.map(|content| Executed {
-            content,
-            write: None,
-            command: None,
-        })
-    };
+    // Result rows are one per line; headers and continuation notes are not
+    // matches, so counts are approximate for the screen header only.
+    let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
         Arguments::Command { argv, timeout_secs } => {
             let cwd = workspace.resolve(&call.path)?;
-            let (content, report) = run_command::run(argv, &cwd, *timeout_secs, toolchain_env)?;
+            let (content, report, output) =
+                run_command::run(argv, &cwd, *timeout_secs, toolchain_env)?;
             Ok(Executed {
                 content,
+                detail: Some(ToolDetail::Command {
+                    argv: argv.clone(),
+                    exit_code: report.exit_code,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    stdout_cut: output.stdout_cut,
+                    stderr_cut: output.stderr_cut,
+                }),
                 write: None,
                 command: Some(report),
             })
@@ -514,35 +556,66 @@ pub(super) fn execute(
             if !exists {
                 return Err("path does not exist or cannot be read");
             }
-            let (content, report) = edit_file::run(&path, old, new, *replace_all)?;
+            let (content, report, texts) = edit_file::run(&path, old, new, *replace_all)?;
             Ok(Executed {
                 content,
                 write: Some(report),
                 command: None,
+                detail: Some(ToolDetail::Write {
+                    before: texts.before,
+                    after: texts.after,
+                }),
             })
         }
         Arguments::Write { content, overwrite } => {
             let (path, exists) = workspace.resolve_for_write(&call.path)?;
-            let (content, report) = write_file::run(&path, content, *overwrite, exists)?;
+            let (content, report, texts) = write_file::run(&path, content, *overwrite, exists)?;
             Ok(Executed {
                 content,
                 write: Some(report),
                 command: None,
+                detail: Some(ToolDetail::Write {
+                    before: texts.before,
+                    after: texts.after,
+                }),
             })
         }
         Arguments::Read { offset, limit } => {
             let path = workspace.resolve(&call.path)?;
-            read_only(read_file::run(&path, *offset, *limit))
+            let content = read_file::run(&path, *offset, *limit)?;
+            Ok(Executed {
+                detail: Some(ToolDetail::Read {
+                    offset: *offset,
+                    limit: *limit,
+                    lines: content.lines().count(),
+                }),
+                content,
+                write: None,
+                command: None,
+            })
         }
         Arguments::List => {
             let path = workspace.resolve(&call.path)?;
-            read_only(list_dir::run(&path))
+            let content = list_dir::run(&path)?;
+            Ok(Executed {
+                content,
+                write: None,
+                command: None,
+                detail: None,
+            })
         }
         Arguments::Find { pattern, limit } => {
             let path = workspace.resolve(&call.path)?;
-            read_only(find_files::run(
-                workspace, &path, &call.path, pattern, *limit,
-            ))
+            let content = find_files::run(workspace, &path, &call.path, pattern, *limit)?;
+            Ok(Executed {
+                detail: Some(ToolDetail::Find {
+                    pattern: pattern.clone(),
+                    matches: matches(&content),
+                }),
+                content,
+                write: None,
+                command: None,
+            })
         }
         Arguments::Search {
             pattern,
@@ -552,7 +625,7 @@ pub(super) fn execute(
             limit,
         } => {
             let path = workspace.resolve(&call.path)?;
-            read_only(search_files::run(
+            let content = search_files::run(
                 workspace,
                 &path,
                 &call.path,
@@ -563,7 +636,18 @@ pub(super) fn execute(
                     glob: glob.as_deref(),
                     limit: *limit,
                 },
-            ))
+            )?;
+            Ok(Executed {
+                detail: Some(ToolDetail::Search {
+                    pattern: pattern.clone(),
+                    literal: *literal,
+                    glob: glob.clone(),
+                    matches: matches(&content),
+                }),
+                content,
+                write: None,
+                command: None,
+            })
         }
     }
 }

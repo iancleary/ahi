@@ -22,6 +22,15 @@ pub(super) const MAX_ARGV: usize = 64;
 /// Total argv bytes accepted.
 pub(super) const MAX_ARGV_BYTES: usize = 8 * 1024;
 
+/// The two streams as the screen shows them, each capped like `content`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandOutput {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) stdout_cut: bool,
+    pub(crate) stderr_cut: bool,
+}
+
 /// What ran, for the audit log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandReport {
@@ -35,7 +44,7 @@ pub(super) fn run(
     cwd: &Path,
     timeout_secs: u64,
     toolchain_env: &[String],
-) -> Result<(String, CommandReport), &'static str> {
+) -> Result<(String, CommandReport, CommandOutput), &'static str> {
     let (program, args) = argv.split_first().ok_or("argv must not be empty")?;
     if !cwd.is_dir() {
         return Err("not a directory");
@@ -114,6 +123,16 @@ pub(super) fn run(
             duration_ms,
             env_names,
         },
+        CommandOutput {
+            stdout: String::from_utf8_lossy(&out)
+                .trim_end_matches('\n')
+                .to_string(),
+            stderr: String::from_utf8_lossy(&err)
+                .trim_end_matches('\n')
+                .to_string(),
+            stdout_cut: out_cut,
+            stderr_cut: err_cut,
+        },
     ))
 }
 
@@ -156,7 +175,7 @@ fn section(content: &mut String, name: &str, bytes: &[u8], cut: bool) {
 /// Render argv for the approval prompt: tokens separated by spaces, a token
 /// with spaces or quotes shown in single quotes, control characters
 /// replaced, and the whole cut at 200 characters.
-pub(super) fn render(argv: &[String]) -> String {
+pub(crate) fn render(argv: &[String]) -> String {
     let mut out = String::new();
     for (index, token) in argv.iter().enumerate() {
         if index > 0 {

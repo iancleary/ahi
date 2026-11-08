@@ -39,7 +39,12 @@ pub(crate) enum KeyAction {
 pub(crate) enum SelectionKey {
     Move(CursorMove),
     Visual(VisualMode),
+    /// `y`: copy in the preferred form.
     Yank,
+    /// `Y`: copy the raw source regardless of the preference.
+    YankRaw,
+    /// Enter or `o`: open the link or file under the cursor.
+    Open,
     Exit,
     Ignore,
 }
@@ -53,7 +58,9 @@ pub(crate) fn translate_selection(key: KeyEvent) -> SelectionKey {
     match key.code {
         KeyCode::Esc => SelectionKey::Exit,
         KeyCode::Char('c') if control => SelectionKey::Exit,
-        KeyCode::Char('y' | 'Y') => SelectionKey::Yank,
+        KeyCode::Char('y') => SelectionKey::Yank,
+        KeyCode::Char('Y') => SelectionKey::YankRaw,
+        KeyCode::Enter | KeyCode::Char('o') => SelectionKey::Open,
         _ if control || key.modifiers.contains(KeyModifiers::ALT) => SelectionKey::Ignore,
         KeyCode::Char('v') => SelectionKey::Visual(VisualMode::Char),
         KeyCode::Char('V') => SelectionKey::Visual(VisualMode::Line),
@@ -365,7 +372,12 @@ mod tests {
                 SelectionKey::Exit,
             ),
             (KeyCode::Char('x'), KeyModifiers::NONE, SelectionKey::Ignore),
-            (KeyCode::Enter, KeyModifiers::NONE, SelectionKey::Ignore),
+            (KeyCode::Enter, KeyModifiers::NONE, SelectionKey::Open),
+            (
+                KeyCode::Char('Y'),
+                KeyModifiers::SHIFT,
+                SelectionKey::YankRaw,
+            ),
             (
                 KeyCode::Char('k'),
                 KeyModifiers::CONTROL,

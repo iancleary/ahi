@@ -4,18 +4,134 @@
 //! keeps them between frames and re-lays only the messages that changed; a
 //! frame then pads and styles the visible window alone.
 
-use super::{ChatMessage, TranscriptRole};
-use ratatui_core::style::{Color, Style};
-use ratatui_core::text::Line;
+use super::format::{self, Options};
+use super::{theme, ChatMessage};
+use ratatui_core::style::Style;
+use ratatui_core::text::{Line, Span};
+use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// One differently styled byte range of a row's text. Non-overlapping, ascending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowSpan {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) style: Style,
+}
+
+/// What a click or `Enter` on a byte range of a row does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Target {
+    Url(String),
+    File {
+        path: String,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
+    /// Copy this text (a fenced code block's body) to the clipboard.
+    Copy(Rc<str>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowTarget {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) target: Target,
+}
+
 pub(crate) struct TranscriptRow {
-    /// Original content, without terminal padding.
+    /// Rendered content, without terminal padding. Selection and copy read this.
     pub(crate) text: String,
     /// False for a soft wrap, true for an original newline/message boundary.
     pub(crate) break_after: bool,
+    /// Row background and default foreground, from the message role.
     style: Style,
+    /// Styling inside the row. Empty for plain text.
+    pub(crate) spans: Vec<RowSpan>,
+    /// Things under the pointer. Empty for plain text.
+    pub(crate) targets: Vec<RowTarget>,
+    /// The source text (raw markdown) of the block this row renders, shared by
+    /// every row of that block. `None` when the rendered text is the source.
+    pub(crate) source: Option<Rc<str>>,
+}
+
+impl TranscriptRow {
+    fn plain(text: String, break_after: bool, style: Style) -> Self {
+        Self {
+            text,
+            break_after,
+            style,
+            spans: Vec::new(),
+            targets: Vec::new(),
+            source: None,
+        }
+    }
+
+    /// The target whose byte range covers cell `column` of this row.
+    pub(crate) fn target_at(&self, column: usize) -> Option<&Target> {
+        let mut cells = 0;
+        for (offset, grapheme) in self.text.grapheme_indices(true) {
+            let next = cells + grapheme.width();
+            if column < next {
+                return self
+                    .targets
+                    .iter()
+                    .find(|target| target.start <= offset && offset < target.end)
+                    .map(|target| &target.target);
+            }
+            cells = next;
+        }
+        None
+    }
+}
+
+/// One paragraph of formatted text before wrapping: rendered text with its
+/// spans and targets as byte ranges, and the source it was rendered from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Styled {
+    pub(crate) text: String,
+    pub(crate) spans: Vec<RowSpan>,
+    pub(crate) targets: Vec<RowTarget>,
+    pub(crate) source: Option<Rc<str>>,
+    /// Patched over the role style for every row of this paragraph, so a
+    /// background (code block, diff line) covers the padding too.
+    pub(crate) style: Option<Style>,
+}
+
+impl Styled {
+    pub(crate) fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Append `text` drawn with `style` (patched over the row style).
+    pub(crate) fn push(&mut self, text: &str, style: Style) {
+        let start = self.text.len();
+        self.text.push_str(text);
+        if style != Style::default() && !text.is_empty() {
+            self.spans.push(RowSpan {
+                start,
+                end: self.text.len(),
+                style,
+            });
+        }
+    }
+
+    /// Append `text` drawn with `style` that reacts to a click.
+    pub(crate) fn push_target(&mut self, text: &str, style: Style, target: Target) {
+        let start = self.text.len();
+        self.push(text, style);
+        if !text.is_empty() {
+            self.targets.push(RowTarget {
+                start,
+                end: self.text.len(),
+                target,
+            });
+        }
+    }
 }
 
 /// Wrapped rows for a message list, kept up to date incrementally.
@@ -53,7 +169,13 @@ impl TranscriptLayout {
     /// resumes from that message's last row instead of its first byte, so a
     /// streamed reply costs the new text, not the whole message, per frame.
     /// Leaves `*dirty` clean.
-    pub(crate) fn sync(&mut self, messages: &[ChatMessage], width: usize, dirty: &mut Dirty) {
+    pub(crate) fn sync(
+        &mut self,
+        messages: &[ChatMessage],
+        width: usize,
+        dirty: &mut Dirty,
+        options: &Options,
+    ) {
         let width = width.max(1);
         let from = match *dirty {
             _ if width != self.width => 0,
@@ -67,7 +189,7 @@ impl TranscriptLayout {
         self.starts.truncate(from);
         for message in &messages[from..] {
             self.starts.push(self.rows.len());
-            layout_message(&mut self.rows, message, width);
+            layout_message(&mut self.rows, message, width, options);
         }
         if let Some(last) = messages.last() {
             self.last_len = last.text.len();
@@ -94,6 +216,15 @@ impl TranscriptLayout {
         if !message.text.is_char_boundary(self.last_len) {
             return false;
         }
+        // Only a plain tail can be extended in place: a formatted row's spans
+        // and targets would need the whole block re-rendered.
+        if self
+            .rows
+            .last()
+            .is_none_or(|tail| !tail.spans.is_empty() || tail.source.is_some())
+        {
+            return false;
+        }
         let Some(tail) = self.rows.pop() else {
             return false;
         };
@@ -115,53 +246,105 @@ impl TranscriptLayout {
 /// Append one message's rows: a blank separator when rows precede it, then
 /// each paragraph wrapped by grapheme cell width. Tool-only assistant turns
 /// have nothing to show; their results do.
-fn layout_message(rows: &mut Vec<TranscriptRow>, message: &ChatMessage, width: usize) {
-    if message.text.is_empty() && message.tool.is_some() {
+fn layout_message(
+    rows: &mut Vec<TranscriptRow>,
+    message: &ChatMessage,
+    width: usize,
+    options: &Options,
+) {
+    let paragraphs = format::paragraphs(message, options, width);
+    if paragraphs.is_empty() {
         return;
     }
     if !rows.is_empty() {
-        rows.push(TranscriptRow {
-            text: String::new(),
-            break_after: true,
-            style: Style::default(),
-        });
+        rows.push(TranscriptRow::plain(String::new(), true, Style::default()));
     }
-    let background = match message.role {
-        TranscriptRole::Operator => Color::Rgb(30, 45, 60),
-        TranscriptRole::Tool { exit_code: 0 } => Color::Rgb(30, 60, 45),
-        TranscriptRole::Tool { .. } => Color::Rgb(60, 30, 30),
-        TranscriptRole::Alert => Color::Rgb(70, 50, 20),
-        TranscriptRole::Assistant | TranscriptRole::Notice => Color::Reset,
-    };
-    let style = Style::default().bg(background);
-    layout_paragraphs(rows, &message.text, style, width);
+    let style = Style::default().bg(theme::background(message.role));
+    for paragraph in &paragraphs {
+        layout_styled(rows, paragraph, style, width);
+    }
 }
 
 /// Wrap `text` by grapheme cell width, one row per soft wrap or newline.
 fn layout_paragraphs(rows: &mut Vec<TranscriptRow>, text: &str, style: Style, width: usize) {
     for paragraph in text.split('\n') {
-        let mut text = String::new();
-        let mut cells = 0;
-        for grapheme in paragraph.graphemes(true) {
-            let size = grapheme.width();
-            if cells + size > width.max(1) && !text.is_empty() {
-                rows.push(TranscriptRow {
-                    text,
-                    break_after: false,
-                    style,
-                });
-                text = String::new();
-                cells = 0;
-            }
-            text.push_str(grapheme);
-            cells += size;
-        }
-        rows.push(TranscriptRow {
-            text,
-            break_after: true,
-            style,
-        });
+        layout_styled(rows, &Styled::plain(paragraph), style, width);
     }
+}
+
+/// Wrap one formatted paragraph, splitting its spans and targets at soft
+/// wraps. Newlines inside `paragraph.text` end a row like a hard break.
+pub(crate) fn layout_styled(
+    rows: &mut Vec<TranscriptRow>,
+    paragraph: &Styled,
+    style: Style,
+    width: usize,
+) {
+    let width = width.max(1);
+    let style = paragraph.style.map_or(style, |over| style.patch(over));
+    let mut row_start = 0;
+    let mut text = String::new();
+    let mut cells = 0;
+    let flush = |rows: &mut Vec<TranscriptRow>,
+                 text: &mut String,
+                 row_start: &mut usize,
+                 end: usize,
+                 break_after: bool| {
+        let shift = |start: usize, stop: usize| {
+            let start = start.max(*row_start);
+            let stop = stop.min(end);
+            // `then`, not `then_some`: the subtraction must not run when
+            // the range lies before this row.
+            (start < stop).then(|| (start - *row_start, stop - *row_start))
+        };
+        let spans = paragraph
+            .spans
+            .iter()
+            .filter_map(|span| {
+                shift(span.start, span.end).map(|(start, end)| RowSpan {
+                    start,
+                    end,
+                    style: span.style,
+                })
+            })
+            .collect();
+        let targets = paragraph
+            .targets
+            .iter()
+            .filter_map(|target| {
+                shift(target.start, target.end).map(|(start, end)| RowTarget {
+                    start,
+                    end,
+                    target: target.target.clone(),
+                })
+            })
+            .collect();
+        rows.push(TranscriptRow {
+            text: std::mem::take(text),
+            break_after,
+            style,
+            spans,
+            targets,
+            source: paragraph.source.clone(),
+        });
+        *row_start = end;
+    };
+    for (offset, grapheme) in paragraph.text.grapheme_indices(true) {
+        if grapheme == "\n" {
+            flush(rows, &mut text, &mut row_start, offset, true);
+            row_start = offset + 1;
+            cells = 0;
+            continue;
+        }
+        let size = grapheme.width();
+        if cells + size > width && !text.is_empty() {
+            flush(rows, &mut text, &mut row_start, offset, false);
+            cells = 0;
+        }
+        text.push_str(grapheme);
+        cells += size;
+    }
+    flush(rows, &mut text, &mut row_start, paragraph.text.len(), true);
 }
 
 /// All rows of a message list. One-shot; the screen uses `TranscriptLayout`.
@@ -169,17 +352,42 @@ fn layout_paragraphs(rows: &mut Vec<TranscriptRow>, text: &str, style: Style, wi
 pub(crate) fn rows(messages: &[ChatMessage], width: usize) -> Vec<TranscriptRow> {
     let mut rows = Vec::new();
     for message in messages {
-        layout_message(&mut rows, message, width);
+        layout_message(&mut rows, message, width, &Options::PLAIN);
     }
     rows
 }
 
 fn padded_line(row: &TranscriptRow, width: usize) -> Line<'static> {
     let padding = width.saturating_sub(row.text.width());
-    let mut text = String::with_capacity(row.text.len() + padding);
-    text.push_str(&row.text);
-    text.extend(std::iter::repeat_n(' ', padding));
-    Line::styled(text, row.style)
+    if row.spans.is_empty() {
+        let mut text = String::with_capacity(row.text.len() + padding);
+        text.push_str(&row.text);
+        text.extend(std::iter::repeat_n(' ', padding));
+        return Line::styled(text, row.style);
+    }
+    let mut spans = Vec::with_capacity(row.spans.len() * 2 + 2);
+    let mut cursor = 0;
+    for span in &row.spans {
+        let start = span.start.clamp(cursor, row.text.len());
+        let end = span.end.clamp(start, row.text.len());
+        if cursor < start {
+            spans.push(Span::styled(row.text[cursor..start].to_string(), row.style));
+        }
+        if start < end {
+            spans.push(Span::styled(
+                row.text[start..end].to_string(),
+                row.style.patch(span.style),
+            ));
+        }
+        cursor = end;
+    }
+    if cursor < row.text.len() {
+        spans.push(Span::styled(row.text[cursor..].to_string(), row.style));
+    }
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), row.style));
+    }
+    Line::from(spans)
 }
 
 /// Every row as a padded line. For tests and one-shot callers.
@@ -218,6 +426,7 @@ pub(crate) fn clamp_scroll(scroll_from_bottom: &mut usize, line_count: usize, he
 
 #[cfg(test)]
 mod tests {
+    use super::super::TranscriptRole;
     use super::*;
 
     fn message(role: TranscriptRole, text: &str) -> ChatMessage {
@@ -232,7 +441,7 @@ mod tests {
         ];
         let mut layout = TranscriptLayout::new();
         let mut dirty = Dirty::From(0);
-        layout.sync(&messages, 6, &mut dirty);
+        layout.sync(&messages, 6, &mut dirty, &Options::PLAIN);
         let texts =
             |rows: &[TranscriptRow]| rows.iter().map(|r| r.text.clone()).collect::<Vec<_>>();
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
@@ -241,26 +450,26 @@ mod tests {
         // Streaming appends to the last message: only it is re-laid.
         messages[1].text.push_str(" and more");
         dirty = Dirty::From(1);
-        layout.sync(&messages, 6, &mut dirty);
+        layout.sync(&messages, 6, &mut dirty, &Options::PLAIN);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
 
         // A message appended without a dirty mark is still picked up.
         messages.push(message(TranscriptRole::Notice, "note"));
-        layout.sync(&messages, 6, &mut dirty);
+        layout.sync(&messages, 6, &mut dirty, &Options::PLAIN);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
 
         // An earlier message edited in place re-lays from there.
         messages[0].text = "edited".into();
         dirty = Dirty::From(0);
-        layout.sync(&messages, 6, &mut dirty);
+        layout.sync(&messages, 6, &mut dirty, &Options::PLAIN);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 6)));
 
         // A width change re-lays everything; clearing truncates.
-        layout.sync(&messages, 40, &mut dirty);
+        layout.sync(&messages, 40, &mut dirty, &Options::PLAIN);
         assert_eq!(texts(layout.rows()), texts(&rows(&messages, 40)));
         messages.clear();
         dirty = Dirty::From(0);
-        layout.sync(&messages, 40, &mut dirty);
+        layout.sync(&messages, 40, &mut dirty, &Options::PLAIN);
         assert!(layout.rows().is_empty());
     }
 
@@ -297,11 +506,11 @@ mod tests {
         let mut messages = vec![message(TranscriptRole::Assistant, "")];
         let mut layout = TranscriptLayout::new();
         let mut dirty = Dirty::From(0);
-        layout.sync(&messages, width, &mut dirty);
+        layout.sync(&messages, width, &mut dirty, &Options::PLAIN);
         for delta in deltas {
             messages[0].text.push_str(delta);
             dirty = Dirty::AppendedLast;
-            layout.sync(&messages, width, &mut dirty);
+            layout.sync(&messages, width, &mut dirty, &Options::PLAIN);
             check(&layout, &messages, width);
             assert_eq!(dirty, Dirty::From(1));
         }
@@ -309,11 +518,11 @@ mod tests {
         // Later message: a separator precedes it and the resume must keep it.
         messages.push(message(TranscriptRole::Operator, "question"));
         messages.push(message(TranscriptRole::Assistant, ""));
-        layout.sync(&messages, width, &mut dirty);
+        layout.sync(&messages, width, &mut dirty, &Options::PLAIN);
         for delta in deltas {
             messages[2].text.push_str(delta);
             dirty = Dirty::AppendedLast;
-            layout.sync(&messages, width, &mut dirty);
+            layout.sync(&messages, width, &mut dirty, &Options::PLAIN);
             check(&layout, &messages, width);
         }
 
@@ -325,23 +534,23 @@ mod tests {
             native: None,
         });
         messages.push(tool_turn);
-        layout.sync(&messages, width, &mut dirty);
+        layout.sync(&messages, width, &mut dirty, &Options::PLAIN);
         check(&layout, &messages, width);
         messages[3].text.push_str("late text");
         dirty = Dirty::AppendedLast;
-        layout.sync(&messages, width, &mut dirty);
+        layout.sync(&messages, width, &mut dirty, &Options::PLAIN);
         check(&layout, &messages, width);
 
         // A width change with the append flag re-lays everything.
         messages[3].text.push_str(" more");
         dirty = Dirty::AppendedLast;
-        layout.sync(&messages, 11, &mut dirty);
+        layout.sync(&messages, 11, &mut dirty, &Options::PLAIN);
         check(&layout, &messages, 11);
 
         // Text that shrank is not an append: full layout of the last message.
         messages[3].text = "short".into();
         dirty = Dirty::AppendedLast;
-        layout.sync(&messages, 11, &mut dirty);
+        layout.sync(&messages, 11, &mut dirty, &Options::PLAIN);
         check(&layout, &messages, 11);
     }
 

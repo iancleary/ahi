@@ -5,14 +5,14 @@
 
 use std::path::Path;
 
-use super::write_file::{line_count, read_text, WriteReport};
+use super::write_file::{line_count, read_text, WriteReport, WriteTexts};
 
 pub(super) fn run(
     path: &Path,
     old: &str,
     new: &str,
     replace_all: bool,
-) -> Result<(String, WriteReport), &'static str> {
+) -> Result<(String, WriteReport, WriteTexts), &'static str> {
     if old.is_empty() {
         return Err("old must not be empty");
     }
@@ -36,5 +36,9 @@ pub(super) fn run(
             .unwrap_or_default(),
         if count == 1 { "" } else { "s" }
     );
-    Ok((content, report))
+    let texts = WriteTexts {
+        before: Some(text),
+        after: replaced,
+    };
+    Ok((content, report, texts))
 }
