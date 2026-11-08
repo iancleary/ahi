@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- A weekly `dependency audit` workflow runs cargo-deny and cargo-audit against `main` and opens or updates one issue when either fails. Dependabot updates Cargo pins and GitHub Actions weekly in grouped pull requests, security updates alone; merges stay manual.
+
 ### Changed
 
 - ahi no longer depends on the `ratatui` facade or `ratatui-widgets`. It uses `ratatui-core` and `ratatui-crossterm` directly, a 40-line terminal module replaces the facade's `init` and `restore`, and the six widgets it draws with (`Block`, `Borders`, `Paragraph`, `List`, `ListItem`, `ListState`, `Clear`) are forked into the in-repo `ahi-widgets` crate from `ratatui-widgets` 0.3.0 under MIT with the upstream copyright, a per-file provenance header, and a `FORK.md`. Rendering is unchanged; every screen test passes untouched. Nine crates leave the lockfile, `time` among them.

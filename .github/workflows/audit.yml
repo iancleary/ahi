@@ -1,0 +1,78 @@
+name: dependency audit
+
+# Advisories arrive on their own clock, not on pull-request cadence. This
+# runs the same cargo-deny and cargo-audit step as CI against main every
+# Monday, and on demand, and opens or updates one issue when it fails.
+# It requests no registry token and publishes nothing.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.99.1"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: cargo-deny and cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.99.1 --profile minimal
+
+      - name: cargo-deny and cargo-audit
+        id: audit
+        shell: bash
+        # Both tools run even if the first fails, so the issue carries both reports.
+        run: |
+          set -o pipefail
+          bash scripts/install-supply-chain-tools.sh
+          status=0
+          cargo deny check 2>&1 | tee deny.log || status=1
+          cargo audit 2>&1 | tee audit.log || status=1
+          exit $status
+
+      - name: open or update the audit issue
+        if: failure() && steps.audit.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Scheduled dependency audit failed"
+          {
+            echo "The weekly cargo-deny and cargo-audit run against \`main\` failed."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '<details><summary>cargo deny check</summary>'
+            echo
+            echo '```'
+            tail -c 20000 deny.log
+            echo '```'
+            echo '</details>'
+            echo
+            echo '<details><summary>cargo audit</summary>'
+            echo
+            echo '```'
+            tail -c 20000 audit.log
+            echo '```'
+            echo '</details>'
+            echo
+            echo "Fix: bump the crate, or add an ignore with a reason and a review date to \`deny.toml\`. This issue is updated on each failing run and should be closed by the fix."
+          } > body.md
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$title" --label bug --body-file body.md
+          fi
