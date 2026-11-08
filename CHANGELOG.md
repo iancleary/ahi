@@ -10,6 +10,8 @@
 ### Changed
 
 - The chat startup header's "tools off" line now says that `ahi tools init` writes a policy.
+- The repository's own `ahi.tools.yaml` now begins with the `read-all` example rule for rule (a test keeps them equal) and adds `run_command` rules for the repository workflow: `cargo check`, `cargo test`, `cargo doc`, `git status`, `git diff`, and `git log` run without a prompt; `cargo clippy`, `cargo fmt`, other `cargo` subcommands, and `just` ask; `cargo publish`, `cargo install`, and `git push` are denied.
+- Example policies: `commands.yaml` gains the root `.env` deny the other reading policies have; `ask-every-read.yaml` asks for `find_files` and `search_files` too; `sources-only.yaml` approves find and search under `src` and `docs`. Comments and the examples README now say that `path: .env` names the root file only, since rules match a path prefix, and that the `sh` rule in `commands.yaml` covers any `sh` command run from `scripts`.
 
 ## 0.13.2 (2026-11-08)
 

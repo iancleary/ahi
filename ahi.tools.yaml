@@ -1,9 +1,17 @@
-# Builtin read-only tools for chat in this repository (see README "Tools"):
-# read_file, list_dir, find_files, search_files.
-# Rules are deny-first; only tools an approve rule names are advertised.
+# Chat tool policy for this repository: which builtin tools the model may
+# call from `ahi tui` started here, and where. Deny by default; only tools an
+# approve rule names are advertised, and a matching deny beats any approval.
+# Model output never changes this file. `ahi tools init` writes the default
+# section below into a fresh directory; `ahi doctor` reports what it approves.
 version: 1
 default: deny
 rules:
+  # ---------------------------------------------------------------------
+  # Default: the `read-all` example, rule for rule. Read, list, find, and
+  # search anywhere in the working tree; the root .env is denied to
+  # read_file (a path prefix rule; search_files skips .env via .gitignore).
+  # A test keeps this section equal to examples/tools/read-all.yaml.
+  # ---------------------------------------------------------------------
   - id: no-env
     action: tool_call
     match: {tool: read_file, path: .env}
@@ -20,7 +28,81 @@ rules:
     action: tool_call
     match: {tool: search_files}
     effect: approve
-  - id: read-sources
+  - id: read-tree
     action: tool_call
     match: {tool: read_file}
     effect: approve
+  # ---------------------------------------------------------------------
+  # Repository commands: the checks `just check` runs, as `run_command`
+  # rules. argv is a token-by-token prefix (`[cargo, test]` approves
+  # `cargo test --all-features`, not `cargo testx`), no shell is involved,
+  # and the process gets the hook runner's scrubbed environment plus the
+  # named toolchain variables. Commands run on the host in this alpha; run
+  # `ahi tui` inside `ahi dev run` for a container boundary.
+  #
+  # Read-only cargo and git subcommands run without a prompt. Anything that
+  # rewrites the tree (fmt, clippy --fix, just recipes) asks first. Publishing,
+  # installing, and pushing are denied outright, whatever else matches.
+  # ---------------------------------------------------------------------
+  - id: cargo-check
+    action: command
+    match: {argv: [cargo, check]}
+    effect: approve
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: cargo-test
+    action: command
+    match: {argv: [cargo, test]}
+    effect: approve
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: cargo-clippy
+    action: command
+    match: {argv: [cargo, clippy]}
+    effect: approve
+    ask: true
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: cargo-fmt
+    action: command
+    match: {argv: [cargo, fmt]}
+    effect: approve
+    ask: true
+  - id: cargo-doc
+    action: command
+    match: {argv: [cargo, doc]}
+    effect: approve
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: cargo-other
+    action: command
+    match: {argv: [cargo]}
+    effect: approve
+    ask: true
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: no-cargo-publish
+    action: command
+    match: {argv: [cargo, publish]}
+    effect: deny
+  - id: no-cargo-install
+    action: command
+    match: {argv: [cargo, install]}
+    effect: deny
+  - id: just-recipes
+    action: command
+    match: {argv: [just]}
+    effect: approve
+    ask: true
+    toolchain_env: [CARGO_TARGET_DIR]
+  - id: git-status
+    action: command
+    match: {argv: [git, status]}
+    effect: approve
+  - id: git-diff
+    action: command
+    match: {argv: [git, diff]}
+    effect: approve
+  - id: git-log
+    action: command
+    match: {argv: [git, log]}
+    effect: approve
+  - id: no-git-push
+    action: command
+    match: {argv: [git, push]}
+    effect: deny

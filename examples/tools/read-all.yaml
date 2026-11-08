@@ -1,4 +1,7 @@
-# Read, list, find, and search anywhere in the working tree, never .env; no prompts.
+# Read, list, find, and search anywhere in the working tree; no prompts. The
+# root .env is denied to read_file. Rules match a path prefix, so a nested
+# .env or .env.local is not covered, and search_files skips it only when
+# .gitignore does.
 version: 1
 default: deny
 rules:

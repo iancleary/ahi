@@ -34,17 +34,17 @@ pub const EXAMPLES: [Example; 7] = [
     Example {
         name: "read-all",
         text: include_str!("../examples/tools/read-all.yaml"),
-        summary: "read, list, find, and search anywhere except .env; no prompts",
+        summary: "read, list, find, and search anywhere; root .env denied; no prompts",
     },
     Example {
         name: "ask-every-read",
         text: include_str!("../examples/tools/ask-every-read.yaml"),
-        summary: "every read and listing asks in chat",
+        summary: "every read, listing, find, and search asks in chat",
     },
     Example {
         name: "sources-only",
         text: include_str!("../examples/tools/sources-only.yaml"),
-        summary: "list anywhere; read only src and docs; .env and target denied",
+        summary: "list anywhere; read, find, and search only src and docs",
     },
     Example {
         name: "list-only",
@@ -59,7 +59,8 @@ pub const EXAMPLES: [Example; 7] = [
     Example {
         name: "commands",
         text: include_str!("../examples/tools/commands.yaml"),
-        summary: "read anywhere; cargo check and test run; other cargo asks; publish denied",
+        summary:
+            "read anywhere; cargo check and test run; other cargo asks; publish and install denied",
     },
     Example {
         name: "deny-all",
@@ -182,6 +183,30 @@ mod tests {
         assert!(example("nope").unwrap_err().contains("read-all"));
     }
 
+    /// The repository's own policy begins with the `read-all` example, rule
+    /// for rule, and adds only command rules after it, so `ahi tools init`
+    /// here shows the same default the repository uses.
+    #[test]
+    fn repository_policy_starts_with_read_all() {
+        let root = tool_policy::parse(
+            include_str!("../ahi.tools.yaml"),
+            "ahi.tools.yaml",
+            &BUILTIN,
+        )
+        .unwrap();
+        let read_all =
+            tool_policy::parse(example("read-all").unwrap().text, "read-all", &BUILTIN).unwrap();
+        let shared = read_all.rules.len();
+        assert_eq!(root.rules[..shared], read_all.rules[..]);
+        assert!(
+            root.rules.len() > shared,
+            "the repository policy adds command rules"
+        );
+        for rule in &root.rules[shared..] {
+            assert_eq!(rule.action, tool_policy::ActionKind::Command, "{}", rule.id);
+        }
+    }
+
     #[test]
     fn summary_counts_rules_and_advertised_tools() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("tools-summary");
@@ -189,7 +214,7 @@ mod tests {
         assert!(doctor_lines(&dir)[0].contains("absent"));
         fs::write(dir.join(FILE_NAME), example("commands").unwrap().text).unwrap();
         let got = summary(&dir).unwrap().unwrap();
-        assert_eq!((got.approve, got.ask, got.deny), (6, 2, 2));
+        assert_eq!((got.approve, got.ask, got.deny), (6, 2, 3));
         assert_eq!(
             got.advertised,
             [
@@ -201,7 +226,7 @@ mod tests {
             ]
         );
         let lines = doctor_lines(&dir);
-        assert_eq!(lines[1], "tool rules: 6 approve, 2 ask, 2 deny");
+        assert_eq!(lines[1], "tool rules: 6 approve, 2 ask, 3 deny");
         fs::write(dir.join(FILE_NAME), example("deny-all").unwrap().text).unwrap();
         assert!(doctor_lines(&dir)[2].ends_with("none (no approve rule)"));
         fs::write(dir.join(FILE_NAME), "version: 2\n").unwrap();
