@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 (2026-11-08)
+
 ### Added
 
 - `ahi tools init [--example <name>] [--write] [--force]` writes a shipped tool policy from `examples/tools` into the working directory as `ahi.tools.yaml`, following `ahi migrate`: it prints the policy and writes only with `--write`, replacing an existing file only with `--write --force`. The default is `read-all`. `ahi tools list` names the shipped policies with what each lets the model do. The examples are embedded in the binary, so `cargo install` has them; a test keeps the list and the directory in step.
