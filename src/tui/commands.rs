@@ -1,7 +1,7 @@
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ahi_widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui_core::layout::Rect;
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::Line;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandContext {
@@ -228,7 +228,7 @@ impl CommandMenu {
 
     pub(crate) fn draw(
         &self,
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui_core::terminal::Frame,
         area: Rect,
         input: &str,
         context: CommandContext,

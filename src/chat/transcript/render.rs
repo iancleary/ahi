@@ -5,8 +5,8 @@
 //! frame then pads and styles the visible window alone.
 
 use super::{ChatMessage, TranscriptRole};
-use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui_core::style::{Color, Style};
+use ratatui_core::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 

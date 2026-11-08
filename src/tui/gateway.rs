@@ -1,12 +1,12 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
+use ahi_widgets::{Block, Borders, Paragraph, Wrap};
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui_core::layout::{Constraint, Layout};
+use ratatui_core::style::{Color, Style};
 
 use crate::chat::input::{EditorKey, InputEditor};
 use crate::directories::Directories;
@@ -21,18 +21,18 @@ enum DiscoveryState {
 
 pub(crate) fn run(state: &Directories) -> Result<Option<GatewayRegistration>> {
     let registry = harness::load_registry(state)?;
-    let mut terminal = ratatui::try_init().map_err(|error| Error::new(error.to_string()))?;
+    let mut terminal = crate::term::try_init().map_err(|error| Error::new(error.to_string()))?;
     let result = crossterm::execute!(std::io::stdout(), EnableBracketedPaste)
         .map_err(|error| Error::new(error.to_string()))
         .and_then(|()| discovery_loop(&mut terminal, state, &registry));
     let cleanup = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
-    ratatui::restore();
+    crate::term::restore();
     cleanup.map_err(|error| Error::new(error.to_string()))?;
     result
 }
 
 fn discovery_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::term::DefaultTerminal,
     state: &Directories,
     registry: &harness::Registry,
 ) -> Result<Option<GatewayRegistration>> {

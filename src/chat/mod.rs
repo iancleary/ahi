@@ -26,14 +26,14 @@ use crate::directories::Directories;
 use crate::error::{Error, Result};
 use crate::tui::commands::{CommandContext, CommandMenu, PickerOutcome};
 
+use ahi_widgets::Paragraph;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     MouseButton, MouseEventKind,
 };
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::Paragraph;
+use ratatui_core::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::{Line, Text};
 
 use backend::{
     parse_selection, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent, Selection,
@@ -677,7 +677,7 @@ impl ChatScreen {
         }
     }
 
-    fn draw(&mut self, frame: &mut ratatui::Frame) {
+    fn draw(&mut self, frame: &mut ratatui_core::terminal::Frame) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
         let input = self.input.viewport(
             frame.area().width as usize,
@@ -1221,7 +1221,7 @@ pub(crate) fn interact(
         HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf));
     loop {
         let mut terminal =
-            ratatui::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
+            crate::term::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
         let outcome =
             crossterm::execute!(std::io::stdout(), EnableBracketedPaste, DisableMouseCapture)
                 .map_err(|err| Error::new(format!("enable paste: {err}")))
@@ -1231,7 +1231,7 @@ pub(crate) fn interact(
             DisableMouseCapture,
             DisableBracketedPaste
         );
-        ratatui::restore();
+        crate::term::restore();
         cleanup.map_err(|err| Error::new(format!("disable paste: {err}")))?;
         let outcome = outcome?;
         match outcome {
@@ -1272,7 +1272,7 @@ pub(crate) fn interact(
 }
 
 fn session_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::term::DefaultTerminal,
     screen: &mut ChatScreen,
     backend: &mut dyn CompletionBackend,
 ) -> Result<SessionEnd> {
@@ -1319,8 +1319,8 @@ fn session_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
+    use ratatui_core::backend::TestBackend;
+    use ratatui_core::terminal::Terminal;
     use std::fs;
     use std::sync::mpsc::{self, Receiver};
 
@@ -2634,7 +2634,7 @@ mod tests {
         assert_eq!(row(13).trim_end(), "0123456789abc");
         assert_eq!(
             terminal.get_cursor_position().unwrap(),
-            ratatui::layout::Position::new(13, 13)
+            ratatui_core::layout::Position::new(13, 13)
         );
         assert!(backend.requests.is_empty());
         screen

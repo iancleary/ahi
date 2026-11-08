@@ -365,7 +365,7 @@ It exercises shared command menus, gateway onboarding through a streamed local r
 
 Three toolchain numbers are decoupled on purpose.
 
-`rust-version = "1.88"` in the root `Cargo.toml` is the MSRV floor, the oldest Rust ahi promises to build with. ahi's own code needs only 1.83. The floor is set by the dependency tree: `ratatui-core` 0.1.2 and every security-patched `time` release (0.3.47 and later, the RUSTSEC-2026-0009 fix) require 1.88, and `cargo deny check` and `cargo audit` refuse the vulnerable `time` releases, so no allowed dependency set has a lower floor.
+`rust-version = "1.88"` in the root `Cargo.toml` is the MSRV floor, the oldest Rust ahi promises to build with. ahi's own code needs 1.88 (`slice::as_chunks`); the highest floor a dependency declares is `ratatui-core` at 1.86.
 
 CI and the release asset workflows build with a pinned recent stable. Each workflow installs it with the runners' preinstalled rustup and no third-party action, and selects it with a top-level `RUSTUP_TOOLCHAIN`. Local development floats to the latest stable through `rust-toolchain.toml` (`channel = "stable"`). `RUSTUP_TOOLCHAIN` outranks `rust-toolchain.toml` in rustup's precedence, which keeps CI pinned while local floats. Bump the pin and the install steps together when adopting a new stable.
 
@@ -374,3 +374,5 @@ Because ordinary CI builds a recent stable, the MSRV is exercised in exactly one
 ## License
 
 MIT, matching the `LICENSE` file already in this repository. Dual-licensing is an open decision and is not applied here.
+
+`crates/ahi-widgets` is a fork of six widgets from [ratatui](https://github.com/ratatui/ratatui) (`ratatui-widgets` 0.3.0), also MIT; its `LICENSE` carries the upstream copyright and its `FORK.md` lists what was copied and changed.

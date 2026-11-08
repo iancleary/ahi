@@ -1,0 +1,27 @@
+[package]
+name = "ahi-widgets"
+description = "Block, Paragraph, List, and Clear widgets for ahi, forked from ratatui-widgets 0.3.0 (MIT) so ahi depends on ratatui-core alone."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/iancleary/ahi"
+readme = "FORK.md"
+# Published under the same account as ahi, before each ahi release that bumps it.
+
+[lib]
+# Upstream doc examples import the ratatui facade; they are kept as
+# documentation and not compiled. tests/render.rs covers each widget.
+doctest = false
+
+[dependencies]
+bitflags = "=2.13.2"
+ratatui-core = "=0.1.0"
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.2.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

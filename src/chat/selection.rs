@@ -4,9 +4,9 @@
 //! auto-scroll when the pointer leaves the viewport) and the keyboard cursor
 //! (vi-like movement, `v` for a visual range, `y` to yank).
 
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui_core::layout::Rect;
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
