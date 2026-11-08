@@ -27,8 +27,8 @@ path = "src/main.rs"
 clap = { version = "=4.6.7", features = ["derive"] }
 crossterm = "=0.29.0"
 flate2 = "=1.1.10"
-getrandom = "=0.2.16"
-quick-xml = "=0.41.0"
+getrandom = "=0.4.3"
+quick-xml = "=0.42.0"
 # 0.30.0 is the release that no longer depends on the unmaintained paste crate.
 # The ratatui facade and widget set are not used: ahi depends on the core and
 # the crossterm backend, and draws with the six widgets forked into
@@ -39,13 +39,13 @@ ahi-widgets = { path = "crates/ahi-widgets", version = "=0.1.0" }
 regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
-sha2 = "=0.10.8"
+sha2 = "=0.11.1"
 tar = "=0.4.46"
-toml = "=0.8.23"
+toml = "=1.2.0"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.3"
 ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
-yaml-rust2 = "=0.10.0"
+yaml-rust2 = "=0.13.0"
 
 # In-repo Win32 clipboard; the only crate in the workspace with unsafe code.
 [target.'cfg(windows)'.dependencies]
