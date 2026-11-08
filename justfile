@@ -33,12 +33,16 @@ doc-check:
 package:
     cargo package --workspace
 
+# fail when a member crate's published version differs from the tree (needs network)
+check-published:
+    bash scripts/check-published-members.sh
+
 # build the crate
 build:
     cargo build --release
 
 # format, lint, test, document, and package like CI
-check: fmt-check lint test doc-check package
+check: fmt-check lint test doc-check package check-published
 
 # run the same checks and build mirrored by CI, plus supply-chain checks and the version smoke
 ci: check build

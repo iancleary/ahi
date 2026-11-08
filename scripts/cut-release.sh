@@ -195,6 +195,7 @@ if not changed:
 lockfile.write_text("".join(updated_blocks))
 PY
 
+bash scripts/check-published-members.sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features

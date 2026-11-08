@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `scripts/check-published-members.sh` compares each in-repo member crate (`ahi-win32`, `ahi-widgets`) with its published copy on crates.io and fails when the same version has different contents, naming the files and the fix. It runs in CI, `just check`, the release script before tagging, and the publish script before a member is skipped, so the 0.13.0 failure (a Dependabot bump inside `ahi-widgets` with no version bump) cannot reach a release again. `ahi-win32` is 0.1.1: its published 0.1.0 predates a test-only change in the tree.
+
 ## 0.13.1 (2026-11-07)
 
 ### Fixed
