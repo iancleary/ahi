@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use crate::chat::backend::tools::BUILTIN;
+use crate::chat::transcript::theme;
 use crate::error::Result;
 use crate::tool_policy::{self, Effect};
 
@@ -27,40 +28,39 @@ pub struct Example {
 /// The default for `ahi tools init`: the policy this repository ships.
 pub const DEFAULT_EXAMPLE: &str = "read-all";
 
-/// Shipped policies, in the order `ahi tools list` prints them. The
+/// Shipped policies, in the order `ahi tools examples` prints them. The
 /// deliberately invalid `invalid-version.yaml` stays in `examples/tools` for
 /// the fail-closed walkthrough and is not offered here.
 pub const EXAMPLES: [Example; 7] = [
     Example {
         name: "read-all",
         text: include_str!("../examples/tools/read-all.yaml"),
-        summary: "read, list, find, and search anywhere; root .env denied; no prompts",
+        summary: "read, list, find, and search the whole working directory; root .env denied; no prompts",
     },
     Example {
         name: "ask-every-read",
         text: include_str!("../examples/tools/ask-every-read.yaml"),
-        summary: "every read, listing, find, and search asks in chat",
+        summary: "every read, listing, find, and search in the working directory asks in chat",
     },
     Example {
         name: "sources-only",
         text: include_str!("../examples/tools/sources-only.yaml"),
-        summary: "list anywhere; read, find, and search only src and docs",
+        summary: "list the whole working directory; read, find, and search only src and docs",
     },
     Example {
         name: "list-only",
         text: include_str!("../examples/tools/list-only.yaml"),
-        summary: "list directories only; reads are denied",
+        summary: "list directories in the working directory only; reads are denied",
     },
     Example {
         name: "edit-sources",
         text: include_str!("../examples/tools/edit-sources.yaml"),
-        summary: "read anywhere; edit under src and tests after a prompt; create under tests",
+        summary: "read the whole working directory; edit under src and tests after a prompt; create under tests",
     },
     Example {
         name: "commands",
         text: include_str!("../examples/tools/commands.yaml"),
-        summary:
-            "read anywhere; cargo check and test run; other cargo asks; publish and install denied",
+        summary: "read the whole working directory; cargo check and test run; other cargo asks; publish and install denied",
     },
     Example {
         name: "deny-all",
@@ -74,16 +74,19 @@ pub fn example(name: &str) -> std::result::Result<&'static Example, String> {
     EXAMPLES.iter().find(|e| e.name == name).ok_or_else(|| {
         let names: Vec<&str> = EXAMPLES.iter().map(|e| e.name).collect();
         format!(
-            "no example named `{name}`; `ahi tools list` prints them: {}",
+            "no example named `{name}`; `ahi tools examples list` prints them: {}",
             names.join(", ")
         )
     })
 }
 
-/// `ahi tools list`: one line per example, name then summary.
-pub fn render_list() -> String {
+/// `ahi tools examples list`: one line per example, name then summary,
+/// and the commands that show them.
+pub fn render_index() -> String {
     let width = EXAMPLES.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    let mut out = String::new();
+    let mut out = String::from(
+        "Shipped tool policies (examples/tools, embedded in ahi). Each is a complete ahi.tools.yaml.\n\n",
+    );
     for e in EXAMPLES {
         let default = if e.name == DEFAULT_EXAMPLE {
             " (default)"
@@ -91,6 +94,168 @@ pub fn render_list() -> String {
             ""
         };
         out.push_str(&format!("{:width$}  {}{default}\n", e.name, e.summary));
+    }
+    out.push_str(
+        "\nEvery builtin tool works inside the directory `ahi tui` starts in: paths are \
+         relative to it, and absolute paths, `..`, and symbolic links are refused.\n\
+         This is not a sandbox. A program approved by a command rule runs on the host \
+         with the operator's access: it can follow symbolic links, read files above the \
+         working directory, and run other programs. Approve commands accordingly, or \
+         run `ahi tui` inside `ahi dev run` for a container boundary.\n",
+    );
+    out.push_str(
+        "\n`ahi tools examples show <name>` prints one.\n\
+         `ahi tools examples show` prints all.\n\
+         `ahi tools init --example <name> --write` copies one into the working directory.\n",
+    );
+    out
+}
+
+/// How `init` paints a rule, by its outcome for the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Approve,
+    Ask,
+    Deny,
+}
+
+impl Outcome {
+    fn background(self) -> (u8, u8, u8) {
+        match self {
+            Outcome::Approve => theme::APPROVE_BG,
+            Outcome::Ask => theme::ASK_BG,
+            Outcome::Deny => theme::DENY_BG,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Outcome::Approve => "approve",
+            Outcome::Ask => "ask",
+            Outcome::Deny => "deny",
+        }
+    }
+}
+
+/// Whether `line` starts a rule in a `rules:` list.
+fn starts_rule(line: &str) -> bool {
+    line.trim_start().starts_with("- id:")
+}
+
+/// Whether `line` continues the rule begun above it: deeper indentation,
+/// not a comment at the list's own indentation.
+fn continues_rule(line: &str) -> bool {
+    let indent = line.len() - line.trim_start().len();
+    !line.trim().is_empty() && indent >= 4 && !line.trim_start().starts_with('#')
+}
+
+/// Read a rule's outcome from its lines. A rule the parser would reject
+/// still gets a color here; the parse is the chat screen's job.
+fn outcome(block: &[&str]) -> Outcome {
+    let has = |key: &str| {
+        block
+            .iter()
+            .any(|line| line.trim_start().trim_start_matches("- ").starts_with(key))
+    };
+    if has("effect: deny") {
+        Outcome::Deny
+    } else if has("ask: true") {
+        Outcome::Ask
+    } else {
+        Outcome::Approve
+    }
+}
+
+fn paint(line: &str, width: usize, (r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b[48;2;{r};{g};{b}m{line:<width$}\x1b[0m")
+}
+
+/// The policy text for `init`. With `color`, every rule's lines carry a
+/// background the transcript uses for the same outcome (deny like a removed
+/// diff line, approve like an added one, ask in gray), padded to the widest
+/// line so each rule reads as one block, and a legend follows. Comments and
+/// the header keep the terminal's colors. Without `color` the text is the
+/// file exactly.
+pub fn render_policy(text: &str, color: bool) -> String {
+    if !color {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    // Pad to the widest line so a rule reads as one block, but never to the
+    // terminal's last column: a painted line that reaches the edge wraps and
+    // shows as a blank row. Cut lines wider than the terminal are left as
+    // they are; the terminal wraps those either way.
+    let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let width = match crossterm::terminal::size() {
+        Ok((columns, _)) if columns > 1 => widest.min(usize::from(columns) - 1),
+        _ => widest,
+    };
+    let mut out = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if !starts_rule(lines[index]) {
+            out.push_str(lines[index]);
+            out.push('\n');
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < lines.len() && continues_rule(lines[index]) {
+            index += 1;
+        }
+        let block = &lines[start..index];
+        let background = outcome(block).background();
+        for line in block {
+            out.push_str(&paint(line, width, background));
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    let legend: Vec<String> = [Outcome::Approve, Outcome::Ask, Outcome::Deny]
+        .iter()
+        .map(|o| paint(&format!(" {} ", o.label()), 0, o.background()))
+        .collect();
+    out.push_str(&format!(
+        "{}  the model gets the call, is asked in chat first, or is refused\n",
+        legend.join(" ")
+    ));
+    out
+}
+
+/// `ahi tools examples show [<name>]`: every example with a heading, or
+/// one when `name` is given.
+pub fn render_examples(name: Option<&str>, color: bool) -> std::result::Result<String, String> {
+    let chosen: Vec<&Example> = match name {
+        Some(name) => vec![example(name)?],
+        None => EXAMPLES.iter().collect(),
+    };
+    let mut out = String::new();
+    for (index, e) in chosen.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("== {} (examples/tools/{}.yaml)\n", e.name, e.name));
+        out.push_str(&render_policy(e.text, color));
+    }
+    Ok(out)
+}
+
+/// `ahi tools list`: the working directory's `ahi.tools.yaml`, painted by
+/// outcome, followed by the doctor summary. Without the file, the doctor
+/// line alone, which names `ahi tools init`. An invalid file is still
+/// shown, with its parse error after it, so the operator sees what to fix.
+pub fn render_current(root: &Path, color: bool) -> String {
+    let path = root.join(FILE_NAME);
+    let mut out = String::new();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        out.push_str(&format!("== {}\n", path.display()));
+        out.push_str(&render_policy(&text, color));
+        out.push('\n');
+    }
+    for line in doctor_lines(root) {
+        out.push_str(&line);
+        out.push('\n');
     }
     out
 }
@@ -208,6 +373,57 @@ mod tests {
     }
 
     #[test]
+    fn render_policy_paints_each_rule_by_outcome_and_leaves_comments_plain() {
+        let text = example("commands").unwrap().text;
+        assert_eq!(render_policy(text, false), text);
+        let painted = render_policy(text, true);
+        let bg = |(r, g, b): (u8, u8, u8)| format!("\x1b[48;2;{r};{g};{b}m");
+        let line_with = |needle: &str| {
+            painted
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}"))
+                .to_string()
+        };
+        assert!(line_with("id: no-env").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("match: {tool: read_file, path: .env}").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("id: cargo-check").starts_with(&bg(theme::APPROVE_BG)));
+        assert!(line_with("toolchain_env: [CARGO_TARGET_DIR]").starts_with(&bg(theme::APPROVE_BG)));
+        assert!(line_with("id: cargo-other").starts_with(&bg(theme::ASK_BG)));
+        assert!(line_with("id: no-publish").starts_with(&bg(theme::DENY_BG)));
+        assert!(line_with("# Reads anywhere").starts_with("# Reads"));
+        assert!(line_with("version: 1").starts_with("version: 1"));
+        assert!(painted.lines().last().unwrap().contains("approve"));
+        let index = render_index();
+        assert!(index.starts_with("Shipped tool policies"), "{index}");
+        assert!(index.contains("\nread-all "), "{index}");
+        assert!(index.contains("examples show <name>"), "{index}");
+        let all = render_examples(None, false).unwrap();
+        assert!(all.starts_with("== read-all"), "{all}");
+        for e in EXAMPLES {
+            assert!(all.contains(&format!("== {} (examples/tools/{}.yaml)", e.name, e.name)));
+            assert!(all.contains(e.text));
+        }
+        let one = render_examples(Some("deny-all"), false).unwrap();
+        assert!(one.starts_with("== deny-all"), "{one}");
+        assert!(!one.contains("== read-all"));
+        assert!(render_examples(Some("nope"), false).is_err());
+        // The repository policy's section comments sit between rules and
+        // stay unpainted; every rule still gets its own outcome.
+        let root = render_policy(include_str!("../ahi.tools.yaml"), true);
+        let section = root
+            .lines()
+            .find(|l| l.contains("Repository commands"))
+            .unwrap();
+        assert!(section.starts_with("  #"), "{section}");
+        assert!(root
+            .lines()
+            .find(|l| l.contains("id: no-git-push"))
+            .unwrap()
+            .starts_with(&bg(theme::DENY_BG)));
+    }
+
+    #[test]
     fn summary_counts_rules_and_advertised_tools() {
         let dir = crate::fixture_directory::create_unique_fixture_directory("tools-summary");
         assert_eq!(summary(&dir).unwrap(), None);
@@ -231,6 +447,12 @@ mod tests {
         assert!(doctor_lines(&dir)[2].ends_with("none (no approve rule)"));
         fs::write(dir.join(FILE_NAME), "version: 2\n").unwrap();
         assert!(doctor_lines(&dir)[0].starts_with("tools policy: "));
+        let current = render_current(&dir, false);
+        assert!(current.starts_with("== "), "{current}");
+        assert!(current.contains("version: 2"), "{current}");
+        assert!(current.contains("tools policy: "), "{current}");
+        fs::remove_file(dir.join(FILE_NAME)).unwrap();
+        assert!(render_current(&dir, false).starts_with("tools policy: absent"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

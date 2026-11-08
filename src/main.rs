@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", help_heading = GLOBAL)]
     state_dir: Option<PathBuf>,
 
-    /// When to color output. Output is plain text in this version either way.
+    /// When to color output. `auto` colors a terminal unless NO_COLOR is set. Only `ahi tools init` uses color so far; other output is plain text.
     #[arg(
         long,
         global = true,
@@ -119,11 +119,24 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
     },
-    /// Write a chat tool policy (ahi.tools.yaml) into the working directory, or list the shipped ones.
+    /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
     /// Tools are off until the directory `ahi tui` starts in has an
     /// ahi.tools.yaml with an approve rule. `init` prints a shipped policy and
     /// writes it only with --write, like `ahi migrate`.
+    ///
+    /// Every builtin tool works inside that working directory. Rule paths
+    /// are relative to it; absolute paths, `..`, and symbolic links are
+    /// refused before any read, write, or command, and `run_command` starts
+    /// only in a directory inside it. A rule's `path` narrows access within
+    /// the directory and never widens it.
+    ///
+    /// This is not a sandbox. A program approved by a command rule runs on
+    /// the host with the operator's access: it can follow symbolic links,
+    /// read files above the working directory, and run other programs. The
+    /// read, list, find, search, edit, and write tools cannot. Approve
+    /// commands accordingly, or run `ahi tui` inside `ahi dev run` for a
+    /// container boundary.
     Tools {
         #[command(subcommand)]
         command: ToolsCommand,
@@ -211,9 +224,16 @@ enum HooksCommand {
 
 #[derive(Subcommand)]
 enum ToolsCommand {
-    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools list`).
+    /// Print a shipped policy for the working directory; write it with --write (see `ahi tools examples list`).
+    ///
+    /// In a terminal each rule is painted with the chat's colors for its
+    /// outcome: approve green, ask gray, deny red (`--color never` for plain
+    /// text; the file is always written plain). `ahi tools list` shows the
+    /// policy in place the same way. Rule paths confine the builtin tools
+    /// to the working directory; an approved command is not confined. Rules confine the model to
+    /// the working directory; none can reach above it.
     Init {
-        /// Which shipped policy; `ahi tools list` prints them.
+        /// Which shipped policy; `ahi tools examples list` names them.
         #[arg(long, value_name = "NAME", default_value = ahi::tools::DEFAULT_EXAMPLE)]
         example: String,
         /// Write ahi.tools.yaml in the working directory. Refuses an existing file without --force.
@@ -223,8 +243,25 @@ enum ToolsCommand {
         #[arg(long, requires = "write")]
         force: bool,
     },
-    /// List the shipped policies with what each lets the model do.
+    /// Show the working directory's ahi.tools.yaml, painted by outcome, with what it approves.
     List,
+    /// The shipped policies: `list` names them, `show [<name>]` prints them painted by outcome.
+    Examples {
+        #[command(subcommand)]
+        command: Option<ExamplesCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExamplesCommand {
+    /// Name each shipped policy with what it lets the model do (the default).
+    List,
+    /// Print every shipped policy painted by outcome, or one by name.
+    Show {
+        /// One example to print; omitted, all are printed.
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -321,11 +358,38 @@ fn main() -> ExitCode {
                 example,
                 write,
                 force,
-            } => tools_init(example, *write, *force),
-            ToolsCommand::List => {
-                print!("{}", ahi::tools::render_list());
+            } => tools_init(example, *write, *force, use_color(&cli.color)),
+            ToolsCommand::List => match env::current_dir() {
+                Ok(cwd) => {
+                    print!(
+                        "{}",
+                        ahi::tools::render_current(&cwd, use_color(&cli.color))
+                    );
+                    ExitCode::from(0)
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::from(1)
+                }
+            },
+            ToolsCommand::Examples {
+                command: None | Some(ExamplesCommand::List),
+            } => {
+                print!("{}", ahi::tools::render_index());
                 ExitCode::from(0)
             }
+            ToolsCommand::Examples {
+                command: Some(ExamplesCommand::Show { name }),
+            } => match ahi::tools::render_examples(name.as_deref(), use_color(&cli.color)) {
+                Ok(text) => {
+                    print!("{text}");
+                    ExitCode::from(0)
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::from(2)
+                }
+            },
         },
         Command::Login => login(&cli),
         Command::Dev(args) => dev(&cli, args),
@@ -793,7 +857,18 @@ fn login(cli: &Cli) -> ExitCode {
 /// `ahi tools init`: print a shipped policy; with --write create
 /// ahi.tools.yaml in the working directory, the directory `ahi tui` reads it
 /// from. The file is operator policy, so the chat screen never writes it.
-fn tools_init(example: &str, write: bool, force: bool) -> ExitCode {
+/// `--color`: `always`, `never`, or `auto` (a terminal on stdout and no
+/// NO_COLOR in the environment).
+fn use_color(when: &str) -> bool {
+    use std::io::IsTerminal;
+    match when {
+        "always" => true,
+        "never" => false,
+        _ => std::io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none(),
+    }
+}
+
+fn tools_init(example: &str, write: bool, force: bool, color: bool) -> ExitCode {
     if force && !write {
         eprintln!("error: --force does not write a file; pass --write --force to replace one");
         return ExitCode::from(2);
@@ -806,7 +881,7 @@ fn tools_init(example: &str, write: bool, force: bool) -> ExitCode {
         }
     };
     let path = std::path::Path::new(ahi::tools::FILE_NAME);
-    print!("{}", example.text);
+    print!("{}", ahi::tools::render_policy(example.text, color));
     println!();
     if !write {
         println!(

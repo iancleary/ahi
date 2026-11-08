@@ -70,11 +70,22 @@ pub(crate) fn tool_header() -> Style {
 pub(crate) fn stream_label() -> Style {
     dim()
 }
+/// Backgrounds shared with `ahi tools init`, which paints policy rules the
+/// way the transcript paints diffs: removed/deny, added/approve, and a
+/// neutral gray for rules that ask.
+pub(crate) const DENY_BG: (u8, u8, u8) = (90, 35, 35);
+pub(crate) const APPROVE_BG: (u8, u8, u8) = (35, 85, 45);
+pub(crate) const ASK_BG: (u8, u8, u8) = (55, 55, 65);
+
+fn rgb((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb(r, g, b)
+}
+
 pub(crate) fn diff_removed() -> Style {
-    Style::default().bg(Color::Rgb(90, 35, 35))
+    Style::default().bg(rgb(DENY_BG))
 }
 pub(crate) fn diff_added() -> Style {
-    Style::default().bg(Color::Rgb(35, 85, 45))
+    Style::default().bg(rgb(APPROVE_BG))
 }
 pub(crate) fn diff_removed_emphasis() -> Style {
     Style::default().bg(Color::Rgb(140, 50, 50))
