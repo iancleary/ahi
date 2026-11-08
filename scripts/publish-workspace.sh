@@ -17,6 +17,10 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   dry_run="--dry-run"
 fi
 
+# Skipping a published member is only safe when the published crate is the
+# one in the tree; this fails before any upload when it is not.
+bash "$(dirname "${BASH_SOURCE[0]}")/check-published-members.sh"
+
 manifest_version() {
   # The first `version = "..."` line of a manifest, with the quotes removed.
   sed -n 's/^version = "\(.*\)"$/\1/p' "$1" | head -n 1

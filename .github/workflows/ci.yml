@@ -67,6 +67,16 @@ jobs:
       - name: Build project
         run: cargo build --release --locked
 
+      - name: Published member crates match the tree
+        # A member crate (crates/*) whose version is already on crates.io
+        # must be byte-identical to the published copy, or its version must
+        # be bumped: the publish script skips published versions, and ahi
+        # pins them exactly. Reads the public index and static.crates.io; no
+        # token. Linux only: one run per push is enough.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/check-published-members.sh
+
       - name: cargo-deny and cargo-audit
         if: runner.os == 'Linux'
         shell: bash

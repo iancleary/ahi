@@ -8,6 +8,12 @@ This repository's publish workflow runs only after a GitHub Release is published
 
 The release scripts embed short Python programs for the manifest and lockfile edits. `scripts/python_runner.sh` runs them with `uv run --python 3.14` when `uv` is installed, which is the expected local setup; `.python-version` pins the same interpreter for `uv run scripts/smoke-model-picker.py`. Without `uv`, the scripts fall back to the system `python3`, which must be 3.11 or newer for `tomllib`. CI runners take that path.
 
+## Member crates must match their published versions
+
+`ahi` pins `crates/ahi-win32` and `crates/ahi-widgets` by exact version, and `scripts/publish-workspace.sh` skips a member whose version crates.io already lists. That skip is only safe when the published crate is the one in the tree. A change inside a member without a version bump, which is what a Dependabot update of `crates/*/Cargo.toml` produces, passes every local check (path dependencies always agree with themselves) and then fails `cargo publish` of `ahi` at release time against the stale registry copy. That is how the 0.13.0 crate never reached crates.io.
+
+`scripts/check-published-members.sh` closes this: for each member whose version is on the index, it downloads the published `.crate` from static.crates.io, runs `cargo package` for the member, and compares the two archives file by file (ignoring the normalized `Cargo.toml` and `.cargo_vcs_info.json` that cargo generates). Any difference fails with the files that changed and the fix: bump the member's `version`, update ahi's `=x.y.z` pin, run `cargo update -p <member> --offline`. An unpublished version passes. It runs in CI on every push (Linux), in `just check`, in `cut-release.sh` before anything is tagged, and in `publish-workspace.sh` before a member is skipped. It needs network access and no token.
+
 ## Read-only version queries
 
 ```bash
