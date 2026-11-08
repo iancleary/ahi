@@ -1,6 +1,6 @@
 # Chat formatting plan
 
-Status: draft, decisions settled with the owner on 2026-11-07, nothing implemented. Eight requested improvements to how the chat transcript looks and what it responds to, each written against the code as it stands at 0.12.0. The **Shared foundation** section comes first because seven of the eight items need it; the per-item sections then say what the operator sees, what changes, and what to test. Companion documents: [Chat screen](CHAT_SCREEN.md) for the layout contract, [Terminal experience](TERMINAL_EXPERIENCE.md) for interaction design, [Tool calls](TOOL_CALLS.md) for the tool lifecycle, [SPEC.md](SPEC.md) for the compatibility and security contract.
+Status: implemented on 2026-11-07 (issue #52) in one branch rather than the seven PRs below; the per-item sections remain the design record. Deviations are listed under **As built**. Eight requested improvements to how the chat transcript looks and what it responds to, each written against the code as it stands at 0.12.0. The **Shared foundation** section comes first because seven of the eight items need it; the per-item sections then say what the operator sees, what changes, and what to test. Companion documents: [Chat screen](CHAT_SCREEN.md) for the layout contract, [Terminal experience](TERMINAL_EXPERIENCE.md) for interaction design, [Tool calls](TOOL_CALLS.md) for the tool lifecycle, [SPEC.md](SPEC.md) for the compatibility and security contract.
 
 Constraints carried over from the rest of the repository:
 
@@ -200,6 +200,17 @@ All settled; kept as the record of why.
 - **D5.** Decided: probe for `code` on `PATH` when nothing is configured; `/editor <name|argv template>` sets the launch command (built-in names for vscode/code, cursor, zed, subl, vim/nvim) and persists it.
 - **D6.** Decided: no image logo; the header is text only.
 - **D7.** Decided: the nine listed plus `typst` and `powershell` (`ps1`), eleven lexers in the first release.
+
+## As built
+
+- Every newline in assistant text is a line break. CommonMark soft-break joining reflowed models' short-line lists into prose, so `markdown.rs` keeps `\n` inside a paragraph run and the layout breaks there.
+- Hidden spans were not needed. Rendered text is the row text; the raw source of each block rides beside it as a shared `Rc<str>` (`TranscriptRow::source`), and a raw copy yields the source of every block the selection touches, whole blocks rather than a cell-exact slice.
+- A fenced block, a diff row, and a stream block set a paragraph-wide style (`Styled::style`) so the background covers the row's padding.
+- Failed and cancelled turns post their alert and no footer; the footer appears for completed turns only.
+- Streaming re-lays the whole last message when it renders markdown. `markdown::last_block_start` exists for an incremental resume but is not wired.
+- The per-tool activity label (`⠋ run_command cargo test · 4s`) was not added; the activity line shows `Working · 12s` and the header rows carry per-call durations.
+- `/editor` has no built-in for terminal editors: they are detected and refused with a notice.
+- Delivered as one branch, `feat/chat-formatting`, not seven PRs: the modules were built in parallel against a written interface and integrated in one pass.
 
 ## Not in this plan
 

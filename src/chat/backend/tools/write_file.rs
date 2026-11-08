@@ -22,6 +22,13 @@ pub(crate) struct WriteReport {
     pub(crate) lines_removed: usize,
 }
 
+/// The texts a write replaced, for the transcript's diff. Not logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteTexts {
+    pub(crate) before: Option<String>,
+    pub(crate) after: String,
+}
+
 impl WriteReport {
     pub(super) fn replace(
         path: &Path,
@@ -47,7 +54,7 @@ pub(super) fn run(
     content: &str,
     overwrite: bool,
     exists: bool,
-) -> Result<(String, WriteReport), &'static str> {
+) -> Result<(String, WriteReport, WriteTexts), &'static str> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -67,17 +74,25 @@ pub(super) fn run(
                 lines_added: lines,
                 lines_removed: 0,
             },
+            WriteTexts {
+                before: None,
+                after: content.to_string(),
+            },
         ));
     }
     if !exists {
         return Err("file does not exist; overwrite applies to an existing file");
     }
-    let (_, before) = read_text(path)?;
-    let removed = line_count(std::str::from_utf8(&before).unwrap_or(""));
+    let (before_text, before) = read_text(path)?;
+    let removed = line_count(&before_text);
     let report = WriteReport::replace(path, &before, content.as_bytes(), lines, removed)?;
     Ok((
         format!("replaced {name}: {lines} lines (was {removed})"),
         report,
+        WriteTexts {
+            before: Some(before_text),
+            after: content.to_string(),
+        },
     ))
 }
 

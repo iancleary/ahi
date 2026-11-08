@@ -8,9 +8,12 @@
 mod approval;
 mod backend;
 mod command;
+mod header;
 pub(crate) mod input;
 mod key_binding;
 mod location;
+mod open;
+mod preferences;
 mod scroll_navigation;
 mod selection;
 mod status;
@@ -119,12 +122,25 @@ struct ChatScreen {
     /// The last turn failed before the gateway was reached, so Enter on a
     /// blank input sends the same transcript again.
     resend_available: bool,
+    preferences: preferences::Preferences,
+    /// Set on send, cleared at the turn's end; drives the activity counter.
+    turn_started: Option<Instant>,
+    workspace_root: std::path::PathBuf,
+    /// Where the left button went down, to tell a click from a drag.
+    click_origin: Option<(u16, u16)>,
+    /// What the next successful clipboard write reports.
+    copy_label: &'static str,
 }
 
 impl ChatScreen {
     fn load(state_dir: &Directories, selection: &str) -> Self {
         let (thinking, notice) = thinking::read(state_dir);
         let mut screen = Self {
+            preferences: preferences::read(state_dir),
+            turn_started: None,
+            workspace_root: std::env::current_dir().unwrap_or_default(),
+            click_origin: None,
+            copy_label: "Selection copied",
             state_dir: state_dir.clone(),
             selection: parse_selection(selection),
             thinking,
@@ -163,6 +179,27 @@ impl ChatScreen {
             screen.push_notice(notice);
         }
         screen
+    }
+
+    /// The startup header, built once for a fresh transcript. Width is not
+    /// known before the first frame, so the wide form is used; the layout
+    /// wraps it on a narrow terminal.
+    fn push_header(&mut self) {
+        let directory = self
+            .workspace_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string());
+        let tools = self.workspace_root.join("ahi.tools.yaml").is_file();
+        let text = header::text(
+            120,
+            &self.selection.model,
+            &self.selection.gateway,
+            self.thinking.as_str(),
+            &directory,
+            tools,
+        );
+        self.push_notice(text);
     }
 
     #[cfg(test)]
@@ -204,8 +241,18 @@ impl ChatScreen {
 
     /// Bring the row layout up to date with the transcript and width.
     fn sync_layout(&mut self) {
-        self.layout
-            .sync(&self.messages, self.transcript_width, &mut self.dirty);
+        let root = self.workspace_root.clone();
+        let exists = move |path: &str| file_exists(&root, path);
+        let options = transcript::format::Options {
+            markdown: self.preferences.markdown,
+            exists: &exists,
+        };
+        self.layout.sync(
+            &self.messages,
+            self.transcript_width,
+            &mut self.dirty,
+            &options,
+        );
     }
 
     fn row_count(&mut self) -> usize {
@@ -302,6 +349,7 @@ impl ChatScreen {
                         start,
                         count,
                     );
+                    self.click_origin = Some((mouse.column, mouse.row));
                     self.copy_status = None;
                 }
                 MouseEventKind::Drag(MouseButton::Left) => self.text_selection.drag(
@@ -312,7 +360,19 @@ impl ChatScreen {
                     count,
                 ),
                 MouseEventKind::Up(MouseButton::Left) if self.text_selection.release() => {
-                    self.copy_selection();
+                    self.click_origin = None;
+                    self.copy_selection(self.preferences.copy);
+                }
+                // No drag: a click. Anything under it that reacts, reacts.
+                MouseEventKind::Up(MouseButton::Left)
+                    if self.click_origin.take() == Some((mouse.column, mouse.row))
+                        && self
+                            .transcript_area
+                            .contains(Position::new(mouse.column, mouse.row)) =>
+                {
+                    let row = start + (mouse.row - self.transcript_area.y) as usize;
+                    let column = (mouse.column - self.transcript_area.x) as usize;
+                    self.activate_target_at(row, column);
                 }
                 _ => {}
             }
@@ -436,7 +496,7 @@ impl ChatScreen {
                 Ok(ScreenAction::Continue)
             }
             KeyAction::CopySelection => {
-                self.copy_selection();
+                self.copy_selection(self.preferences.copy);
                 Ok(ScreenAction::Continue)
             }
             KeyAction::EnterSelectionMode => {
@@ -568,12 +628,22 @@ impl ChatScreen {
                 self.sync_layout();
                 self.text_selection.toggle_visual(mode, self.layout.rows());
             }
-            SelectionKey::Yank => {
+            SelectionKey::Yank | SelectionKey::YankRaw => {
                 if self.text_selection.visual_active() {
                     // The highlight stays, as after a mouse copy, so a failed
                     // clipboard write can be retried with Ctrl+Y.
-                    self.copy_selection();
+                    let form = if matches!(key, SelectionKey::YankRaw) {
+                        preferences::CopyForm::Raw
+                    } else {
+                        self.preferences.copy
+                    };
+                    self.copy_selection(form);
                     self.text_selection.leave_keyboard();
+                }
+            }
+            SelectionKey::Open => {
+                if let Some(cursor) = self.text_selection.cursor() {
+                    self.activate_target_at(cursor.row, cursor.column);
                 }
             }
             SelectionKey::Exit => {
@@ -600,18 +670,85 @@ impl ChatScreen {
         self.clamp_scroll();
     }
 
-    fn copy_selection(&mut self) {
+    fn copy_selection(&mut self, form: preferences::CopyForm) {
         self.sync_layout();
-        if let Some(text) = self.text_selection.text(self.layout.rows()) {
+        let rows = self.layout.rows();
+        let text = match form {
+            preferences::CopyForm::Rendered => self.text_selection.text(rows),
+            preferences::CopyForm::Raw => self.text_selection.raw_text(rows),
+        };
+        if let Some(text) = text {
+            self.copy_label = match form {
+                preferences::CopyForm::Rendered => "Selection copied",
+                preferences::CopyForm::Raw => "Selection copied (raw markdown)",
+            };
             self.pending_copy = Some(text);
             self.poll_clipboard();
+        }
+    }
+
+    /// Act on the target under a transcript cell: open a URL, open a file in
+    /// the editor, or copy a code block. Nothing happens on plain text.
+    fn activate_target_at(&mut self, row: usize, column: usize) {
+        self.sync_layout();
+        let Some(target) = self
+            .layout
+            .rows()
+            .get(row)
+            .and_then(|row| row.target_at(column))
+            .cloned()
+        else {
+            return;
+        };
+        match target {
+            transcript::render::Target::Url(url) => {
+                let env = crate::clipboard::Environment::detect();
+                match open::url_argv(&env, &url) {
+                    Some(argv) => match open::spawn(&argv) {
+                        Ok(()) => self.push_notice(format!("opened {url}")),
+                        Err(reason) => self.push_alert(format!("{reason} for {url}")),
+                    },
+                    None => self.push_alert(format!("not opened: {url}")),
+                }
+            }
+            transcript::render::Target::File { path, line, column } => {
+                let editor = open::editor_argv(
+                    self.preferences.editor.as_deref(),
+                    |name| std::env::var(name).ok().filter(|v| !v.is_empty()),
+                    on_path,
+                    &path,
+                    line,
+                    column,
+                );
+                let place = match line {
+                    Some(line) => format!("{path}:{line}"),
+                    None => path.clone(),
+                };
+                match editor {
+                    open::Editor::Argv(argv) => match open::spawn(&argv) {
+                        Ok(()) => self.push_notice(format!("opened {place} in {}", argv[0])),
+                        Err(reason) => self.push_alert(format!("{reason} for {place}")),
+                    },
+                    open::Editor::Terminal(name) => self.push_alert(format!(
+                        "{name} runs in the terminal and cannot open over chat; /editor code|cursor|zed|subl or an argv template"
+                    )),
+                    open::Editor::None => self.push_alert(
+                        "no editor: set /editor code|cursor|zed|subl or an argv template with {path} {line} {column}".to_string(),
+                    ),
+                }
+            }
+            transcript::render::Target::Copy(text) => {
+                self.copy_label = "Code block copied";
+                self.pending_copy = Some(text.to_string());
+                self.poll_clipboard();
+            }
         }
     }
 
     fn poll_clipboard(&mut self) {
         if let Some(receiver) = &self.copy_receiver {
             match receiver.try_recv() {
-                Ok(true) => self.copy_status = Some(("Selection copied", Instant::now())),
+                Ok(true) => self.copy_status = Some((self.copy_label, Instant::now())),
                 Ok(false) | Err(TryRecvError::Disconnected) => {
                     self.copy_status =
                         Some(("Clipboard unavailable; Ctrl+Y retries", Instant::now()))
@@ -751,12 +888,16 @@ impl ChatScreen {
                 Some((attempt, attempts)) => format!("Reconnecting {attempt}/{attempts}"),
                 None => "Working".to_string(),
             };
+            let clock = self
+                .turn_started
+                .map(|started| format!(" · {}", transcript::theme::duration(started.elapsed())))
+                .unwrap_or_default();
             if chunks[1].width < 12 {
                 format!("{spinner} ")
             } else if chunks[1].width < 48 {
-                format!("{spinner} {verb} ")
+                format!("{spinner} {verb}{clock} ")
             } else {
-                format!("{spinner} {verb} · Esc cancels ")
+                format!("{spinner} {verb}{clock} · Esc cancels ")
             }
         } else if self.resend_available && self.input.is_blank() {
             "Enter resends the last message ".to_string()
@@ -889,6 +1030,30 @@ impl ChatScreen {
         self.receiver = Some(backend.submit(request));
         self.response_in_progress = true;
         self.assistant_open = false;
+        self.turn_started = Some(Instant::now());
+    }
+
+    /// The footer row that closes a turn: `done in 12s · 14:02`. A notice
+    /// with `elapsed` set is what the formatter right-aligns and dims.
+    fn push_turn_footer(&mut self, verb: &str) {
+        let Some(started) = self.turn_started.take() else {
+            return;
+        };
+        let elapsed = started.elapsed();
+        let now = crate::util::rfc3339::unix_now();
+        let stamp = match self.preferences.clock {
+            preferences::Clock::Utc => format!("{}Z", crate::util::localtime::hhmm(now, 0)),
+            preferences::Clock::Local => match crate::util::localtime::utc_offset(now) {
+                Some(offset) => crate::util::localtime::hhmm(now, offset),
+                None => format!("{}Z", crate::util::localtime::hhmm(now, 0)),
+            },
+        };
+        let mut footer = ChatMessage::new(
+            TranscriptRole::Notice,
+            format!("{verb} {} · {stamp}", transcript::theme::duration(elapsed)),
+        );
+        footer.elapsed = Some(elapsed);
+        self.push_message(footer);
     }
 
     fn dispatch_command(
@@ -930,6 +1095,58 @@ impl ChatScreen {
             }
             ParsedCommand::ShowMouse => {
                 self.show_mouse_mode();
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::Copy(form) => {
+                if let Some(form) = form {
+                    self.preferences.copy = form;
+                    preferences::write(&self.state_dir, &self.preferences)?;
+                }
+                self.push_notice(match self.preferences.copy {
+                    preferences::CopyForm::Rendered => {
+                        "copy rendered: selections copy text as drawn; Y yanks raw markdown"
+                            .to_string()
+                    }
+                    preferences::CopyForm::Raw => {
+                        "copy raw: selections copy the model's markdown source".to_string()
+                    }
+                });
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::Clock(clock) => {
+                if let Some(clock) = clock {
+                    self.preferences.clock = clock;
+                    preferences::write(&self.state_dir, &self.preferences)?;
+                }
+                self.push_notice(match self.preferences.clock {
+                    preferences::Clock::Local => "clock local".to_string(),
+                    preferences::Clock::Utc => "clock utc".to_string(),
+                });
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::Editor(editor) => {
+                if let Some(editor) = editor {
+                    self.preferences.editor = Some(editor).filter(|e| !e.is_empty());
+                    preferences::write(&self.state_dir, &self.preferences)?;
+                }
+                self.push_notice(match &self.preferences.editor {
+                    Some(editor) => format!("editor {editor}"),
+                    None => format!(
+                        "editor unset: {}; /editor code|cursor|zed|subl|idea|hx or an argv template with {{path}} {{line}} {{column}}",
+                        if on_path("code") { "code found on PATH" } else { "$AHI_EDITOR, $VISUAL, $EDITOR, then code on PATH" }
+                    ),
+                });
+                Ok(ScreenAction::Continue)
+            }
+            ParsedCommand::Markdown(enabled) => {
+                self.preferences.markdown = enabled;
+                preferences::write(&self.state_dir, &self.preferences)?;
+                self.dirty = transcript::render::Dirty::From(0);
+                self.push_notice(if enabled {
+                    "markdown on".to_string()
+                } else {
+                    "plain text: markdown is shown as written; /markdown renders again".to_string()
+                });
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::Select => {
@@ -1035,6 +1252,8 @@ impl ChatScreen {
                 output,
                 content,
                 exit_code,
+                detail,
+                elapsed,
             } => {
                 let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
                 message.tool = Some(ToolPayload::Result {
@@ -1042,12 +1261,15 @@ impl ChatScreen {
                     name: tool,
                     content,
                 });
+                message.detail = detail;
+                message.elapsed = Some(elapsed);
                 self.push_message(message);
                 self.assistant_open = false;
                 false
             }
             ResponseEvent::Completed => {
                 self.approval = None;
+                self.push_turn_footer("done in");
                 true
             }
             ResponseEvent::Failed { message, kind } => {
@@ -1068,6 +1290,7 @@ impl ChatScreen {
                             )
                         });
                 self.push_alert(message);
+                self.turn_started = None;
                 true
             }
         };
@@ -1106,6 +1329,8 @@ impl ChatScreen {
         self.receiver = None;
         self.response_in_progress = false;
         self.approval = None;
+        // The alert below says what happened; no footer row for a cancel.
+        self.turn_started = None;
         let partial = self.assistant_open
             && self
                 .messages
@@ -1217,6 +1442,7 @@ pub(crate) fn interact(
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
+    screen.push_header();
     let mut backend =
         HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf));
     loop {
@@ -1316,6 +1542,36 @@ fn session_loop(
     }
 }
 
+/// Whether `program` is on `PATH`.
+fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(program);
+        candidate.is_file()
+            || (cfg!(windows)
+                && ["exe", "cmd", "bat"]
+                    .iter()
+                    .any(|ext| candidate.with_extension(ext).is_file()))
+    })
+}
+
+/// Whether a workspace-relative path from the transcript names an existing
+/// file or directory. Paths with a parent component never match, so a model
+/// cannot make text outside the workspace clickable.
+fn file_exists(root: &std::path::Path, path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains("..")
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+    {
+        return false;
+    }
+    root.join(path).symlink_metadata().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1382,7 +1638,7 @@ mod tests {
         let rows = draw_lines(&mut screen, 100, 12);
         assert!(rows
             .iter()
-            .any(|row| row.contains("Reconnecting 2/3 · Esc cancels")));
+            .any(|row| row.contains("Reconnecting 2/3 · 0.0s · Esc cancels")));
         sender
             .send(ResponseEvent::Failed {
                 message: "cannot reach the gateway after 3 connection attempts".into(),
@@ -1465,7 +1721,9 @@ mod tests {
             .unwrap();
         assert!(screen.response_in_progress());
         let hint = draw_lines(&mut screen, 100, 12);
-        assert!(hint.iter().any(|row| row.contains("Working · Esc cancels")));
+        assert!(hint
+            .iter()
+            .any(|row| row.contains("Working · 0.0s · Esc cancels")));
         backend
             .sender
             .as_ref()
@@ -1736,6 +1994,8 @@ mod tests {
                 role: TranscriptRole::Notice,
                 text: text.to_string(),
                 tool: None,
+                detail: None,
+                elapsed: None,
             });
         }
         screen
@@ -1824,6 +2084,8 @@ mod tests {
             role: TranscriptRole::Operator,
             text: "kept".to_string(),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         screen.meters.input_tokens = Some(12);
         screen.set_input_text("/clear");
@@ -1886,6 +2148,8 @@ mod tests {
             role: TranscriptRole::Operator,
             text: "explain the hook runner".to_string(),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         let idle = draw_lines(&mut screen, 120, 16);
         assert!(idle[idle.len() - 4].ends_with(" 28.4% / 272k ──"));
@@ -2007,6 +2271,8 @@ mod tests {
             role: TranscriptRole::Operator,
             text: "question".into(),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         assert!(!screen.apply_event(ResponseEvent::TextDelta("before".into())));
         assert!(!screen.apply_event(ResponseEvent::ToolResult {
@@ -2015,6 +2281,8 @@ mod tests {
             content: String::new(),
             output: "ok".into(),
             exit_code: 0,
+            detail: None,
+            elapsed: std::time::Duration::ZERO,
         }));
         assert!(!screen.apply_event(ResponseEvent::TextDelta("after".into())));
         assert!(!screen.apply_event(ResponseEvent::TextDelta(" more".into())));
@@ -2024,6 +2292,8 @@ mod tests {
             content: String::new(),
             output: "failed (exit 2)".into(),
             exit_code: 2,
+            detail: None,
+            elapsed: std::time::Duration::ZERO,
         }));
         assert_eq!(screen.messages[3].text, "after more");
         assert_eq!(screen.messages[1].text, "before");
@@ -2033,11 +2303,15 @@ mod tests {
         for (row, text, background) in [
             (0, "question", Color::Rgb(30, 45, 60)),
             (2, "before", Color::Reset),
-            (4, "ok", Color::Rgb(30, 60, 45)),
+            (4, "read_file ok", Color::Rgb(30, 60, 45)),
             (6, "after more", Color::Reset),
-            (8, "failed (exit 2)", Color::Rgb(60, 30, 30)),
+            (
+                8,
+                "read_file failed (exit 2) · exit 2",
+                Color::Rgb(60, 30, 30),
+            ),
         ] {
-            let rendered: String = (0..text.len() as u16)
+            let rendered: String = (0..text.chars().count() as u16)
                 .map(|x| buffer[(x, row)].symbol())
                 .collect();
             assert_eq!(rendered, text);
@@ -2083,6 +2357,8 @@ mod tests {
                 content: String::new(),
                 output: "tool output\nmore output".into(),
                 exit_code: 0,
+                detail: None,
+                elapsed: std::time::Duration::ZERO,
             },
             ResponseEvent::TextDelta("continuing after tool\n".into()),
             ResponseEvent::Completed,
@@ -2189,6 +2465,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         screen.set_input_text("keep draft");
         draw_lines(&mut screen, 40, 12);
@@ -2249,6 +2527,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         screen.set_input_text("keep draft");
         draw_lines(&mut screen, 40, 12);
@@ -2349,6 +2629,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         screen.set_input_text("keep draft");
         draw_lines(&mut screen, 40, 12);
@@ -2446,6 +2728,8 @@ mod tests {
             role: TranscriptRole::Operator,
             text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         assert!(draw_lines(&mut screen, 80, 12)[0].contains("Top (Ctrl+K)"));
         screen.set_input_text("/mouse off");
@@ -2573,6 +2857,8 @@ mod tests {
             role: TranscriptRole::Operator,
             text: (0..40).map(|n| format!("line {n:02}\n")).collect(),
             tool: None,
+            detail: None,
+            elapsed: None,
         });
         screen.set_input_text("my draft");
         let bottom = draw_lines(&mut screen, 60, 12);
@@ -2707,6 +2993,8 @@ mod tests {
                     calls: vec![call.clone()],
                     native: None
                 }),
+                detail: None,
+                elapsed: None,
             }]
         );
         // A tool-only assistant turn renders nothing; raw arguments never render.
@@ -2745,6 +3033,219 @@ mod tests {
             reply: backend::ApprovalReply::new(7, sender),
         });
         (event, receiver)
+    }
+
+    #[test]
+    fn clicking_a_code_block_header_copies_its_body_and_a_drag_still_selects() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-click-copy");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage::new(
+            TranscriptRole::Assistant,
+            "Run this:\n\n```sh\necho hi\n```\n",
+        ));
+        let lines = draw_lines(&mut screen, 40, 12);
+        assert_eq!(lines[0].trim_end(), "Run this:");
+        assert_eq!(lines[2].trim_end(), "sh  copy");
+        assert_eq!(lines[3].trim_end(), "echo hi");
+        let area = screen.transcript_area;
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        // Press and release on the `copy` word without moving: a click.
+        let copy_x = area.x + 4;
+        let copy_y = area.y + 2;
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), copy_x, copy_y),
+                &mut backend,
+            )
+            .unwrap();
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Up(MouseButton::Left), copy_x, copy_y),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.copy_label, "Code block copied");
+        assert!(screen.copy_receiver.is_some() || screen.pending_copy.is_none());
+        // A click on plain text does nothing.
+        screen.copy_label = "Selection copied";
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), area.x, area.y),
+                &mut backend,
+            )
+            .unwrap();
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Up(MouseButton::Left), area.x, area.y),
+                &mut backend,
+            )
+            .unwrap();
+        assert_eq!(screen.copy_label, "Selection copied");
+        // A drag over the same header selects text instead of activating it.
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Down(MouseButton::Left), copy_x, copy_y),
+                &mut backend,
+            )
+            .unwrap();
+        screen
+            .apply_terminal_event(
+                mouse(MouseEventKind::Drag(MouseButton::Left), copy_x + 3, copy_y),
+                &mut backend,
+            )
+            .unwrap();
+        let rows = transcript::render::rows(&screen.messages, 40);
+        assert!(screen.text_selection.text(&rows).is_some());
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn yank_copies_rendered_text_and_shift_yank_copies_raw_markdown() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-raw-copy");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.messages.push(ChatMessage::new(
+            TranscriptRole::Assistant,
+            "# Title\n\nSome **bold** words.",
+        ));
+        draw_lines(&mut screen, 40, 12);
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        screen
+            .apply_terminal_event(key(KeyCode::Char('s'), KeyModifiers::CONTROL), &mut backend)
+            .unwrap();
+        screen
+            .apply_terminal_event(key(KeyCode::Char('V'), KeyModifiers::SHIFT), &mut backend)
+            .unwrap();
+        screen
+            .apply_terminal_event(key(KeyCode::Char('g'), KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        screen.sync_layout();
+        assert_eq!(
+            screen.text_selection.text(screen.layout.rows()).as_deref(),
+            Some("Title\n\nSome bold words.\n")
+        );
+        assert_eq!(
+            screen
+                .text_selection
+                .raw_text(screen.layout.rows())
+                .as_deref(),
+            Some("# Title\n\nSome **bold** words.")
+        );
+        screen
+            .apply_terminal_event(key(KeyCode::Char('Y'), KeyModifiers::SHIFT), &mut backend)
+            .unwrap();
+        assert_eq!(screen.copy_label, "Selection copied (raw markdown)");
+        // `/copy raw` makes `y` yank the source too, and the choice persists.
+        screen
+            .apply_terminal_event(key(KeyCode::Esc, KeyModifiers::NONE), &mut backend)
+            .unwrap();
+        screen.set_input_text("/copy raw");
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        assert_eq!(screen.preferences.copy, preferences::CopyForm::Raw);
+        assert_eq!(
+            preferences::read(&Directories::single_root(&state)).copy,
+            preferences::CopyForm::Raw
+        );
+        screen.set_input_text("/plain");
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        assert!(!screen.preferences.markdown);
+        let lines = draw_lines(&mut screen, 40, 14);
+        assert!(lines.iter().any(|row| row.starts_with("# Title")));
+        screen.set_input_text("/clock utc");
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        screen.set_input_text("/editor zed");
+        press(&mut screen, &mut backend, KeyCode::Enter);
+        let stored = preferences::read(&Directories::single_root(&state));
+        assert_eq!(stored.clock, preferences::Clock::Utc);
+        assert_eq!(stored.editor.as_deref(), Some("zed"));
+        assert!(!stored.markdown);
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn a_completed_turn_gets_a_timed_footer_and_the_activity_line_counts() {
+        use crossterm::event::KeyCode;
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-footer");
+        let mut screen = screen_in(&state);
+        screen.preferences.clock = preferences::Clock::Utc;
+        let mut backend = HangingBackend {
+            requests: Vec::new(),
+            sender: None,
+            cancels: 0,
+        };
+        screen.set_input_text("hello");
+        press_hanging(&mut screen, &mut backend, KeyCode::Enter);
+        assert!(screen.turn_started.is_some());
+        let rows = draw_lines(&mut screen, 100, 12);
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Working · 0.0s · Esc cancels")));
+        let sender = backend.sender.as_ref().unwrap();
+        sender.send(ResponseEvent::TextDelta("hi".into())).unwrap();
+        sender.send(ResponseEvent::Completed).unwrap();
+        screen.poll_backend();
+        assert!(screen.turn_started.is_none());
+        let footer = screen.messages.last().unwrap();
+        assert_eq!(footer.role, TranscriptRole::Notice);
+        assert!(footer.elapsed.is_some());
+        assert!(footer.text.starts_with("done in "), "{}", footer.text);
+        assert!(footer.text.ends_with('Z'), "utc clock: {}", footer.text);
+        // Right-aligned and dim; never sent to a model.
+        let rows = draw_lines(&mut screen, 60, 12);
+        let row = rows.iter().find(|row| row.contains("done in")).unwrap();
+        assert!(row.trim_end().ends_with('Z'));
+        assert!(row.starts_with(' '));
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    fn press_hanging(
+        screen: &mut ChatScreen,
+        backend: &mut HangingBackend,
+        code: crossterm::event::KeyCode,
+    ) {
+        screen
+            .apply_terminal_event(
+                Event::Key(crossterm::event::KeyEvent::new(
+                    code,
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                backend,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_startup_header_is_a_notice_that_clear_removes() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-header");
+        let mut screen = screen_in(&state);
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.push_header();
+        assert_eq!(screen.messages.len(), 1);
+        assert_eq!(screen.messages[0].role, TranscriptRole::Notice);
+        let lines = draw_lines(&mut screen, 100, 12);
+        assert!(lines[0].starts_with(header::WORDMARK[0]));
+        assert!(lines[0].contains(&format!("ahi {}", crate::VERSION)));
+        assert!(lines[1].contains("gpt-4.1 via openai · thinking medium"));
+        screen.set_input_text("/clear");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        assert!(screen.messages.is_empty());
+        let _ = std::fs::remove_dir_all(state);
     }
 
     fn press(

@@ -6,6 +6,8 @@ fn messages(text: &str) -> Vec<ChatMessage> {
         role: TranscriptRole::Assistant,
         text: text.into(),
         tool: None,
+        detail: None,
+        elapsed: None,
     }]
 }
 

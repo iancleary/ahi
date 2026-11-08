@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use super::tools::{self, PreparedCall, Workspace};
+use super::tools::{self, PreparedCall, ToolDetail, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
 };
@@ -69,6 +70,8 @@ struct Outcome {
     exit_code: i32,
     content: String,
     output: String,
+    detail: Option<ToolDetail>,
+    elapsed: Duration,
 }
 
 /// `Run` and `Ask` carry the id of the rule that approved or asked, so the
@@ -170,6 +173,8 @@ impl ToolRuntime {
                 name: call.name.clone(),
                 content: outcome.content.clone(),
             });
+            message.detail = outcome.detail.clone();
+            message.elapsed = Some(outcome.elapsed);
             emit(
                 sender,
                 ResponseEvent::ToolResult {
@@ -178,6 +183,8 @@ impl ToolRuntime {
                     output: outcome.output,
                     content: outcome.content,
                     exit_code: outcome.exit_code,
+                    detail: outcome.detail,
+                    elapsed: outcome.elapsed,
                 },
             )?;
             emit(sender, ResponseEvent::ToolCallReturned)?;
@@ -328,11 +335,15 @@ impl ToolRuntime {
             );
         }
         let toolchain_env = self.toolchain_env(rule_id);
-        match tools::execute(prepared, &self.workspace, &toolchain_env) {
+        let started = Instant::now();
+        let executed = tools::execute(prepared, &self.workspace, &toolchain_env);
+        let elapsed = started.elapsed();
+        match executed {
             Ok(tools::Executed {
                 content,
                 write,
                 command,
+                detail,
             }) => {
                 if let Some(report) = write {
                     self.audit_write(prepared, &report, "ok");
@@ -349,6 +360,8 @@ impl ToolRuntime {
                         preview(&content)
                     ),
                     content,
+                    detail,
+                    elapsed,
                 }
             }
             Err(message) => {
@@ -369,7 +382,9 @@ impl ToolRuntime {
                     };
                     self.audit_command(prepared, &none, message);
                 }
-                error(prepared.tool, Some(prepared.target()), message)
+                let mut outcome = error(prepared.tool, Some(prepared.target()), message);
+                outcome.elapsed = elapsed;
+                outcome
             }
         }
     }
@@ -429,6 +444,8 @@ fn empty() -> Outcome {
         exit_code: EXIT_ERROR,
         content: String::new(),
         output: String::new(),
+        detail: None,
+        elapsed: Duration::ZERO,
     }
 }
 
@@ -439,6 +456,8 @@ fn error(tool: &str, target: Option<&str>, message: &str) -> Outcome {
         exit_code: EXIT_ERROR,
         content: format!("error: {message}"),
         output: format!("{label}: {message}"),
+        detail: None,
+        elapsed: Duration::ZERO,
     }
 }
 
@@ -447,6 +466,8 @@ fn denied(prepared: &PreparedCall, reason: &str) -> Outcome {
         exit_code: EXIT_DENIED,
         content: format!("denied: {reason}"),
         output: format!("{} {}: {reason}", prepared.tool, prepared.target()),
+        detail: None,
+        elapsed: Duration::ZERO,
     }
 }
 

@@ -570,21 +570,29 @@ fn request() -> ChatRequest {
                 role: TranscriptRole::Operator,
                 text: "first".into(),
                 tool: None,
+                detail: None,
+                elapsed: None,
             },
             ChatMessage {
                 role: TranscriptRole::Assistant,
                 text: "previous reply".into(),
                 tool: None,
+                detail: None,
+                elapsed: None,
             },
             ChatMessage {
                 role: TranscriptRole::Notice,
                 text: "not for the model".into(),
                 tool: None,
+                detail: None,
+                elapsed: None,
             },
             ChatMessage {
                 role: TranscriptRole::Operator,
                 text: "why?".into(),
                 tool: None,
+                detail: None,
+                elapsed: None,
             },
         ],
     }
@@ -1292,6 +1300,33 @@ fn results(events: &[ResponseEvent]) -> Vec<(String, i32, String)> {
         .collect()
 }
 
+/// Tool durations are wall time; zero them so events compare exactly.
+fn without_timing(events: Vec<ResponseEvent>) -> Vec<ResponseEvent> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            ResponseEvent::ToolResult {
+                call_id,
+                tool,
+                output,
+                content,
+                exit_code,
+                detail,
+                ..
+            } => ResponseEvent::ToolResult {
+                call_id,
+                tool,
+                output,
+                content,
+                exit_code,
+                detail,
+                elapsed: std::time::Duration::ZERO,
+            },
+            other => other,
+        })
+        .collect()
+}
+
 fn returns(events: &[ResponseEvent]) -> usize {
     events
         .iter()
@@ -1309,7 +1344,7 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
     let (events, approvals) = collect_answering(&mut fixture.backend(), request(), vec![]);
     assert!(approvals.is_empty());
     assert_eq!(
-        events,
+        without_timing(events),
         vec![
             ResponseEvent::ToolCallsRequested {
                 calls: vec![super::super::tools::call(
@@ -1325,6 +1360,12 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
                 output: "read_file src/a.rs\nfn a() {}".into(),
                 content: "fn a() {}\n".into(),
                 exit_code: 0,
+                detail: Some(super::super::tools::ToolDetail::Read {
+                    offset: None,
+                    limit: None,
+                    lines: 1,
+                }),
+                elapsed: std::time::Duration::ZERO,
             },
             ResponseEvent::ToolCallReturned,
             ResponseEvent::TextDelta("done".into()),

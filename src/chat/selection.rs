@@ -465,6 +465,46 @@ impl Selection {
         (!result.is_empty()).then_some(result)
     }
 
+    /// The source text of every block the selection touches, in order: raw
+    /// markdown where a row renders markdown, the row text otherwise. Whole
+    /// blocks, because a cell range has no exact counterpart in the source.
+    pub(super) fn raw_text(&self, rows: &[TranscriptRow]) -> Option<String> {
+        let (start, end) = self.range()?;
+        let (first, last) = self.line_span.unwrap_or((start.row, end.row));
+        let mut result = String::new();
+        let mut seen: Vec<*const str> = Vec::new();
+        let mut plain_run = String::new();
+        let flush_plain = |result: &mut String, plain_run: &mut String| {
+            if !plain_run.is_empty() {
+                result.push_str(plain_run);
+                plain_run.clear();
+            }
+        };
+        for (index, row) in rows.iter().enumerate().take(last + 1).skip(first) {
+            match &row.source {
+                Some(source) => {
+                    flush_plain(&mut result, &mut plain_run);
+                    let key = std::rc::Rc::as_ptr(source);
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str(source);
+                    }
+                }
+                None => {
+                    plain_run.push_str(&row.text);
+                    if row.break_after && index < last {
+                        plain_run.push('\n');
+                    }
+                }
+            }
+        }
+        flush_plain(&mut result, &mut plain_run);
+        (!result.is_empty()).then_some(result)
+    }
+
     pub(super) fn highlight(&self, lines: &mut [Line<'static>], start: usize) {
         let selected_style = Style::default()
             .bg(Color::Rgb(55, 85, 120))
