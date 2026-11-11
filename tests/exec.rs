@@ -168,6 +168,33 @@ fn session_lines(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The header and entries of `session` from the fixture's database, as the
+/// JSON a session file would hold.
+fn db_lines(dir: &Path, session: &str) -> Vec<serde_json::Value> {
+    let database = ahi_store_turso::Database::open(&dir.join("state/sessions.db")).unwrap();
+    let connection = database.connect().unwrap();
+    let mut lines = Vec::new();
+    for row in connection
+        .query(
+            "SELECT header FROM conversations WHERE id = ?1",
+            &[session.into()],
+        )
+        .unwrap()
+    {
+        lines.push(serde_json::from_str(row[0].as_str().unwrap()).unwrap());
+    }
+    for row in connection
+        .query(
+            "SELECT body FROM entries WHERE conversation_id = ?1 ORDER BY seq",
+            &[session.into()],
+        )
+        .unwrap()
+    {
+        lines.push(serde_json::from_str(row[0].as_str().unwrap()).unwrap());
+    }
+    lines
+}
+
 fn audit_lines(dir: &Path) -> Vec<serde_json::Value> {
     fs::read_to_string(dir.join("state/audit.log"))
         .unwrap_or_default()
@@ -245,16 +272,16 @@ fn inline_prompt_streams_the_answer_to_stdout_and_the_result_file() {
     // Recorded by default: a new session under the state directory with the
     // prompt, the answer, and the turn line.
     assert_eq!(result["history"]["status"], "appended");
-    assert_eq!(result["history"]["store"], "jsonl");
+    assert_eq!(result["history"]["store"], "sqlite");
     assert_eq!(result["history"]["entries"], 3);
     let session = result["history"]["session"].as_str().unwrap();
     assert_eq!(session.len(), 36);
-    let location = PathBuf::from(result["history"]["location"].as_str().unwrap());
-    assert!(
-        location.starts_with(dir.join("state/sessions")),
-        "{location:?}"
+    assert_eq!(
+        result["history"]["location"],
+        format!("{}#{session}", dir.join("state/sessions.db").display())
     );
-    let lines = session_lines(&location);
+    // Rows hold the same JSON a session file would, header first.
+    let lines = db_lines(&dir, session);
     assert_eq!(lines.len(), 4, "{lines:?}");
     assert_eq!(lines[0]["type"], "session");
     assert_eq!(lines[0]["id"], session);
@@ -553,6 +580,7 @@ fn help_and_the_existing_surface_are_unchanged() {
         "--history-file",
         "--no-history",
         "--history-model-change",
+        "--session",
     ] {
         assert!(help.contains(flag), "{flag} missing from help");
     }
@@ -1221,11 +1249,11 @@ fn no_history_and_check_record_nothing() {
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(printed["history"], "none");
-    assert!(!dir.join("state/sessions").exists());
+    assert!(!dir.join("state/sessions.db").exists());
     let output = run(ahi(&dir).args(["--model", "local/vendor/model", "-p", "a", "--check"]));
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert!(
-        !dir.join("state/sessions").exists(),
+        !dir.join("state/sessions.db").exists(),
         "a check creates no session"
     );
     fs::remove_dir_all(dir).unwrap();
@@ -1515,5 +1543,92 @@ fn tool_rounds_are_recorded_call_first_then_results() {
     ]));
     assert_eq!(inside.status.code(), Some(2));
     assert!(text(&inside.stderr).contains("history file"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_default_store_is_the_database_and_a_session_id_continues_it() {
+    let dir = state("http://127.0.0.1:1/v1", "gateway");
+    let (first, _) = answer(
+        &dir,
+        "a1",
+        &[
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "q1",
+            "--format",
+            "json",
+            "--run-id",
+            "t1",
+        ],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    let printed: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let session = printed["history"]["session"].as_str().unwrap().to_string();
+    assert_eq!(printed["history"]["store"], "sqlite");
+
+    let (second, request) = answer(
+        &dir,
+        "a2",
+        &[
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "q2",
+            "--session",
+            &session,
+        ],
+    );
+    assert_eq!(second.status.code(), Some(0), "{}", text(&second.stderr));
+    let body = request_body(&request);
+    let texts: Vec<&str> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["q1", "a1", "q2"]);
+    assert_eq!(db_lines(&dir, &session).len(), 7);
+
+    // A replay from the database, with the gateway gone.
+    fs::write(
+        dir.join("state/models.json"),
+        r#"{"providers":{"local":{"baseUrl":"http://127.0.0.1:1/v1","api":"openai-completions","apiKey":"gateway","models":[{"id":"vendor/model"}]}}}"#,
+    )
+    .unwrap();
+    let replay = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "-p",
+        "q1",
+        "--session",
+        &session,
+        "--run-id",
+        "t1",
+    ]));
+    assert_eq!(replay.status.code(), Some(0), "{}", text(&replay.stderr));
+    assert_eq!(text(&replay.stdout), "a1\n");
+    let unknown = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "-p",
+        "q",
+        "--session",
+        "not-a-session",
+    ]));
+    assert_eq!(unknown.status.code(), Some(7), "{}", text(&unknown.stderr));
+    assert!(text(&unknown.stderr).contains("no session"));
+
+    // The file is plain SQLite: the system CLI reads it when present.
+    if let Ok(output) = Command::new("sqlite3")
+        .arg(dir.join("state/sessions.db"))
+        .arg("SELECT COUNT(*) FROM entries; SELECT COUNT(*) FROM conversations; SELECT run_id FROM submissions WHERE run_id = 't1';")
+        .output()
+    {
+        if output.status.success() {
+            assert_eq!(text(&output.stdout), "6\n1\nt1\n");
+        }
+    }
     fs::remove_dir_all(dir).unwrap();
 }

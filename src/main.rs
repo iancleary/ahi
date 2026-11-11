@@ -145,9 +145,10 @@ enum Command {
     /// SIGHUP write the result as `cancelled` first), 7 session file, 8
     /// result file not written.
     ///
-    /// Every run is recorded as an append-only session (`--history-file`
-    /// to name the file and continue it next time; `--no-history` to
-    /// record nothing). Resubmitting a `--run-id` the session already
+    /// Every run is recorded as an append-only session in the state
+    /// directory's sessions.db (`--session <uuid>` continues one;
+    /// `--history-file` records to a JSONL file a coordinator can ferry;
+    /// `--no-history` records nothing). Resubmitting a `--run-id` the session already
     /// holds, with the same prompt, answers from the record without a model
     /// call. See docs/HEADLESS_EXEC.md.
     Exec(ExecArgs),
@@ -281,19 +282,27 @@ struct ExecArgs {
     /// Seconds for the whole run: the model, every tool call, every wait. Past it the turn is cancelled, the result says `timeout`, and the exit code is 6.
     #[arg(long, value_name = "SECS", default_value_t = ahi::chat::exec::DEFAULT_TIMEOUT_SECS, help_heading = "Limits")]
     timeout: u64,
-    /// Record the turn in this session file, continuing it when it exists (the caller owns the path). Default: a new session under the state directory.
+    /// Record the turn in this session file, continuing it when it exists (the caller owns the path). Default: a new session in the state directory's sessions.db.
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with = "no_history",
+        conflicts_with_all = ["no_history", "session"],
         help_heading = "Continuity"
     )]
     history_file: Option<PathBuf>,
+    /// Continue this session from the state directory's sessions.db (an id from a previous result or `ahi session list`).
+    #[arg(
+        long,
+        value_name = "UUID",
+        conflicts_with = "no_history",
+        help_heading = "Continuity"
+    )]
+    session: Option<String>,
     /// Record nothing.
     #[arg(long, help_heading = "Continuity")]
     no_history: bool,
     /// Continue a session recorded under another gateway or model; a model_change entry is written and provider-native replay items are dropped.
-    #[arg(long, requires = "history_file", help_heading = "Continuity")]
+    #[arg(long, help_heading = "Continuity")]
     history_model_change: bool,
     /// Reasoning level sent to the model.
     #[arg(long, default_value = "off", value_name = "LEVEL", value_parser = ["off", "minimal", "low", "medium", "high"])]
@@ -967,10 +976,11 @@ fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
         check: args.check,
         verbose: args.verbose,
         timeout: std::time::Duration::from_secs(args.timeout.max(1)),
-        history: match (&args.history_file, args.no_history) {
-            (Some(path), _) => History::File(path.clone()),
-            (None, true) => History::Off,
-            (None, false) => History::Default,
+        history: match (&args.history_file, &args.session, args.no_history) {
+            (Some(path), _, _) => History::File(path.clone()),
+            (None, Some(id), _) => History::Session(id.clone()),
+            (None, None, true) => History::Off,
+            (None, None, false) => History::Default,
         },
         history_model_change: args.history_model_change,
     };

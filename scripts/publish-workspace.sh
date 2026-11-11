@@ -58,6 +58,7 @@ publish_member() {
 publish_member ahi-win32 crates/ahi-win32/Cargo.toml
 publish_member ahi-widgets crates/ahi-widgets/Cargo.toml
 publish_member ahi-signal crates/ahi-signal/Cargo.toml
+publish_member ahi-store-turso crates/ahi-store-turso/Cargo.toml
 
 # shellcheck disable=SC2086
 cargo publish --verbose $dry_run --package ahi

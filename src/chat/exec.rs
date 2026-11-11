@@ -26,7 +26,10 @@ use super::backend::{
     tools, ApprovalRequest, Caller, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent,
     Selection, ToolDecision, ToolRecord, EXIT_DENIED, EXIT_OK,
 };
-use super::session::{self, jsonl::Jsonl, Header, Kind, Role, SessionStore, StoredMessage, Turn};
+use super::session::StoreError;
+use super::session::{
+    jsonl::Jsonl, sqlite::Sqlite, Header, Kind, Role, SessionStore, StoredMessage, Turn,
+};
 use super::thinking::ThinkingLevel;
 use super::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::directories::Directories;
@@ -108,13 +111,20 @@ pub struct Options {
 /// Where a run's session lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum History {
-    /// A new session file under `<state>/sessions/<cwd-slug>/`.
+    /// A new session in the state directory's database, `sessions.db`.
     Default,
-    /// This file: continued when it exists, created when it does not. The
-    /// caller owns the path; a coordinator ferries the file.
+    /// An existing session in that database, continued.
+    Session(String),
+    /// This JSONL file: continued when it exists, created when it does
+    /// not. The caller owns the path; a coordinator ferries the file.
     File(PathBuf),
     /// Nothing is recorded.
     Off,
+}
+
+/// The database every default session goes into.
+pub fn sessions_database(state: &Directories) -> PathBuf {
+    state.state.join("sessions.db")
 }
 
 /// Process exit codes. A coordinator reacts to these, not to text.
@@ -779,42 +789,36 @@ fn open_store(
     report: &Report,
 ) -> Result<Option<Box<dyn SessionStore>>, Failure> {
     let header = || Header::new(&root.display().to_string(), &report.gateway, &report.model);
-    let store: Jsonl = match &options.history {
+    let history = |err: StoreError| Failure::history(err.to_string());
+    let store: Box<dyn SessionStore> = match &options.history {
         History::Off => return Ok(None),
         History::File(path) => {
             if options.check && fs::symlink_metadata(path).is_err() {
                 return Ok(None);
             }
-            Jsonl::open_or_create(path, header).map_err(|err| Failure::history(err.to_string()))?
+            Box::new(Jsonl::open_or_create(path, header).map_err(history)?)
+        }
+        History::Session(id) => {
+            Box::new(Sqlite::open(&sessions_database(state), id).map_err(history)?)
         }
         History::Default => {
             if options.check {
                 return Ok(None);
             }
-            let header = header();
-            let path = state
-                .state
-                .join("sessions")
-                .join(session::cwd_slug(&root.display().to_string()))
-                .join(format!(
-                    "{}_{}.jsonl",
-                    header.started.replace(':', "-"),
-                    header.id
-                ));
-            Jsonl::create(&path, header).map_err(|err| Failure::history(err.to_string()))?
+            Box::new(Sqlite::create(&sessions_database(state), header()).map_err(history)?)
         }
     };
     let recorded = store.header();
     if (recorded.gateway != report.gateway || recorded.model != report.model)
         && !options.history_model_change
-        && !recorded_model_changed_to(&store, &report.gateway, &report.model)
+        && !recorded_model_changed_to(store.as_ref(), &report.gateway, &report.model)
     {
         return Err(Failure::history(format!(
             "session {} was recorded with {}/{}; pass --history-model-change to continue it with {}/{} (provider-native replay items are dropped)",
             recorded.id, recorded.gateway, recorded.model, report.gateway, report.model
         )));
     }
-    Ok(Some(Box::new(store)))
+    Ok(Some(store))
 }
 
 /// Whether the active path already ends with a `model_change` to this

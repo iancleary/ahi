@@ -8,12 +8,13 @@
 //!
 //! The shape follows Pi's session files and the storage model of
 //! pi-durable: one logical store with more than one backend. This module
-//! holds the types, their JSON form, and the [`SessionStore`] trait; the
+//! holds the types, their JSON form, and the `SessionStore` trait; the
 //! `jsonl` backend is the interchange format a coordinator ferries between
 //! machines, and the local database backend arrives in a later slice.
 //! `docs/HEADLESS_EXEC.md` has the design.
 
 pub(crate) mod jsonl;
+pub(crate) mod sqlite;
 
 use std::fmt;
 
@@ -491,28 +492,6 @@ fn host() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// A directory name for `cwd`: its path with every non-alphanumeric run
-/// replaced by one `-`, so sessions group by working directory on disk.
-pub(crate) fn cwd_slug(cwd: &str) -> String {
-    let mut slug = String::new();
-    let mut dash = true;
-    for ch in cwd.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            dash = false;
-        } else if !dash {
-            slug.push('-');
-            dash = true;
-        }
-    }
-    let slug = slug.trim_end_matches('-');
-    if slug.is_empty() {
-        "root".to_string()
-    } else {
-        slug.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,10 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn slugs_and_ids_are_file_safe() {
-        assert_eq!(cwd_slug("/Users/me/Work/gh ahi"), "users-me-work-gh-ahi");
-        assert_eq!(cwd_slug("C:\\src\\app"), "c-src-app");
-        assert_eq!(cwd_slug("///"), "root");
+    fn ids_are_file_safe() {
         assert_eq!(entry_id().len(), 8);
         let id = uuid();
         assert_eq!(id.len(), 36);

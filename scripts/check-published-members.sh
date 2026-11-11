@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refuse a member crate whose version is already on crates.io with different
 # contents. ahi pins its in-repo crates (crates/ahi-win32, crates/ahi-widgets,
-# crates/ahi-signal)
+# crates/ahi-signal, crates/ahi-store-turso)
 # by exact version, and the publish script skips a member whose version the
 # registry already lists. That skip is only safe when the published crate is
 # the one in the tree. A dependency bump inside a member (Dependabot edits
@@ -25,7 +25,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/python_runner.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-members=(crates/ahi-win32 crates/ahi-widgets crates/ahi-signal)
+members=(crates/ahi-win32 crates/ahi-widgets crates/ahi-signal crates/ahi-store-turso)
 status=0
 
 manifest_version() {

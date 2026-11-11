@@ -1,0 +1,23 @@
+[package]
+name = "ahi-store-turso"
+description = "Synchronous SQLite-format storage for ahi over Turso. In-repo so ahi sees no futures and owns one dependency."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/iancleary/ahi"
+# Published under the same account as ahi, before each ahi release that bumps it.
+
+# The one registry dependency this crate exists to hold. No default features:
+# no tokio, no network, no allocator swap. Upgrades are deliberate bumps
+# reviewed against the store suite on every platform; see docs/HEADLESS_EXEC.md.
+[dependencies]
+turso = { version = "=0.8.3", default-features = false }
+
+[lints.rust]
+# This crate writes no unsafe code of its own; the dependency's is accepted
+# knowingly and recorded in docs/HEADLESS_EXEC.md.
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
