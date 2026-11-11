@@ -160,6 +160,14 @@ fn result_path(dir: &Path, name: &str) -> String {
     dir.join(name).to_str().unwrap().to_string()
 }
 
+fn session_lines(path: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 fn audit_lines(dir: &Path) -> Vec<serde_json::Value> {
     fs::read_to_string(dir.join("state/audit.log"))
         .unwrap_or_default()
@@ -234,7 +242,41 @@ fn inline_prompt_streams_the_answer_to_stdout_and_the_result_file() {
     assert_eq!(result["tools"]["calls"], 0);
     assert_eq!(result["effects"], "none");
     assert_eq!(result["ledger"], serde_json::json!([]));
-    assert_eq!(result["history"], "none");
+    // Recorded by default: a new session under the state directory with the
+    // prompt, the answer, and the turn line.
+    assert_eq!(result["history"]["status"], "appended");
+    assert_eq!(result["history"]["store"], "jsonl");
+    assert_eq!(result["history"]["entries"], 3);
+    let session = result["history"]["session"].as_str().unwrap();
+    assert_eq!(session.len(), 36);
+    let location = PathBuf::from(result["history"]["location"].as_str().unwrap());
+    assert!(
+        location.starts_with(dir.join("state/sessions")),
+        "{location:?}"
+    );
+    let lines = session_lines(&location);
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines[0]["type"], "session");
+    assert_eq!(lines[0]["id"], session);
+    assert_eq!(
+        lines[0]["cwd"],
+        dir.join("work").canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(lines[1]["type"], "message");
+    assert_eq!(lines[1]["role"], "operator");
+    assert_eq!(lines[1]["text"], "Say hello.");
+    assert_eq!(lines[2]["role"], "assistant");
+    assert_eq!(lines[2]["text"], "Hello 世界");
+    assert_eq!(lines[2]["parentId"], lines[1]["id"]);
+    assert_eq!(lines[3]["type"], "turn");
+    assert_eq!(lines[3]["run_id"], "task-1");
+    assert_eq!(lines[3]["status"], "ok");
+    assert_eq!(lines[3]["id"], result["history"]["tip"]);
+    assert!(
+        lines[3]["result"].get("text").is_none(),
+        "the answer is not stored twice"
+    );
+    assert_eq!(lines[3]["result"]["effects"], "none");
     assert!(result.get("error").is_none());
     #[cfg(unix)]
     {
@@ -508,6 +550,9 @@ fn help_and_the_existing_surface_are_unchanged() {
         "--prompt-sha256",
         "--verbose",
         "--timeout",
+        "--history-file",
+        "--no-history",
+        "--history-model-change",
     ] {
         assert!(help.contains(flag), "{flag} missing from help");
     }
@@ -1138,5 +1183,337 @@ fn a_signal_writes_the_result_as_cancelled_before_exiting() {
     assert_eq!(result["status"], "cancelled");
     assert_eq!(result["error"]["kind"], "cancelled");
     assert_eq!(result["error"]["message"], "cancelled by SIGTERM");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// One answering gateway and a run against it with `extra` arguments.
+fn answer(dir: &Path, text: &str, extra: &[&str]) -> (Output, String) {
+    let body = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]})
+    );
+    let (url, server) = gateway("200 OK", "text/event-stream", &body);
+    fs::write(
+        dir.join("state/models.json"),
+        format!(
+            r#"{{"providers":{{"local":{{"baseUrl":"{url}","api":"openai-completions","apiKey":"gateway","models":[{{"id":"vendor/model"}},{{"id":"vendor/other"}}]}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let output = run(ahi(dir).args(extra));
+    (output, server.join().unwrap())
+}
+
+#[test]
+fn no_history_and_check_record_nothing() {
+    let (url, server) = gateway("200 OK", "text/event-stream", STREAM);
+    let dir = state(&url, "gateway");
+    let output = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "-p",
+        "a",
+        "--no-history",
+        "--format",
+        "json",
+    ]));
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(printed["history"], "none");
+    assert!(!dir.join("state/sessions").exists());
+    let output = run(ahi(&dir).args(["--model", "local/vendor/model", "-p", "a", "--check"]));
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        !dir.join("state/sessions").exists(),
+        "a check creates no session"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_history_file_carries_the_conversation_and_a_failed_turn_stays_a_branch() {
+    let dir = state("http://127.0.0.1:1/v1", "gateway");
+    let history = dir.join("session.jsonl");
+    let file = ["--history-file", history.to_str().unwrap()];
+    let model = ["--model", "local/vendor/model"];
+    let (first, request) = answer(&dir, "a1", &[&model[..], &["-p", "q1"], &file[..]].concat());
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    assert_eq!(
+        request_body(&request)["messages"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(text(&first.stdout), "a1\n");
+
+    // The second turn fails at the gateway: it is recorded, and abandoned.
+    let (url, server) = gateway("500 Internal Server Error", "text/plain", "down");
+    fs::write(
+        dir.join("state/models.json"),
+        format!(
+            r#"{{"providers":{{"local":{{"baseUrl":"{url}","api":"openai-completions","apiKey":"gateway","models":[{{"id":"vendor/model"}}]}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let second = run(ahi(&dir).args(model).args(["-p", "q2"]).args(file));
+    server.join().unwrap();
+    assert_eq!(second.status.code(), Some(1), "{}", text(&second.stderr));
+
+    // The third sees q1 and a1 only.
+    let (third, request) = answer(
+        &dir,
+        "a3",
+        &[&model[..], &["-p", "q3", "--format", "json"], &file[..]].concat(),
+    );
+    assert_eq!(third.status.code(), Some(0), "{}", text(&third.stderr));
+    let messages = request_body(&request)["messages"].clone();
+    let texts: Vec<&str> = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["q1", "a1", "q3"]);
+    let printed: serde_json::Value = serde_json::from_slice(&third.stdout).unwrap();
+    assert_eq!(printed["history"]["status"], "appended");
+    assert_eq!(printed["history"]["location"], history.to_str().unwrap());
+
+    let lines = session_lines(&history);
+    let types: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            format!(
+                "{}{}",
+                line["type"].as_str().unwrap(),
+                line["status"]
+                    .as_str()
+                    .map(|s| format!(":{s}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "session",
+            "message",
+            "message",
+            "turn:ok",
+            "message",
+            "turn:failed",
+            "message",
+            "message",
+            "turn:ok"
+        ]
+    );
+    // Both later turns hang off the first success; the failed branch is
+    // not a parent of anything.
+    assert_eq!(lines[4]["parentId"], lines[3]["id"]);
+    assert_eq!(lines[6]["parentId"], lines[3]["id"]);
+    assert_eq!(lines[5]["result"]["error"]["kind"], "transport");
+    assert_eq!(lines[0]["id"], printed["history"]["session"]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_resubmitted_run_id_is_answered_from_the_record_without_a_request() {
+    let dir = state("http://127.0.0.1:1/v1", "gateway");
+    let history = dir.join("session.jsonl");
+    let base = |dir: &Path| {
+        let mut command = ahi(dir);
+        command.args([
+            "--model",
+            "local/vendor/model",
+            "--history-file",
+            history.to_str().unwrap(),
+        ]);
+        command
+    };
+    let (first, _) = answer(
+        &dir,
+        "forty-two",
+        &[
+            "--model",
+            "local/vendor/model",
+            "--history-file",
+            history.to_str().unwrap(),
+            "-p",
+            "the answer?",
+            "--run-id",
+            "t1",
+        ],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    // The gateway is now unreachable: a replay must not need it.
+    fs::write(
+        dir.join("state/models.json"),
+        r#"{"providers":{"local":{"baseUrl":"http://127.0.0.1:1/v1","api":"openai-completions","apiKey":"gateway","models":[{"id":"vendor/model"}]}}}"#,
+    )
+    .unwrap();
+    let again = run(base(&dir).args([
+        "-p",
+        "the answer?",
+        "--run-id",
+        "t1",
+        "--result-file",
+        &result_path(&dir, "replay.json"),
+    ]));
+    let stderr = text(&again.stderr);
+    assert_eq!(again.status.code(), Some(0), "{stderr}");
+    assert_eq!(text(&again.stdout), "forty-two\n");
+    assert!(stderr.contains("already recorded"), "{stderr}");
+    let replayed = result(&dir.join("replay.json"));
+    assert_eq!(replayed["status"], "ok");
+    assert_eq!(replayed["text"], "forty-two");
+    assert_eq!(replayed["run_id"], "t1");
+    assert_eq!(replayed["history"]["status"], "replayed");
+    assert_eq!(session_lines(&history).len(), 4, "a replay writes nothing");
+
+    let other = run(base(&dir).args(["-p", "a different task", "--run-id", "t1"]));
+    assert_eq!(other.status.code(), Some(7), "{}", text(&other.stderr));
+    assert!(text(&other.stderr).contains("different prompt"));
+    assert_eq!(session_lines(&history).len(), 4);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_session_recorded_under_another_model_needs_the_flag_once() {
+    let dir = state("http://127.0.0.1:1/v1", "gateway");
+    let history = dir.join("session.jsonl");
+    let file = ["--history-file", history.to_str().unwrap()];
+    let (first, _) = answer(
+        &dir,
+        "a1",
+        &[
+            &["--model", "local/vendor/model", "-p", "q1"][..],
+            &file[..],
+        ]
+        .concat(),
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+
+    let refused = run(ahi(&dir)
+        .args(["--model", "local/vendor/other", "-p", "q2"])
+        .args(file));
+    assert_eq!(refused.status.code(), Some(7), "{}", text(&refused.stderr));
+    assert!(text(&refused.stderr).contains("--history-model-change"));
+    assert_eq!(session_lines(&history).len(), 4, "nothing written");
+
+    let (second, request) = answer(
+        &dir,
+        "a2",
+        &[
+            &[
+                "--model",
+                "local/vendor/other",
+                "-p",
+                "q2",
+                "--history-model-change",
+            ][..],
+            &file[..],
+        ]
+        .concat(),
+    );
+    assert_eq!(second.status.code(), Some(0), "{}", text(&second.stderr));
+    assert_eq!(request_body(&request)["model"], "vendor/other");
+    let lines = session_lines(&history);
+    assert_eq!(lines[4]["type"], "model_change");
+    assert_eq!(lines[4]["model"], "vendor/other");
+    assert_eq!(lines[5]["role"], "operator");
+
+    // Already changed on the active path: no flag needed the next time.
+    let (third, request) = answer(
+        &dir,
+        "a3",
+        &[
+            &["--model", "local/vendor/other", "-p", "q3"][..],
+            &file[..],
+        ]
+        .concat(),
+    );
+    assert_eq!(third.status.code(), Some(0), "{}", text(&third.stderr));
+    assert_eq!(
+        request_body(&request)["messages"].as_array().unwrap().len(),
+        5
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn tool_rounds_are_recorded_call_first_then_results() {
+    let (url, server) = gateway_sequence(tool_round(
+        &[
+            ("c1", "read_file", serde_json::json!({"path": "src/a.rs"})),
+            (
+                "c2",
+                "run_command",
+                serde_json::json!({"argv": ["rm", "x"]}),
+            ),
+        ],
+        "done",
+    ));
+    let dir = worker(&url);
+    let history = dir.join("session.jsonl");
+    let output = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "--headless",
+        "--prompt-file",
+        dir.join("task.md").to_str().unwrap(),
+        "--tools",
+        dir.join("tools.yaml").to_str().unwrap(),
+        "--result-file",
+        &result_path(&dir, "result.json"),
+        "--history-file",
+        history.to_str().unwrap(),
+    ]));
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let lines = session_lines(&history);
+    let roles: Vec<String> = lines[1..]
+        .iter()
+        .map(|line| {
+            line["role"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| line["type"].as_str().unwrap().to_string())
+        })
+        .collect();
+    assert_eq!(
+        roles,
+        ["operator", "assistant", "tool", "tool", "assistant", "turn"]
+    );
+    assert_eq!(lines[2]["calls"][0]["name"], "read_file");
+    assert_eq!(
+        lines[2]["calls"][1]["arguments"]["argv"],
+        serde_json::json!(["rm", "x"])
+    );
+    assert_eq!(lines[3]["exit_code"], 0);
+    assert_eq!(lines[3]["result"]["call_id"], "c1");
+    assert_eq!(lines[3]["result"]["content"], "fn a() {}\n");
+    assert_eq!(lines[4]["exit_code"], 126);
+    assert!(lines[4]["result"]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("denied: denied by rule no-rm"));
+    assert_eq!(lines[5]["text"], "done");
+    assert_eq!(lines[6]["result"]["ledger"], serde_json::json!([]));
+    assert_eq!(result(&dir.join("result.json"))["history"]["entries"], 6);
+
+    // The history file counts as an operator file.
+    let inside = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "--headless",
+        "--prompt-file",
+        dir.join("task.md").to_str().unwrap(),
+        "--tools",
+        dir.join("tools.yaml").to_str().unwrap(),
+        "--result-file",
+        &result_path(&dir, "r2.json"),
+        "--history-file",
+        dir.join("work/session.jsonl").to_str().unwrap(),
+    ]));
+    assert_eq!(inside.status.code(), Some(2));
+    assert!(text(&inside.stderr).contains("history file"));
     fs::remove_dir_all(dir).unwrap();
 }

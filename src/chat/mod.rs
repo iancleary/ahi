@@ -17,6 +17,7 @@ mod open;
 mod preferences;
 mod scroll_navigation;
 mod selection;
+pub mod session;
 mod status;
 mod thinking;
 pub(crate) mod transcript;

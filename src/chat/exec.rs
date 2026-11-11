@@ -26,10 +26,12 @@ use super::backend::{
     tools, ApprovalRequest, Caller, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent,
     Selection, ToolDecision, ToolRecord, EXIT_DENIED, EXIT_OK,
 };
+use super::session::{self, jsonl::Jsonl, Header, Kind, Role, SessionStore, StoredMessage, Turn};
 use super::thinking::ThinkingLevel;
-use super::transcript::{ChatMessage, TranscriptRole};
+use super::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::directories::Directories;
 use crate::error::ErrorKind;
+use crate::harness::Protocol;
 use crate::tool_policy;
 
 /// Version of the result object. Bumped only for an incompatible change.
@@ -96,6 +98,23 @@ pub struct Options {
     pub verbose: bool,
     /// Whole-run bound: the model, every tool call, every wait.
     pub timeout: Duration,
+    /// Where the session is recorded.
+    pub history: History,
+    /// Continue a session recorded under another gateway or model, with a
+    /// `model_change` entry, instead of refusing it.
+    pub history_model_change: bool,
+}
+
+/// Where a run's session lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum History {
+    /// A new session file under `<state>/sessions/<cwd-slug>/`.
+    Default,
+    /// This file: continued when it exists, created when it does not. The
+    /// caller owns the path; a coordinator ferries the file.
+    File(PathBuf),
+    /// Nothing is recorded.
+    Off,
 }
 
 /// Process exit codes. A coordinator reacts to these, not to text.
@@ -117,6 +136,10 @@ pub enum Exit {
     Policy = 5,
     /// `--timeout` passed, or SIGINT, SIGTERM, or SIGHUP arrived.
     Timeout = 6,
+    /// The session could not be read, names a newer schema or another
+    /// model, was appended by someone else during the run, or already holds
+    /// this `run_id` for a different prompt.
+    History = 7,
     /// The turn finished but the result file could not be written.
     ResultUnwritable = 8,
 }
@@ -158,6 +181,14 @@ impl Failure {
         Self {
             exit: Exit::Policy,
             kind: "policy",
+            message: message.into(),
+        }
+    }
+
+    fn history(message: impl Into<String>) -> Self {
+        Self {
+            exit: Exit::History,
+            kind: "history",
             message: message.into(),
         }
     }
@@ -215,6 +246,8 @@ struct Report {
     context_window: Option<u64>,
     tools: ToolCounts,
     ledger: Ledger,
+    /// The `history` field of the result: `"none"`, or the session object.
+    history: Value,
 }
 
 #[derive(Default)]
@@ -320,6 +353,7 @@ impl Report {
             context_window: None,
             tools: ToolCounts::default(),
             ledger: Ledger::default(),
+            history: json!("none"),
         }
     }
 
@@ -362,7 +396,7 @@ impl Report {
         });
         object["effects"] = json!(self.ledger.effects());
         object["ledger"] = Value::Array(self.ledger.entries.clone());
-        object["history"] = json!("none");
+        object["history"] = self.history.clone();
         object
     }
 }
@@ -411,9 +445,11 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
             return finish_without_result(failure);
         }
     }
+    let mut recorder = Recorder::default();
     let outcome = match preflight(state, options, &report) {
         Err(failure) => Err(failure),
-        Ok(prepared) if options.check => {
+        Ok(Step::Replay(replay)) => return replay_turn(options, &mut report, replay),
+        Ok(Step::Run(prepared)) if options.check => {
             eprintln!(
                 "check: ok; {}/{}; tools: {}; working directory: {}",
                 report.gateway,
@@ -429,8 +465,37 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
                 stdout: None,
             };
         }
-        Ok(prepared) => complete(state, options, prepared, &mut report),
+        Ok(Step::Run(mut prepared)) => {
+            recorder = Recorder::new(prepared.store.take(), prepared.protocol);
+            complete(state, options, prepared, &mut report, &mut recorder)
+        }
     };
+    // The turn line closes the branch: status, exit code, and the result
+    // without its text (the answer is the assistant message before it).
+    let mut turn_exit = match &outcome {
+        Ok(_) => Exit::Ok,
+        Err(failure) => failure.exit,
+    };
+    let mut stored = report.result(&outcome);
+    stored.as_object_mut().map(|object| {
+        object.remove("text");
+        object.remove("text_truncated");
+        object.remove("history")
+    });
+    recorder.finish(Turn {
+        run_id: report.run_id.clone(),
+        status: stored["status"].as_str().unwrap_or("failed").to_string(),
+        exit_code: turn_exit as u8,
+        prompt_sha256: recorder.prompt_sha256.clone(),
+        result: stored,
+    });
+    report.history = recorder.summary();
+    if let Some(problem) = &recorder.failed {
+        eprintln!("error: session not recorded: {problem}");
+        if turn_exit == Exit::Ok {
+            turn_exit = Exit::History;
+        }
+    }
     let result = report.result(&outcome);
     if let Some(path) = &options.result_file {
         if let Err(err) = write_new(path, format!("{result:#}\n").as_bytes()) {
@@ -451,7 +516,9 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
     }
     match outcome {
         Ok(text) => Finished {
-            code: Exit::Ok as u8,
+            // An unrecorded answer is still the answer; the code says the
+            // record is missing and the result's `history` says why.
+            code: turn_exit as u8,
             stdout: Some(match options.format {
                 Format::Text => with_newline(text),
                 Format::Json => format!("{result:#}\n"),
@@ -464,6 +531,54 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
                 stdout: None,
             }
         }
+    }
+}
+
+/// Answer a resubmitted `run_id` from the store: the stored result, the
+/// stored answer, the stored exit code, and no model call. This is what
+/// makes a coordinator's retry after a lost session safe.
+fn replay_turn(options: &Options, report: &mut Report, replay: Replay) -> Finished {
+    let Replay {
+        turn,
+        answer,
+        session,
+        tip,
+        backend,
+    } = replay;
+    let mut result = turn.result.clone();
+    if let (Some(text), "ok") = (&answer, turn.status.as_str()) {
+        let (stored, truncated) = cap_text(text);
+        result["text"] = Value::String(stored);
+        result["text_truncated"] = Value::Bool(truncated);
+    }
+    result["history"] = json!({
+        "status": "replayed",
+        "session": session,
+        "tip": tip,
+        "store": backend,
+    });
+    report.history = result["history"].clone();
+    eprintln!(
+        "progress: run {} was already recorded in session {session}; answering from the store",
+        turn.run_id
+    );
+    if let Some(path) = &options.result_file {
+        if let Err(err) = write_new(path, format!("{result:#}\n").as_bytes()) {
+            eprintln!("error: cannot write {}: {err}", path.display());
+            return Finished {
+                code: Exit::ResultUnwritable as u8,
+                stdout: None,
+            };
+        }
+    }
+    let stdout = match (turn.status.as_str(), answer, options.format) {
+        ("ok", Some(text), Format::Text) => Some(with_newline(text)),
+        ("ok", Some(_), Format::Json) => Some(format!("{result:#}\n")),
+        _ => None,
+    };
+    Finished {
+        code: turn.exit_code,
+        stdout,
     }
 }
 
@@ -506,6 +621,27 @@ struct Prepared {
     /// Advertised tool names; `None` when no tool is offered to the model.
     advertised: Option<Vec<String>>,
     tools: ToolSetup,
+    /// The session this turn continues or starts; `None` with `--no-history`
+    /// or `--check`.
+    store: Option<Box<dyn SessionStore>>,
+    /// The wire protocol of the destination, which decides whether stored
+    /// native replay items may be sent again.
+    protocol: Option<Protocol>,
+}
+
+/// What the preflight found: a turn to run, or one already run.
+enum Step {
+    Run(Prepared),
+    Replay(Replay),
+}
+
+/// A `run_id` the session already holds, with the same prompt.
+struct Replay {
+    turn: Turn,
+    answer: Option<String>,
+    session: String,
+    tip: String,
+    backend: &'static str,
 }
 
 enum ToolSetup {
@@ -517,7 +653,7 @@ enum ToolSetup {
     File(PathBuf),
 }
 
-fn preflight(state: &Directories, options: &Options, report: &Report) -> Result<Prepared, Failure> {
+fn preflight(state: &Directories, options: &Options, report: &Report) -> Result<Step, Failure> {
     if options.headless {
         if !matches!(options.prompt, PromptSource::File(_)) {
             return Err(Failure::usage(
@@ -570,6 +706,9 @@ fn preflight(state: &Directories, options: &Options, report: &Report) -> Result<
         if let ToolSetup::File(path) = &tools {
             operator_files.push(("policy file", path));
         }
+        if let History::File(path) = &options.history {
+            operator_files.push(("history file", path));
+        }
         for (label, path) in operator_files {
             if inside(&root, path) {
                 return Err(Failure::usage(format!(
@@ -592,19 +731,107 @@ fn preflight(state: &Directories, options: &Options, report: &Report) -> Result<
     // Resolve the destination and credential before any request so a
     // configuration fault and a missing credential get their own codes.
     // Secrets are read here and never printed.
-    crate::harness::completion_connection(state, &report.gateway, &report.model).map_err(
-        |err| match err.kind() {
-            ErrorKind::Auth => Failure::turn(err.to_string(), ErrorKind::Auth),
-            _ => Failure::config(err.to_string()),
-        },
-    )?;
-    Ok(Prepared {
+    let connection = crate::harness::completion_connection(state, &report.gateway, &report.model)
+        .map_err(|err| match err.kind() {
+        ErrorKind::Auth => Failure::turn(err.to_string(), ErrorKind::Auth),
+        _ => Failure::config(err.to_string()),
+    })?;
+    let protocol = Some(connection.protocol);
+    let store = open_store(state, options, &root, report)?;
+    if let Some(store) = &store {
+        if let Some(entry) = store.find_turn(&report.run_id) {
+            let Kind::Turn(turn) = &entry.kind else {
+                unreachable!("find_turn returns turn entries")
+            };
+            if turn.prompt_sha256 != sha256_hex(prompt.as_bytes()) {
+                return Err(Failure::history(format!(
+                    "run id {} is already recorded in session {} for a different prompt; a run id names one task",
+                    report.run_id,
+                    store.header().id
+                )));
+            }
+            return Ok(Step::Replay(Replay {
+                turn: turn.clone(),
+                answer: store.answer_of(&entry.id),
+                session: store.header().id.clone(),
+                tip: entry.id.clone(),
+                backend: store.backend(),
+            }));
+        }
+    }
+    Ok(Step::Run(Prepared {
         prompt,
         thinking,
         root,
         advertised,
         tools,
-    })
+        store,
+        protocol,
+    }))
+}
+
+/// Open or create the session the run records into. `--check` opens an
+/// existing file to validate it and creates nothing.
+fn open_store(
+    state: &Directories,
+    options: &Options,
+    root: &Path,
+    report: &Report,
+) -> Result<Option<Box<dyn SessionStore>>, Failure> {
+    let header = || Header::new(&root.display().to_string(), &report.gateway, &report.model);
+    let store: Jsonl = match &options.history {
+        History::Off => return Ok(None),
+        History::File(path) => {
+            if options.check && fs::symlink_metadata(path).is_err() {
+                return Ok(None);
+            }
+            Jsonl::open_or_create(path, header).map_err(|err| Failure::history(err.to_string()))?
+        }
+        History::Default => {
+            if options.check {
+                return Ok(None);
+            }
+            let header = header();
+            let path = state
+                .state
+                .join("sessions")
+                .join(session::cwd_slug(&root.display().to_string()))
+                .join(format!(
+                    "{}_{}.jsonl",
+                    header.started.replace(':', "-"),
+                    header.id
+                ));
+            Jsonl::create(&path, header).map_err(|err| Failure::history(err.to_string()))?
+        }
+    };
+    let recorded = store.header();
+    if (recorded.gateway != report.gateway || recorded.model != report.model)
+        && !options.history_model_change
+        && !recorded_model_changed_to(&store, &report.gateway, &report.model)
+    {
+        return Err(Failure::history(format!(
+            "session {} was recorded with {}/{}; pass --history-model-change to continue it with {}/{} (provider-native replay items are dropped)",
+            recorded.id, recorded.gateway, recorded.model, report.gateway, report.model
+        )));
+    }
+    Ok(Some(Box::new(store)))
+}
+
+/// Whether the active path already ends with a `model_change` to this
+/// gateway and model, so a follow-up needs no flag the second time.
+fn recorded_model_changed_to(store: &dyn SessionStore, gateway: &str, model: &str) -> bool {
+    store
+        .path_to_root(store.active_parent().as_deref())
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            Kind::ModelChange {
+                gateway: g,
+                model: m,
+            } => Some(g == gateway && m == model),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 fn resolve_workdir(workdir: Option<&Path>) -> Result<PathBuf, Failure> {
@@ -659,6 +886,7 @@ fn complete(
     options: &Options,
     prepared: Prepared,
     report: &mut Report,
+    recorder: &mut Recorder,
 ) -> Result<String, Failure> {
     let deadline = Instant::now() + options.timeout;
     let mut backend = HttpBackend::new(state.clone())
@@ -679,13 +907,24 @@ fn complete(
     if !watch_signals() {
         eprintln!("warning: termination signals are not caught on this platform; an interrupted run writes no result file");
     }
+    // The conversation so far, from the session's active path, then the
+    // prompt. Both are on disk before the request goes out: the operator
+    // line is the intent, the turn line (later) is the outcome.
+    let mut messages = recorder.opening(&report.gateway, &report.model);
+    recorder.prompt_sha256 = sha256_hex(prepared.prompt.as_bytes());
+    recorder.record(Kind::Message(StoredMessage {
+        role: Role::Operator,
+        text: prepared.prompt.clone(),
+        tool: None,
+    }));
+    messages.push(ChatMessage::new(TranscriptRole::Operator, prepared.prompt));
     let receiver = backend.submit(ChatRequest {
         selection: Selection {
             gateway: report.gateway.clone(),
             model: report.model.clone(),
         },
         thinking: prepared.thinking,
-        messages: vec![ChatMessage::new(TranscriptRole::Operator, prepared.prompt)],
+        messages,
     });
     // Approvals are answered only by a person at a terminal. A headless run
     // has none by contract; a run reading its prompt from a pipe has no
@@ -696,7 +935,105 @@ fn complete(
         deadline,
         limit: options.timeout,
     };
-    drain(receiver, &mut backend, report, attended, progress, bound)
+    drain(
+        receiver,
+        &mut backend,
+        report,
+        attended,
+        progress,
+        bound,
+        recorder,
+    )
+}
+
+/// Appends the turn to the session as it happens. The first failure to
+/// write is remembered and nothing more is attempted: the turn goes on, the
+/// result says the record is incomplete, and the exit code is 7.
+#[derive(Default)]
+struct Recorder {
+    store: Option<Box<dyn SessionStore>>,
+    protocol: Option<Protocol>,
+    /// Where the next entry hangs: the last one written this run, or the
+    /// session's active parent before anything was.
+    parent: Option<String>,
+    /// Pending `model_change`, written with the first entry of the run.
+    model_change: Option<(String, String)>,
+    prompt_sha256: String,
+    failed: Option<String>,
+    /// How many entries this run wrote.
+    written: usize,
+}
+
+impl Recorder {
+    fn new(store: Option<Box<dyn SessionStore>>, protocol: Option<Protocol>) -> Self {
+        let parent = store.as_ref().and_then(|store| store.active_parent());
+        Self {
+            store,
+            protocol,
+            parent,
+            ..Self::default()
+        }
+    }
+
+    /// The messages the model sees before the prompt, and a pending
+    /// `model_change` when the session was recorded under another model.
+    fn opening(&mut self, gateway: &str, model: &str) -> Vec<ChatMessage> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        let header = store.header();
+        let changed = (header.gateway != gateway || header.model != model)
+            && !recorded_model_changed_to(store.as_ref(), gateway, model);
+        if changed {
+            self.model_change = Some((gateway.to_string(), model.to_string()));
+        }
+        // Native items recorded under another protocol cannot be replayed;
+        // `to_chat` drops them when the protocol differs, and when the model
+        // changed under the same protocol they are dropped too, since they
+        // belong to the model that produced them.
+        let protocol = if changed { None } else { self.protocol };
+        store.active_messages(protocol)
+    }
+
+    fn record(&mut self, kind: Kind) {
+        if self.failed.is_some() {
+            return;
+        }
+        let Some(store) = self.store.as_mut() else {
+            return;
+        };
+        let mut kinds = Vec::with_capacity(2);
+        if let Some((gateway, model)) = self.model_change.take() {
+            kinds.push(Kind::ModelChange { gateway, model });
+        }
+        kinds.push(kind);
+        match store.append(self.parent.as_deref(), kinds) {
+            Ok(ids) => {
+                self.written += ids.len();
+                self.parent = ids.last().cloned();
+            }
+            Err(err) => self.failed = Some(err.to_string()),
+        }
+    }
+
+    fn finish(&mut self, turn: Turn) {
+        self.record(Kind::Turn(turn));
+    }
+
+    /// The result's `history` field.
+    fn summary(&self) -> Value {
+        let Some(store) = &self.store else {
+            return json!("none");
+        };
+        json!({
+            "status": if self.failed.is_some() { "write_failed" } else { "appended" },
+            "session": store.header().id,
+            "tip": store.tip(),
+            "store": store.backend(),
+            "location": store.location(),
+            "entries": self.written,
+        })
+    }
 }
 
 #[cfg(unix)]
@@ -796,8 +1133,12 @@ fn drain(
     attended: bool,
     progress: bool,
     bound: Bound,
+    recorder: &mut Recorder,
 ) -> Result<String, Failure> {
     let mut text = String::new();
+    // What the model said since the last tool round: the text of the next
+    // assistant entry.
+    let mut segment = String::new();
     let mut stop: Option<Failure> = None;
     let mut grace_until: Option<Instant> = None;
     loop {
@@ -835,7 +1176,10 @@ fn drain(
             }
         };
         match event {
-            ResponseEvent::TextDelta(delta) => text.push_str(&delta),
+            ResponseEvent::TextDelta(delta) => {
+                text.push_str(&delta);
+                segment.push_str(&delta);
+            }
             ResponseEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -860,10 +1204,16 @@ fn drain(
                     "progress: reconnecting to the gateway (attempt {attempt} of {attempts})"
                 );
             }
-            ResponseEvent::ToolCallsRequested { calls, .. } => {
+            ResponseEvent::ToolCallsRequested { calls, native } => {
                 report.tools.rounds += 1;
                 report.tools.calls += calls.len() as u64;
                 report.ledger.requested(&calls);
+                // Intent before effect: the calls are on disk before any runs.
+                recorder.record(Kind::Message(StoredMessage {
+                    role: Role::Assistant,
+                    text: std::mem::take(&mut segment),
+                    tool: Some(ToolPayload::Calls { calls, native }),
+                }));
             }
             ResponseEvent::ToolApprovalRequested(request) => {
                 let decisions = if attended && stop.is_none() {
@@ -883,11 +1233,22 @@ fn drain(
             ResponseEvent::ToolResult {
                 call_id,
                 tool,
+                output,
+                content,
                 exit_code,
                 elapsed,
                 record,
                 ..
             } => {
+                recorder.record(Kind::Message(StoredMessage {
+                    role: Role::Tool { exit_code },
+                    text: output,
+                    tool: Some(ToolPayload::Result {
+                        call_id: call_id.clone(),
+                        name: tool.clone(),
+                        content,
+                    }),
+                }));
                 match exit_code {
                     EXIT_DENIED => report.tools.denied += 1,
                     EXIT_OK => {}
@@ -909,10 +1270,17 @@ fn drain(
             }
             ResponseEvent::ToolCallReturned => {}
             ResponseEvent::Completed => {
+                if stop.is_none() && !segment.is_empty() {
+                    recorder.record(Kind::Message(StoredMessage {
+                        role: Role::Assistant,
+                        text: std::mem::take(&mut segment),
+                        tool: None,
+                    }));
+                }
                 return match stop {
                     Some(reason) => Err(reason),
                     None => Ok(text),
-                }
+                };
             }
             ResponseEvent::Failed { message, kind } => {
                 // A request that gave up at the deadline is the timeout, not

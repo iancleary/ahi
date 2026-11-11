@@ -142,8 +142,14 @@ enum Command {
     /// policy files must lie outside the working directory. Exit codes: 0
     /// success, 1 turn failure, 2 usage, 3 models.json or model, 4
     /// credential, 5 policy file, 6 timeout or signal (SIGINT, SIGTERM,
-    /// SIGHUP write the result as `cancelled` first), 8 result file not
-    /// written. See docs/HEADLESS_EXEC.md.
+    /// SIGHUP write the result as `cancelled` first), 7 session file, 8
+    /// result file not written.
+    ///
+    /// Every run is recorded as an append-only session (`--history-file`
+    /// to name the file and continue it next time; `--no-history` to
+    /// record nothing). Resubmitting a `--run-id` the session already
+    /// holds, with the same prompt, answers from the record without a model
+    /// call. See docs/HEADLESS_EXEC.md.
     Exec(ExecArgs),
     /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
@@ -275,6 +281,20 @@ struct ExecArgs {
     /// Seconds for the whole run: the model, every tool call, every wait. Past it the turn is cancelled, the result says `timeout`, and the exit code is 6.
     #[arg(long, value_name = "SECS", default_value_t = ahi::chat::exec::DEFAULT_TIMEOUT_SECS, help_heading = "Limits")]
     timeout: u64,
+    /// Record the turn in this session file, continuing it when it exists (the caller owns the path). Default: a new session under the state directory.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "no_history",
+        help_heading = "Continuity"
+    )]
+    history_file: Option<PathBuf>,
+    /// Record nothing.
+    #[arg(long, help_heading = "Continuity")]
+    no_history: bool,
+    /// Continue a session recorded under another gateway or model; a model_change entry is written and provider-native replay items are dropped.
+    #[arg(long, requires = "history_file", help_heading = "Continuity")]
+    history_model_change: bool,
     /// Reasoning level sent to the model.
     #[arg(long, default_value = "off", value_name = "LEVEL", value_parser = ["off", "minimal", "low", "medium", "high"])]
     thinking: String,
@@ -920,7 +940,7 @@ fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode 
 /// writes diagnostics to stderr as it goes; this function only resolves the
 /// directories, maps the arguments, and writes stdout once.
 fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
-    use ahi::chat::exec::{self, Exit, Format, Options, PromptSource};
+    use ahi::chat::exec::{self, Exit, Format, History, Options, PromptSource};
     let state = match directories(cli) {
         Ok(dirs) => dirs,
         Err(err) => {
@@ -947,6 +967,12 @@ fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
         check: args.check,
         verbose: args.verbose,
         timeout: std::time::Duration::from_secs(args.timeout.max(1)),
+        history: match (&args.history_file, args.no_history) {
+            (Some(path), _) => History::File(path.clone()),
+            (None, true) => History::Off,
+            (None, false) => History::Default,
+        },
+        history_model_change: args.history_model_change,
     };
     let finished = exec::run(&state, &options);
     if let Some(text) = finished.stdout {
