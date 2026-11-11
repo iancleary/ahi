@@ -83,7 +83,7 @@ The result's `history` object (`status`, `session`, `tip`) is not shown to the m
  "delegations":[{"task":"t-7f3a","worker":"rust-ci","run_id":"…","session":"<worker session id>","tip":"<entry id>"}]}
 ```
 
-That is the whole cross-chat link: a main-session line names a worker session by id, and `ahi history show --session <id>` on the worker host (or hc running it over ssh) opens it. Nothing is copied into the main transcript.
+That is the whole cross-chat link: a main-session line names a worker session by id, and `ahi session show <id>` on the worker host (or hc running it over ssh) opens it. Nothing is copied into the main transcript.
 
 ### Prior art: the local Pi `delegate` extension
 
@@ -119,14 +119,14 @@ If hc's actual surface differs (a daemon, a socket, a different argv), only the 
 - The model cannot name a host, a path on another machine, a policy for the worker, or a model for the worker. hc's registry maps a label to all four. If a task needs a different policy, the operator adds a label.
 - Delegation is not a sandbox and does not change what the local tools may do. A delegated task runs with whatever `task.tools.yaml` hc's registry assigns to that label on that host.
 - `delegate` does not steer a running worker, stream its progress, or cancel it. One call, one turn, one result. Steering and liveness are hc features in hc's own view; a follow-up is a new `delegate` call with the `task` id.
-- The main session's history records the `delegate` call and its result like any tool exchange and replays them, and its `turn` line carries the `delegations` list above. The worker's history is an ordinary `ahi` session file on the worker host, written by `ahi exec --history-file` at a path hc chooses; it is never pulled into the main transcript, and `ahi history` reads it in place.
+- The main session's history records the `delegate` call and its result like any tool exchange and replays them, and its `turn` line carries the `delegations` list above. The worker's history is an ordinary `ahi` session file on the worker host, written by `ahi exec --history-file` at a path hc chooses; it is never pulled into the main transcript; `ahi session show` reads it in place and `ahi session import` on the hc host puts it in the queryable store.
 - A failed delegation (hc missing, exit 255, result file absent or unreadable) is a tool error with `effects: unknown`, exactly what [Headless worker turns](HEADLESS_EXEC.md#output-progress-exit-codes-signals) tells a coordinator to assume. The model is told so and decides; ahi never retries a delegation on its own.
 
 ## Slices
 
 1. Policy: `action: delegate` parsing, `match.worker` labels and prefixes, advertise-at-load with the hc presence check, `ask` and session grants for a label. Shippable alone: the tool exists in the schema and every call fails with "not implemented" until slice 2.
 2. Executor: the hc subprocess call with a fixed argv, temporary prompt file, result validation, bounded wait, audit event, `ToolDetail::Delegate`. Tested with a stand-in `hc` script on `PATH` that writes a canned result file, so no real hc or ssh is needed.
-3. Follow-ups: the `task` argument, the `delegations` list on the main session's `turn` line, and hc's history round trip, once `--history-file` has shipped on the worker side (headless exec slice 4a) and the chat session writer exists (slice 4b).
+3. Follow-ups: the `task` argument, the `delegations` list on the main session's `turn` line, and hc's history round trip, once `--history-file` has shipped on the worker side (headless exec slice 4a) and the chat appends its own turns (slice 4c).
 
 An hc-side integration test, launching real `ahi` on both ends against the mock gateway, belongs to hc's repository and gates calling the interface stable.
 
