@@ -35,7 +35,15 @@ pub struct RunOutput {
 /// `actions` names a tool policy file to use instead of the working
 /// directory's `ahi.tools.yaml`. It is read once here, so an invalid or
 /// missing file fails before the picker opens, and again on every chat turn.
-pub fn run(state: &Directories, refresh: bool, actions: Option<&Path>) -> Result<RunOutput> {
+/// `resume` names a stored session to continue instead of opening the
+/// picker; `record` is false for `--no-history`.
+pub fn run(
+    state: &Directories,
+    refresh: bool,
+    actions: Option<&Path>,
+    resume: Option<&str>,
+    record: bool,
+) -> Result<RunOutput> {
     let actions =
         match actions {
             Some(path) => {
@@ -64,41 +72,58 @@ pub fn run(state: &Directories, refresh: bool, actions: Option<&Path>) -> Result
     let mut picker = Picker::new(registry);
     // Cancelling startup exits, even if an old selection file exists. Only
     // Enter starts chat; cancelling /model instead keeps the active selection.
-    if let PickerOutcome::Selected(selection) = pick(state, &mut picker, refresh)? {
-        chat::interact(
-            state,
-            &selection,
-            actions.as_deref(),
-            |view, gateway, registration| {
-                // Reopen the same curated picker, with a fresh local snapshot.
-                // A malformed external edit retains the last valid registry.
-                if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
-                    picker.status = err.to_string();
+    // A resumed session skips the picker: its model is on record.
+    let selection = match resume {
+        Some(id) => Some(Selected::Resumed(id.to_string())),
+        None => match pick(state, &mut picker, refresh)? {
+            PickerOutcome::Selected(selection) => Some(Selected::Picked(selection)),
+            _ => None,
+        },
+    };
+    if let Some(selection) = selection {
+        let reopen = |view: chat::PickerView, gateway: &str, registration| {
+            // Reopen the same curated picker, with a fresh local snapshot.
+            // A malformed external edit retains the last valid registry.
+            if let Err(err) = reload(&mut picker.registry, state, &picker.refresh_errors) {
+                picker.status = err.to_string();
+            }
+            picker.reset_view();
+            if let Some(registration) = registration {
+                picker.set_registration(registration);
+            }
+            picker.focus_provider(gateway);
+            if matches!(view, chat::PickerView::Catalog) {
+                if let Some(provider) = picker
+                    .registry
+                    .providers
+                    .iter()
+                    .position(|entry| entry.id == gateway)
+                {
+                    picker.screen = Screen::Catalog { provider };
+                    picker.cursor.select(Some(0));
                 }
-                picker.reset_view();
-                if let Some(registration) = registration {
-                    picker.set_registration(registration);
-                }
-                picker.focus_provider(gateway);
-                if matches!(view, chat::PickerView::Catalog) {
-                    if let Some(provider) = picker
-                        .registry
-                        .providers
-                        .iter()
-                        .position(|entry| entry.id == gateway)
-                    {
-                        picker.screen = Screen::Catalog { provider };
-                        picker.cursor.select(Some(0));
-                    }
-                }
-                pick(state, &mut picker, false)
-            },
-        )?;
+            }
+            pick(state, &mut picker, false)
+        };
+        match selection {
+            Selected::Picked(selection) => {
+                chat::interact(state, &selection, actions.as_deref(), record, reopen)?
+            }
+            Selected::Resumed(id) => {
+                chat::interact_resumed(state, &id, actions.as_deref(), reopen)?
+            }
+        }
     }
     Ok(RunOutput {
         text: picker.print_on_exit.join("\n"),
         refresh_failed: false,
     })
+}
+
+/// How the chat's first model was chosen.
+enum Selected {
+    Picked(String),
+    Resumed(String),
 }
 
 fn pick(state: &Directories, picker: &mut Picker, refresh: bool) -> Result<PickerOutcome> {

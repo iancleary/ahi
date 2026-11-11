@@ -13,7 +13,9 @@
 //! machines, and the local database backend arrives in a later slice.
 //! `docs/HEADLESS_EXEC.md` has the design.
 
+pub mod commands;
 pub(crate) mod jsonl;
+pub(crate) mod recorder;
 pub(crate) mod sqlite;
 
 use std::fmt;
@@ -21,7 +23,8 @@ use std::fmt;
 use serde_json::{json, Map, Value};
 
 use super::backend::ToolCall;
-use super::transcript::{ChatMessage, NativeReplay, ToolPayload, TranscriptRole};
+pub(crate) use super::transcript::ToolPayload;
+use super::transcript::{ChatMessage, NativeReplay, TranscriptRole};
 use crate::harness::Protocol;
 
 /// Version of the entry format. A store whose header names a newer schema

@@ -60,14 +60,13 @@ pub struct Sqlite {
 }
 
 /// One row of `ahi session list`: the header plus what the last turn said.
-// `ahi session` (the next slice) is the caller of this and of `list`,
-// `contains`, and `import` below; they ship here with their tests.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listed {
     pub header: Header,
     pub tip: Option<String>,
     pub entries: usize,
+    pub turns: usize,
+    pub last_turn: Option<super::Turn>,
 }
 
 impl Sqlite {
@@ -123,42 +122,45 @@ impl Sqlite {
         })
     }
 
-    /// Every session in the database, newest first.
-    #[allow(dead_code)]
+    /// Every session in the database, newest first, with its turn count and
+    /// last `turn` line: the first and last lines a listing needs, and
+    /// nothing in between.
     pub fn list(path: &Path) -> Result<Vec<Listed>, StoreError> {
         let connection = open(path)?;
         let rows = connection
             .query(
-                "SELECT c.header, c.tip, (SELECT COUNT(*) FROM entries e WHERE e.conversation_id = c.id) FROM conversations c ORDER BY c.started DESC, c.id",
+                "SELECT c.header, c.tip, \
+                   (SELECT COUNT(*) FROM entries e WHERE e.conversation_id = c.id), \
+                   (SELECT COUNT(*) FROM entries e WHERE e.conversation_id = c.id AND e.type = 'turn'), \
+                   (SELECT body FROM entries e WHERE e.conversation_id = c.id AND e.type = 'turn' ORDER BY seq DESC LIMIT 1) \
+                 FROM conversations c ORDER BY c.started DESC, c.id",
                 &[],
             )
             .map_err(|err| store_error(path, err))?;
         rows.iter()
             .map(|row| {
+                let last_turn = match row[4].as_str() {
+                    Some(body) => match Entry::from_json(&parse(path, body)?)?.kind {
+                        Kind::Turn(turn) => Some(turn),
+                        _ => None,
+                    },
+                    None => None,
+                };
                 Ok(Listed {
                     header: Header::from_json(&parse(path, row[0].as_str().unwrap_or("{}"))?)?,
                     tip: row[1].as_str().map(str::to_string),
                     entries: row[2].as_i64().unwrap_or(0).max(0) as usize,
+                    turns: row[3].as_i64().unwrap_or(0).max(0) as usize,
+                    last_turn,
                 })
             })
             .collect()
-    }
-
-    /// Whether the database holds session `id`.
-    #[allow(dead_code)]
-    pub fn contains(path: &Path, id: &str) -> Result<bool, StoreError> {
-        let connection = open(path)?;
-        let rows = connection
-            .query("SELECT 1 FROM conversations WHERE id = ?1", &[id.into()])
-            .map_err(|err| store_error(path, err))?;
-        Ok(!rows.is_empty())
     }
 
     /// Put a whole session, header and entries as read from a JSONL file,
     /// into the database. Refused when the id is already present unless the
     /// stored entries are a prefix of `entries`, in which case the new tail
     /// is appended: this is how a worker's follow-up turns arrive.
-    #[allow(dead_code)]
     pub fn import(path: &Path, header: &Header, entries: &[Entry]) -> Result<usize, StoreError> {
         let connection = open(path)?;
         let existing = connection
@@ -509,9 +511,10 @@ mod tests {
             .unwrap();
         let listed = Sqlite::list(&path).unwrap();
         assert_eq!(listed.len(), 2);
-        assert!(listed.iter().any(|l| l.header.id == id && l.entries == 5));
-        assert!(Sqlite::contains(&path, &id).unwrap());
-        assert!(!Sqlite::contains(&path, "nope").unwrap());
+        assert!(listed.iter().any(|l| l.header.id == id
+            && l.entries == 5
+            && l.turns == 2
+            && l.last_turn.as_ref().map(|t| t.status.as_str()) == Some("failed")));
 
         // Two handles on one session: the one that appends second loses.
         let mut stale = Sqlite::open(&path, &id).unwrap();

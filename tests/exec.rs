@@ -590,7 +590,9 @@ fn help_and_the_existing_surface_are_unchanged() {
         .output()
         .unwrap();
     let top = text(&top.stdout);
-    for command in ["run", "tui", "exec", "tools", "login", "dev", "sandbox"] {
+    for command in [
+        "run", "tui", "exec", "session", "tools", "login", "dev", "sandbox",
+    ] {
         assert!(
             top.contains(&format!("  {command}")),
             "{command} missing: {top}"
@@ -1631,4 +1633,211 @@ fn the_default_store_is_the_database_and_a_session_id_continues_it() {
         }
     }
     fs::remove_dir_all(dir).unwrap();
+}
+
+fn ahi_session(dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ahi"));
+    command
+        .args([
+            "--state-dir",
+            dir.join("state").to_str().unwrap(),
+            "session",
+        ])
+        .stdin(Stdio::null());
+    command
+}
+
+#[test]
+fn session_commands_list_show_grep_export_and_import_recorded_sessions() {
+    let dir = state("http://127.0.0.1:1/v1", "gateway");
+    let empty = run(ahi_session(&dir).args(["list"]));
+    assert_eq!(empty.status.code(), Some(0), "{}", text(&empty.stderr));
+    assert_eq!(text(&empty.stdout), "no sessions yet\n");
+    let bare = run(&mut ahi_session(&dir));
+    assert_ne!(bare.status.code(), Some(0), "bare `ahi session` shows help");
+
+    // Two turns in one session, one of them a tool round, then a second
+    // session elsewhere.
+    let (first, _) = answer(
+        &dir,
+        "the capital is Paris",
+        &[
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "capital of France?",
+            "--format",
+            "json",
+            "--run-id",
+            "geo-1",
+        ],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    let printed: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let session = printed["history"]["session"].as_str().unwrap().to_string();
+    let (second, _) = answer(
+        &dir,
+        "and Berlin",
+        &[
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "and Germany?",
+            "--session",
+            &session,
+            "--run-id",
+            "geo-2",
+        ],
+    );
+    assert_eq!(second.status.code(), Some(0), "{}", text(&second.stderr));
+    let (other, _) = answer(
+        &dir,
+        "unrelated",
+        &["--model", "local/vendor/model", "-p", "weather?"],
+    );
+    assert_eq!(other.status.code(), Some(0), "{}", text(&other.stderr));
+
+    // list: two rows, newest first, with turn counts and the last status.
+    let list = run(ahi_session(&dir).args(["list"]));
+    assert_eq!(list.status.code(), Some(0), "{}", text(&list.stderr));
+    let rows: Vec<&str> = text(&list.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .leak()
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let ours = rows
+        .iter()
+        .find(|row| row.starts_with(&session))
+        .expect("our session listed");
+    assert!(ours.contains("local/vendor/model"), "{ours}");
+    assert!(ours.contains("2 turns"), "{ours}");
+    assert!(ours.contains("last ok (geo-2)"), "{ours}");
+    let list_json = run(ahi_session(&dir).args(["list", "--json"]));
+    let json_rows: Vec<serde_json::Value> = text(&list_json.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(json_rows.len(), 2);
+    let ours = json_rows
+        .iter()
+        .find(|row| row["id"] == session.as_str())
+        .unwrap();
+    assert_eq!(ours["turns"], 2);
+    assert_eq!(ours["last_run_id"], "geo-2");
+    assert_eq!(ours["type"], "session");
+    assert!(ours["cwd"].as_str().unwrap().ends_with("work"));
+
+    // show: the active path as text and as raw entries.
+    let show = run(ahi_session(&dir).args(["show", &session]));
+    assert_eq!(show.status.code(), Some(0), "{}", text(&show.stderr));
+    let shown = text(&show.stdout);
+    assert!(shown.starts_with(&format!("session {session}")), "{shown}");
+    assert!(shown.contains("> capital of France?"), "{shown}");
+    assert!(shown.contains("the capital is Paris"), "{shown}");
+    assert!(shown.contains("> and Germany?"), "{shown}");
+    assert!(shown.contains("— turn geo-2 ok (exit 0)"), "{shown}");
+    let show_json = run(ahi_session(&dir).args(["show", &session, "--json"]));
+    let lines: Vec<serde_json::Value> = text(&show_json.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 7, "header, two turns of three entries");
+    assert_eq!(lines[0]["type"], "session");
+    assert_eq!(lines[6]["type"], "turn");
+    let missing = run(ahi_session(&dir).args(["show", "no-such-session"]));
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).contains("no session"));
+    let branch = run(ahi_session(&dir).args(["show", &session, "--branch", "ffffffff"]));
+    assert_eq!(branch.status.code(), Some(1));
+    assert!(text(&branch.stderr).contains("no entry"));
+
+    // grep: across both sessions, session and entry ids on every line.
+    let grep = run(ahi_session(&dir).args(["grep", "(?i)germany|weather"]));
+    assert_eq!(grep.status.code(), Some(0), "{}", text(&grep.stderr));
+    let hits: Vec<String> = text(&grep.stdout).lines().map(str::to_string).collect();
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert!(
+        hits.iter()
+            .any(|hit| hit.starts_with(&format!("{session}:")) && hit.ends_with(": and Germany?")),
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter().any(|hit| hit.ends_with(": weather?")),
+        "{hits:?}"
+    );
+    let bad = run(ahi_session(&dir).args(["grep", "("]));
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(text(&bad.stderr).contains("invalid regular expression"));
+
+    // export, then import into a fresh state: the same session, and a
+    // second import is a no-op.
+    let exported = dir.join("geo.jsonl");
+    let export =
+        run(ahi_session(&dir).args(["export", &session, "--to", exported.to_str().unwrap()]));
+    assert_eq!(export.status.code(), Some(0), "{}", text(&export.stderr));
+    assert!(text(&export.stdout).contains("6 entries"));
+    assert_eq!(session_lines(&exported).len(), 7);
+    let again =
+        run(ahi_session(&dir).args(["export", &session, "--to", exported.to_str().unwrap()]));
+    assert_eq!(again.status.code(), Some(1));
+    assert!(text(&again.stderr).contains("already exists"));
+    let shown_from_file = run(ahi_session(&dir).args(["show", exported.to_str().unwrap()]));
+    assert_eq!(shown_from_file.status.code(), Some(0));
+    assert_eq!(
+        text(&shown_from_file.stdout),
+        shown,
+        "a file shows like the database"
+    );
+    let grep_file =
+        run(ahi_session(&dir).args(["grep", "Paris", "--path", exported.to_str().unwrap()]));
+    assert_eq!(text(&grep_file.stdout).lines().count(), 1);
+
+    let other_dir = state("http://127.0.0.1:1/v1", "gateway");
+    let import = run(ahi_session(&other_dir).args(["import", exported.to_str().unwrap()]));
+    assert_eq!(import.status.code(), Some(0), "{}", text(&import.stderr));
+    assert!(
+        text(&import.stdout).contains("6 new entries"),
+        "{}",
+        text(&import.stdout)
+    );
+    let reimport = run(ahi_session(&other_dir).args(["import", exported.to_str().unwrap()]));
+    assert!(text(&reimport.stdout).contains("0 new entries"));
+    let imported = run(ahi_session(&other_dir).args(["show", &session, "--json"]));
+    assert_eq!(
+        text(&imported.stdout),
+        text(&show_json.stdout),
+        "byte-identical after the round trip"
+    );
+    // A replay from the imported copy answers without a model call.
+    let replay = run(ahi(&other_dir).args([
+        "--model",
+        "local/vendor/model",
+        "-p",
+        "and Germany?",
+        "--session",
+        &session,
+        "--run-id",
+        "geo-2",
+    ]));
+    assert_eq!(replay.status.code(), Some(0), "{}", text(&replay.stderr));
+    assert_eq!(text(&replay.stdout), "and Berlin\n");
+
+    // The chat's flags exist too.
+    let help = run(Command::new(env!("CARGO_BIN_EXE_ahi")).args(["tui", "--help"]));
+    let help = text(&help.stdout);
+    assert!(
+        help.contains("--resume") && help.contains("--no-history"),
+        "{help}"
+    );
+    let help = run(Command::new(env!("CARGO_BIN_EXE_ahi")).args(["session", "--help"]));
+    let help = text(&help.stdout);
+    for word in ["--resume", "list", "show", "grep", "export", "import"] {
+        assert!(help.contains(word), "{word}: {help}");
+    }
+    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(other_dir).unwrap();
 }

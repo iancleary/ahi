@@ -118,7 +118,25 @@ enum Command {
         /// Tool policy file to use instead of ahi.tools.yaml in the working directory (see examples/tools).
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
+        /// Continue a recorded session (an id from `ahi session list`) instead of opening the model picker.
+        #[arg(long, value_name = "UUID", conflicts_with = "no_history")]
+        resume: Option<String>,
+        /// Record nothing. By default every turn is appended to a session in the state directory's sessions.db.
+        #[arg(long)]
+        no_history: bool,
     },
+    /// Resume, list, show, search, export, and import recorded sessions.
+    ///
+    /// Every chat and every `ahi exec` run is recorded as an append-only
+    /// session in the state directory's sessions.db: a header, then one
+    /// entry per step (message, turn, model_change), each naming its
+    /// parent. `--resume <uuid>` opens the chat on a session with its own
+    /// model. `list`, `show`, and `grep` read the database (or a JSONL file
+    /// by path); `export` writes one session as JSONL, the format a
+    /// coordinator ferries between machines; `import` brings such a file
+    /// in. Nothing here reads a path a model can reach. See
+    /// docs/HEADLESS_EXEC.md.
+    Session(SessionArgs),
     /// Run one model turn without the chat screen and print the answer.
     ///
     /// The prompt comes from `-p <text>`, `--prompt-file <path>`, or stdin
@@ -459,7 +477,19 @@ fn main() -> ExitCode {
             }
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
-        Command::Tui { refresh, tools } => tui(&cli, *refresh, tools.as_deref()),
+        Command::Tui {
+            refresh,
+            tools,
+            resume,
+            no_history,
+        } => tui(
+            &cli,
+            *refresh,
+            tools.as_deref(),
+            resume.as_deref(),
+            !*no_history,
+        ),
+        Command::Session(args) => session(&cli, args),
         Command::Exec(args) => exec(&cli, args),
         Command::Tools { command } => match command {
             ToolsCommand::Init {
@@ -923,7 +953,13 @@ fn directories(cli: &Cli) -> ahi::Result<Directories> {
     Directories::resolve(cli.state_dir.as_deref(), cli.cache_dir.as_deref())
 }
 
-fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode {
+fn tui(
+    cli: &Cli,
+    refresh: bool,
+    actions: Option<&std::path::Path>,
+    resume: Option<&str>,
+    record: bool,
+) -> ExitCode {
     let state = match directories(cli) {
         Ok(dirs) => dirs,
         Err(err) => {
@@ -931,12 +967,113 @@ fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode 
             return ExitCode::from(1);
         }
     };
-    match ahi::tui::run(&state, refresh, actions) {
+    match ahi::tui::run(&state, refresh, actions, resume, record) {
         Ok(output) => {
             if !output.text.is_empty() {
                 println!("{}", output.text);
             }
             ExitCode::from(u8::from(output.refresh_failed))
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
+struct SessionArgs {
+    /// Open the chat on this recorded session, with its own model and the conversation so far.
+    #[arg(long, value_name = "UUID")]
+    resume: Option<String>,
+    /// Tool policy file for the resumed chat, instead of ahi.tools.yaml in the working directory.
+    #[arg(long, value_name = "FILE", requires = "resume")]
+    tools: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<SessionCommand>,
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// One row per session, newest first: id, started, model, directory, turns, last status.
+    List {
+        /// One JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// A session's conversation on its active path, oldest first.
+    Show {
+        /// A session id, or the path of a JSONL session file.
+        target: String,
+        /// The raw header and entries, one JSON object per line.
+        #[arg(long)]
+        json: bool,
+        /// Show the branch ending at this entry instead of the active path (a failed attempt, for instance).
+        #[arg(long, value_name = "ENTRY")]
+        branch: Option<String>,
+    },
+    /// Search message text, tool targets, and tool output across every session.
+    Grep {
+        /// A regular expression (Rust syntax).
+        pattern: String,
+        /// Search this JSONL file instead of the database.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// One JSON object per match.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write one session as a JSONL file. The destination must not exist.
+    Export {
+        /// The session id.
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        to: PathBuf,
+    },
+    /// Bring a JSONL session file into the database; a session already present is extended by the file's new tail.
+    Import {
+        /// The JSONL file.
+        path: PathBuf,
+    },
+}
+
+fn session(cli: &Cli, args: &SessionArgs) -> ExitCode {
+    use ahi::chat::session::commands;
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Some(id) = &args.resume {
+        return tui(cli, false, args.tools.as_deref(), Some(id), true);
+    }
+    let output = match &args.command {
+        Some(SessionCommand::List { json }) => commands::list(&state, *json),
+        Some(SessionCommand::Show {
+            target,
+            json,
+            branch,
+        }) => commands::show(&state, target, *json, branch.as_deref()),
+        Some(SessionCommand::Grep {
+            pattern,
+            path,
+            json,
+        }) => commands::grep(&state, pattern, path.as_deref(), *json),
+        Some(SessionCommand::Export { id, to }) => commands::export(&state, id, to),
+        Some(SessionCommand::Import { path }) => commands::import(&state, path),
+        None => Ok(String::new()),
+    };
+    match output {
+        Ok(text) => {
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout
+                .write_all(text.as_bytes())
+                .and_then(|()| stdout.flush());
+            ExitCode::SUCCESS
         }
         Err(err) => {
             eprintln!("error: {err}");

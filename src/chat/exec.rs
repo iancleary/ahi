@@ -609,7 +609,7 @@ fn with_newline(mut text: String) -> String {
 
 /// Sixteen hex digits from the OS; distinct per run with overwhelming
 /// probability, which is all a correlation key needs.
-fn generate_run_id() -> String {
+pub(crate) fn generate_run_id() -> String {
     let mut bytes = [0u8; 8];
     if getrandom::fill(&mut bytes).is_err() {
         let nanos = std::time::SystemTime::now()
@@ -876,7 +876,7 @@ fn inside(root: &Path, path: &Path) -> bool {
     canonical.starts_with(root)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(bytes)
         .iter()

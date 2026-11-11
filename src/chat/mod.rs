@@ -134,12 +134,58 @@ struct ChatScreen {
     copy_label: &'static str,
     /// OSC 7501 reports for the multiplexer that holds this terminal.
     status: crate::program_status::Reporter,
+    /// The session this chat is recorded into.
+    recorder: session::recorder::Recorder,
 }
 
 impl ChatScreen {
+    #[cfg(test)]
     fn load(state_dir: &Directories, selection: &str) -> Self {
+        Self::load_recording(state_dir, selection, session::recorder::Recorder::new(true))
+    }
+
+    /// A screen over an existing session: its model, its conversation on the
+    /// active path, and new turns appended under its last success.
+    fn load_resumed(state_dir: &Directories, store: Box<dyn session::SessionStore>) -> Self {
+        let header = store.header();
+        // The header names the first model; a later `/model` on the active
+        // path names the current one.
+        let (gateway, model) = store
+            .path_to_root(store.active_parent().as_deref())
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                session::Kind::ModelChange { gateway, model } => {
+                    Some((gateway.clone(), model.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| (header.gateway.clone(), header.model.clone()));
+        let messages = store.active_messages(None);
+        let id = header.id.clone();
+        let mut screen = Self::load_recording(
+            state_dir,
+            &format!("{gateway}/{model}"),
+            session::recorder::Recorder::resumed(store),
+        );
+        let count = messages.len();
+        screen.messages.extend(messages);
+        screen.dirty = transcript::render::Dirty::From(0);
+        screen.push_notice(format!(
+            "resumed session {id}: {count} message{} on its active path",
+            if count == 1 { "" } else { "s" }
+        ));
+        screen
+    }
+
+    fn load_recording(
+        state_dir: &Directories,
+        selection: &str,
+        recorder: session::recorder::Recorder,
+    ) -> Self {
         let (thinking, notice) = thinking::read(state_dir);
         let mut screen = Self {
+            recorder,
             preferences: preferences::read(state_dir),
             turn_started: None,
             workspace_root: std::env::current_dir().unwrap_or_default(),
@@ -288,7 +334,17 @@ impl ChatScreen {
                 self.scroll_from_bottom = 0;
             }
         }
+        if selection != self.selection {
+            self.recorder.model_changed(&selection);
+        }
         self.selection = selection;
+    }
+
+    /// Show the recorder's first failure, once, where the operator sees it.
+    fn surface_recording_failure(&mut self) {
+        if let Some(problem) = self.recorder.take_failure() {
+            self.push_alert(format!("session not recorded from here on: {problem}"));
+        }
     }
 
     #[cfg(test)]
@@ -1020,6 +1076,23 @@ impl ChatScreen {
     fn send_transcript(&mut self, backend: &mut dyn CompletionBackend) {
         self.resend_available = false;
         self.refresh_location();
+        // The operator's line is on disk before the request goes out.
+        if let Some(prompt) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.role.is_notice())
+            .filter(|message| message.role == TranscriptRole::Operator)
+            .map(|message| message.text.clone())
+        {
+            self.recorder.begin_turn(
+                &self.state_dir,
+                &self.workspace_root,
+                &self.selection,
+                &prompt,
+            );
+            self.surface_recording_failure();
+        }
         let request = ChatRequest {
             selection: self.selection.clone(),
             thinking: self.thinking,
@@ -1094,6 +1167,7 @@ impl ChatScreen {
                     backend.cancel();
                 }
                 self.messages.clear();
+                self.recorder.reset();
                 self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
                 self.meters.clear_counts();
@@ -1181,6 +1255,8 @@ impl ChatScreen {
             ParsedCommand::SetThinking(level) => {
                 self.thinking = level;
                 thinking::write(&self.state_dir, level)?;
+                self.recorder.thinking_changed(level.as_str());
+                self.surface_recording_failure();
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::UnknownThinkingLevel { level } => {
@@ -1208,6 +1284,7 @@ impl ChatScreen {
                 false
             }
             ResponseEvent::TextDelta(text) => {
+                self.recorder.text(&text);
                 if !self.assistant_open {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
@@ -1220,7 +1297,9 @@ impl ChatScreen {
             }
             ResponseEvent::ToolCallsRequested { calls, native } => {
                 // The calls end the assistant message that requested them and
-                // are replayed with their results on later requests.
+                // are replayed with their results on later requests. They are
+                // on disk before any of them runs.
+                self.recorder.calls(&calls, native.as_ref());
                 if !self.assistant_open {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                 }
@@ -1288,6 +1367,8 @@ impl ChatScreen {
                 elapsed,
                 record: _,
             } => {
+                self.recorder
+                    .tool_result(&call_id, &tool, &output, &content, exit_code);
                 let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
                 message.tool = Some(ToolPayload::Result {
                     call_id,
@@ -1310,11 +1391,14 @@ impl ChatScreen {
                     .map(|message| message.text.clone())
                     .unwrap_or_default();
                 self.report_status(crate::program_status::State::Done, &answer);
+                self.recorder.end_turn(None);
                 self.push_turn_footer("done in");
                 true
             }
             ResponseEvent::Failed { message, kind } => {
                 self.approval = None;
+                self.recorder
+                    .end_turn(Some((&format!("{kind:?}").to_ascii_lowercase(), &message)));
                 // A connection failure left the transcript as the operator
                 // sent it (or ending in tool results): the same request can
                 // go again. A partial reply at the tail cannot.
@@ -1345,6 +1429,7 @@ impl ChatScreen {
                 .scroll_from_bottom
                 .saturating_add(current_rows.saturating_sub(previous_rows));
         }
+        self.surface_recording_failure();
         finished
     }
 
@@ -1481,13 +1566,49 @@ pub(crate) fn interact(
     state_dir: &Directories,
     selection: &str,
     actions: Option<&Path>,
+    record: bool,
+    reopen_picker: impl FnMut(
+        PickerView,
+        &str,
+        Option<crate::harness::GatewayRegistration>,
+    ) -> Result<PickerOutcome>,
+) -> Result<()> {
+    let screen = ChatScreen::load_recording(
+        state_dir,
+        selection,
+        session::recorder::Recorder::new(record),
+    );
+    interact_screen(state_dir, screen, actions, reopen_picker)
+}
+
+/// `ahi session --resume <id>`: the chat over a stored session, continuing
+/// it with its own model.
+pub(crate) fn interact_resumed(
+    state_dir: &Directories,
+    session_id: &str,
+    actions: Option<&Path>,
+    reopen_picker: impl FnMut(
+        PickerView,
+        &str,
+        Option<crate::harness::GatewayRegistration>,
+    ) -> Result<PickerOutcome>,
+) -> Result<()> {
+    let store = session::sqlite::Sqlite::open(&exec::sessions_database(state_dir), session_id)
+        .map_err(|err| Error::new(err.to_string()))?;
+    let screen = ChatScreen::load_resumed(state_dir, Box::new(store));
+    interact_screen(state_dir, screen, actions, reopen_picker)
+}
+
+fn interact_screen(
+    state_dir: &Directories,
+    mut screen: ChatScreen,
+    actions: Option<&Path>,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
-    let mut screen = ChatScreen::load(state_dir, selection);
     screen.push_header();
     screen.report_status(crate::program_status::State::Idle, "");
     let mut backend =
@@ -1966,6 +2087,77 @@ mod tests {
         screen.apply_event(ResponseEvent::Completed);
         assert_eq!(reports(&buffer), ["state=done:app=ahi:msg=QWxsIGdvb2Q="]);
         fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_screen_takes_the_recorded_model_and_conversation() {
+        use session::{Kind, Role, SessionStore, StoredMessage, Turn};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-resume");
+        let dirs = Directories::single_root(&state);
+        let database = exec::sessions_database(&dirs);
+        let mut store =
+            session::sqlite::Sqlite::create(&database, session::Header::new("/w", "local", "m1"))
+                .unwrap();
+        let message = |role, text: &str| {
+            Kind::Message(StoredMessage {
+                role,
+                text: text.into(),
+                tool: None,
+            })
+        };
+        let turn = |run_id: &str, status: &str| {
+            Kind::Turn(Turn {
+                run_id: run_id.into(),
+                status: status.into(),
+                exit_code: 0,
+                prompt_sha256: String::new(),
+                result: serde_json::json!({}),
+            })
+        };
+        let first = store
+            .append(
+                None,
+                vec![
+                    message(Role::Operator, "q1"),
+                    message(Role::Assistant, "a1"),
+                    turn("r1", "ok"),
+                ],
+            )
+            .unwrap();
+        store
+            .append(
+                Some(&first[2]),
+                vec![
+                    Kind::ModelChange {
+                        gateway: "local".into(),
+                        model: "m2".into(),
+                    },
+                    message(Role::Operator, "q2"),
+                    turn("r2", "failed"),
+                ],
+            )
+            .unwrap();
+        let id = store.header().id.clone();
+        drop(store);
+        let screen = ChatScreen::load_resumed(
+            &dirs,
+            Box::new(session::sqlite::Sqlite::open(&database, &id).unwrap()),
+        );
+        // The failed branch is skipped, so its model change is too: the
+        // active path still runs on m1.
+        assert_eq!(screen.selection, parse_selection("local/m1"));
+        let texts: Vec<&str> = screen
+            .messages()
+            .iter()
+            .filter(|m| !m.role.is_notice())
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(texts, ["q1", "a1"]);
+        assert!(screen
+            .messages()
+            .iter()
+            .any(|m| m.role == TranscriptRole::Notice && m.text.contains("resumed session")));
+        std::fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
