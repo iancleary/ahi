@@ -1321,6 +1321,7 @@ fn without_timing(events: Vec<ResponseEvent>) -> Vec<ResponseEvent> {
                 exit_code,
                 detail,
                 elapsed: std::time::Duration::ZERO,
+                record: None,
             },
             other => other,
         })
@@ -1366,6 +1367,7 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
                     lines: 1,
                 }),
                 elapsed: std::time::Duration::ZERO,
+                record: None,
             },
             ResponseEvent::ToolCallReturned,
             ResponseEvent::TextDelta("done".into()),

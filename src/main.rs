@@ -129,14 +129,20 @@ enum Command {
     /// once after a validated success; diagnostics go to stderr.
     ///
     /// `--result-file <path>` writes one JSON object on every outcome
-    /// (status, text, error, usage, tool counts). The file must not exist.
-    /// `--headless` is the worker contract a coordinator drives: the prompt
-    /// comes from `--prompt-file` only and `--result-file` is required.
+    /// (status, text, error, usage, tool counts, a ledger of every write and
+    /// command with hashes and exit codes, and `effects`: none, some, or
+    /// unknown). The file must not exist. `--headless` is the worker
+    /// contract a coordinator drives: the prompt comes from `--prompt-file`
+    /// only, `--result-file` is required, tools come only from `--tools`,
+    /// and `ask` rules are answered as denials.
     ///
-    /// No tool is advertised in this version; the working directory's
-    /// ahi.tools.yaml is not read. Exit codes: 0 success, 1 turn failure,
-    /// 2 usage, 3 models.json or model, 4 credential, 8 result file not
-    /// written. See docs/HEADLESS_EXEC.md.
+    /// Tools are confined to `--workdir` (default: the current directory)
+    /// and governed by its ahi.tools.yaml or the `--tools` file, exactly as
+    /// in `ahi tui`. When any tool is advertised, the prompt, result, and
+    /// policy files must lie outside the working directory. Exit codes: 0
+    /// success, 1 turn failure, 2 usage, 3 models.json or model, 4
+    /// credential, 5 policy file, 8 result file not written. See
+    /// docs/HEADLESS_EXEC.md.
     Exec(ExecArgs),
     /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
@@ -250,6 +256,21 @@ struct ExecArgs {
     /// Read the prompt from this UTF-8 file, verbatim (at most 1 MiB).
     #[arg(long, value_name = "PATH", help_heading = "Input")]
     prompt_file: Option<PathBuf>,
+    /// Hex SHA-256 the prompt must hash to; a mismatch is a usage error before any request.
+    #[arg(long, value_name = "HEX", help_heading = "Input")]
+    prompt_sha256: Option<String>,
+    /// Tool root, and where ahi.tools.yaml is looked up without --tools. Defaults to the current directory.
+    #[arg(long, value_name = "DIR", help_heading = "Tools")]
+    workdir: Option<PathBuf>,
+    /// Policy file to read instead of the working directory's ahi.tools.yaml. Headless runs advertise no tool without it.
+    #[arg(long, value_name = "PATH", help_heading = "Tools")]
+    tools: Option<PathBuf>,
+    /// Validate arguments, files, policy, model, and credential, then exit without calling the model.
+    #[arg(long)]
+    check: bool,
+    /// Print one progress line per tool call on stderr (headless runs always do).
+    #[arg(long, short = 'v', help_heading = "Output")]
+    verbose: bool,
     /// Reasoning level sent to the model.
     #[arg(long, default_value = "off", value_name = "LEVEL", value_parser = ["off", "minimal", "low", "medium", "high"])]
     thinking: String,
@@ -911,11 +932,16 @@ fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
     let options = Options {
         model: args.model.clone(),
         prompt,
+        prompt_sha256: args.prompt_sha256.clone(),
         thinking: args.thinking.clone(),
         format: Format::parse(&args.format).unwrap_or(Format::Text),
         result_file: args.result_file.clone(),
         headless: args.headless,
         run_id: args.run_id.clone(),
+        workdir: args.workdir.clone(),
+        tools: args.tools.clone(),
+        check: args.check,
+        verbose: args.verbose,
     };
     let finished = exec::run(&state, &options);
     if let Some(text) = finished.stdout {

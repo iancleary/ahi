@@ -24,7 +24,9 @@ mod write_file;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-pub(crate) use run_command::{render as render_argv, CommandReport};
+pub(crate) use run_command::{
+    ran_after as command_ran_after, render as render_argv, CommandReport,
+};
 pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 

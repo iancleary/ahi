@@ -1,6 +1,6 @@
 # One-shot turns and headless workers (`ahi exec`)
 
-Status: slice 1 is implemented (`ahi exec` with `-p`, stdin, `--prompt-file`, `--model`, `--thinking`, `--format`, `--result-file`, `--headless`, `--run-id`; exit codes 0..4 and 8; no tools). Everything else below is design for review: checked boxes are shipped, unchecked ones are proposed syntax, not commands available today.
+Status: slices 1 and 2 are implemented (`ahi exec` with `-p`, stdin, `--prompt-file`, `--prompt-sha256`, `--model`, `--thinking`, `--format`, `--result-file`, `--headless`, `--run-id`, `--workdir`, `--tools`, `--check`, `-v`; the ledger and `effects`; audit `origin`/`run_id`; exit codes 0..5 and 8). Timeouts, signals, and the durable store (slices 3 and 4) are design for review: checked boxes are shipped, unchecked ones are proposed syntax, not commands available today.
 
 ## Roles
 

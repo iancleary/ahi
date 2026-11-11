@@ -21,6 +21,10 @@ pub struct AuditEvent<'a> {
 
 /// One file change made by a chat tool. Hashes, never contents.
 pub struct WriteEvent<'a> {
+    /// `tui` or `exec`: which front end ran the turn.
+    pub origin: &'a str,
+    /// The worker's run id, so a result file and this log can be joined.
+    pub run_id: Option<&'a str>,
     pub tool: &'a str,
     pub repo: &'a Path,
     /// Workspace-relative path.
@@ -40,6 +44,8 @@ pub fn append_write(state_dir: &Path, event: &WriteEvent<'_>) -> Result<()> {
         json!({
             "time": now(),
             "command": "tool",
+            "origin": event.origin,
+            "run_id": event.run_id,
             "tool": event.tool,
             "repo": event.repo.display().to_string(),
             "path": event.path,
@@ -75,6 +81,8 @@ fn append_line(state_dir: &Path, line: serde_json::Value) -> Result<()> {
 /// One program run by a chat tool. The argv is recorded because it is the
 /// grant; output is not.
 pub struct CommandEvent<'a> {
+    pub origin: &'a str,
+    pub run_id: Option<&'a str>,
     pub repo: &'a Path,
     pub argv: &'a [String],
     /// Workspace-relative working directory; empty is the root.
@@ -93,6 +101,8 @@ pub fn append_command(state_dir: &Path, event: &CommandEvent<'_>) -> Result<()> 
         json!({
             "time": now(),
             "command": "tool",
+            "origin": event.origin,
+            "run_id": event.run_id,
             "tool": "run_command",
             "repo": event.repo.display().to_string(),
             "argv": event.argv,

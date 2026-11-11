@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use super::tools::{self, PreparedCall, ToolDetail, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
+    ToolRecord,
 };
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
@@ -53,11 +54,29 @@ pub(super) struct SessionGrant {
 /// Held by the backend for the life of the chat process.
 pub(super) type SessionGrants = Arc<Mutex<Vec<SessionGrant>>>;
 
+/// Who is running the turn, for the audit log: the screen or a worker, and
+/// the worker's run id so a result file and `audit.log` can be joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Caller {
+    pub(crate) origin: &'static str,
+    pub(crate) run_id: Option<String>,
+}
+
+impl Default for Caller {
+    fn default() -> Self {
+        Self {
+            origin: "tui",
+            run_id: None,
+        }
+    }
+}
+
 pub(super) struct ToolRuntime {
     policy: ActionPolicy,
     workspace: Workspace,
     /// Where `audit.log` lives; every write appends a line there.
     state_dir: PathBuf,
+    caller: Caller,
     advertised: Vec<String>,
     gateway: String,
     destination: String,
@@ -72,6 +91,7 @@ struct Outcome {
     output: String,
     detail: Option<ToolDetail>,
     elapsed: Duration,
+    record: Option<ToolRecord>,
 }
 
 /// `Run` and `Ask` carry the id of the rule that approved or asked, so the
@@ -96,6 +116,7 @@ impl ToolRuntime {
         destination: &str,
         grants: SessionGrants,
         policy_file: Option<&Path>,
+        caller: Caller,
     ) -> Result<Option<Self>> {
         let policy = match policy_file {
             Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
@@ -111,6 +132,7 @@ impl ToolRuntime {
         Ok(Some(Self {
             workspace: Workspace::open(directory, state)?,
             state_dir: state.state.clone(),
+            caller,
             policy,
             advertised,
             gateway: gateway.to_string(),
@@ -185,6 +207,7 @@ impl ToolRuntime {
                     exit_code: outcome.exit_code,
                     detail: outcome.detail,
                     elapsed: outcome.elapsed,
+                    record: outcome.record.map(Box::new),
                 },
             )?;
             emit(sender, ResponseEvent::ToolCallReturned)?;
@@ -321,6 +344,10 @@ impl ToolRuntime {
                     Plan::Run(prepared, rule)
                 }
                 ToolDecision::Deny => Plan::Done(denied(&prepared, "denied by the operator")),
+                ToolDecision::Unattended => Plan::Done(denied(
+                    &prepared,
+                    "this call needs operator approval and no operator is attending the run",
+                )),
             };
         }
         Ok(false)
@@ -345,11 +372,12 @@ impl ToolRuntime {
                 command,
                 detail,
             }) => {
+                let mut record = None;
                 if let Some(report) = write {
-                    self.audit_write(prepared, &report, "ok");
+                    record = Some(self.audit_write(prepared, &report, "ok"));
                 }
                 if let Some(report) = command {
-                    self.audit_command(prepared, &report, "ok");
+                    record = Some(self.audit_command(prepared, &report, "ok", Some(true)));
                 }
                 Outcome {
                     exit_code: EXIT_OK,
@@ -362,9 +390,11 @@ impl ToolRuntime {
                     content,
                     detail,
                     elapsed,
+                    record,
                 }
             }
             Err(message) => {
+                let mut record = None;
                 if matches!(prepared.tool, tools::EDIT_FILE | tools::WRITE_FILE) {
                     let none = tools::WriteReport {
                         before: None,
@@ -372,7 +402,7 @@ impl ToolRuntime {
                         lines_added: 0,
                         lines_removed: 0,
                     };
-                    self.audit_write(prepared, &none, message);
+                    record = Some(self.audit_write(prepared, &none, message));
                 }
                 if prepared.tool == tools::RUN_COMMAND {
                     let none = tools::CommandReport {
@@ -380,35 +410,67 @@ impl ToolRuntime {
                         duration_ms: 0,
                         env_names: Vec::new(),
                     };
-                    self.audit_command(prepared, &none, message);
+                    record = Some(self.audit_command(
+                        prepared,
+                        &none,
+                        message,
+                        tools::command_ran_after(message),
+                    ));
                 }
                 let mut outcome = error(prepared.tool, Some(prepared.target()), message);
                 outcome.elapsed = elapsed;
+                outcome.record = record;
                 outcome
             }
         }
     }
 
     /// One audit line per attempted write: path and hashes, never contents.
-    /// A failure to log does not undo a write that already happened.
-    fn audit_write(&self, prepared: &PreparedCall, report: &tools::WriteReport, outcome: &str) {
+    /// A failure to log does not undo a write that already happened. The
+    /// same facts come back as the call's record.
+    fn audit_write(
+        &self,
+        prepared: &PreparedCall,
+        report: &tools::WriteReport,
+        outcome: &str,
+    ) -> ToolRecord {
+        let after = (!report.after.is_empty()).then_some(report.after.as_str());
         let event = crate::hooks::audit::WriteEvent {
+            origin: self.caller.origin,
+            run_id: self.caller.run_id.as_deref(),
             tool: prepared.tool,
             repo: self.workspace.root(),
             path: prepared.target(),
             outcome,
             before: report.before.as_deref(),
-            after: (!report.after.is_empty()).then_some(report.after.as_str()),
+            after,
             lines_added: report.lines_added,
             lines_removed: report.lines_removed,
         };
         let _ = crate::hooks::audit::append_write(&self.state_dir, &event);
+        ToolRecord::Write {
+            tool: prepared.tool.to_string(),
+            path: prepared.target().to_string(),
+            outcome: outcome.to_string(),
+            before: report.before.clone(),
+            after: after.map(str::to_string),
+            lines_added: report.lines_added,
+            lines_removed: report.lines_removed,
+        }
     }
 
     /// One audit line per attempted command: argv, cwd, exit code, duration,
     /// and environment names. Output is not logged.
-    fn audit_command(&self, prepared: &PreparedCall, report: &tools::CommandReport, outcome: &str) {
+    fn audit_command(
+        &self,
+        prepared: &PreparedCall,
+        report: &tools::CommandReport,
+        outcome: &str,
+        ran: Option<bool>,
+    ) -> ToolRecord {
         let event = crate::hooks::audit::CommandEvent {
+            origin: self.caller.origin,
+            run_id: self.caller.run_id.as_deref(),
             repo: self.workspace.root(),
             argv: prepared.argv(),
             cwd: &prepared.path,
@@ -418,6 +480,14 @@ impl ToolRuntime {
             env_names: &report.env_names,
         };
         let _ = crate::hooks::audit::append_command(&self.state_dir, &event);
+        ToolRecord::Command {
+            argv: prepared.argv().to_vec(),
+            cwd: prepared.path.clone(),
+            outcome: outcome.to_string(),
+            ran,
+            exit_code: report.exit_code,
+            duration_ms: report.duration_ms,
+        }
     }
 
     /// Charge every result's model-facing content, including denials and
@@ -446,6 +516,7 @@ fn empty() -> Outcome {
         output: String::new(),
         detail: None,
         elapsed: Duration::ZERO,
+        record: None,
     }
 }
 
@@ -458,6 +529,7 @@ fn error(tool: &str, target: Option<&str>, message: &str) -> Outcome {
         output: format!("{label}: {message}"),
         detail: None,
         elapsed: Duration::ZERO,
+        record: None,
     }
 }
 
@@ -468,6 +540,7 @@ fn denied(prepared: &PreparedCall, reason: &str) -> Outcome {
         output: format!("{} {}: {reason}", prepared.tool, prepared.target()),
         detail: None,
         elapsed: Duration::ZERO,
+        record: None,
     }
 }
 

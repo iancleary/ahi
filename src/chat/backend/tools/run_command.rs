@@ -39,6 +39,30 @@ pub(crate) struct CommandReport {
     pub(crate) env_names: Vec<String>,
 }
 
+/// The two failures that happen after the process started. Every other
+/// error `run` returns precedes `spawn`, so nothing ran.
+const RAN_BEFORE_FAILING: [&str; 2] = [
+    "cannot wait for the program",
+    "command timed out and was killed",
+];
+
+/// Whether a process ran before `run` failed with `message`: `Some(true)`
+/// for the post-spawn failures, `Some(false)` for a failure `run` itself
+/// produced before spawning, `None` for a message this module does not
+/// recognize (a containment error from the workspace, for instance, which
+/// also precedes the spawn but is not this module's to vouch for).
+pub(crate) fn ran_after(message: &str) -> Option<bool> {
+    if RAN_BEFORE_FAILING.contains(&message) {
+        return Some(true);
+    }
+    const NEVER_SPAWNED: [&str; 3] = [
+        "argv must not be empty",
+        "not a directory",
+        "cannot start the program (not found or not executable)",
+    ];
+    NEVER_SPAWNED.contains(&message).then_some(false)
+}
+
 pub(super) fn run(
     argv: &[String],
     cwd: &Path,

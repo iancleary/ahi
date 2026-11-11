@@ -1285,6 +1285,7 @@ impl ChatScreen {
                 exit_code,
                 detail,
                 elapsed,
+                record: _,
             } => {
                 let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
                 message.tool = Some(ToolPayload::Result {
@@ -2406,6 +2407,7 @@ mod tests {
             exit_code: 0,
             detail: None,
             elapsed: std::time::Duration::ZERO,
+            record: None,
         }));
         assert!(!screen.apply_event(ResponseEvent::TextDelta("after".into())));
         assert!(!screen.apply_event(ResponseEvent::TextDelta(" more".into())));
@@ -2417,6 +2419,7 @@ mod tests {
             exit_code: 2,
             detail: None,
             elapsed: std::time::Duration::ZERO,
+            record: None,
         }));
         assert_eq!(screen.messages[3].text, "after more");
         assert_eq!(screen.messages[1].text, "before");
@@ -2482,6 +2485,7 @@ mod tests {
                 exit_code: 0,
                 detail: None,
                 elapsed: std::time::Duration::ZERO,
+                record: None,
             },
             ResponseEvent::TextDelta("continuing after tool\n".into()),
             ResponseEvent::Completed,

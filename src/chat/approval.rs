@@ -201,12 +201,12 @@ impl PendingApproval {
                 Some(ToolDecision::ApproveForSession) => {
                     format!(" · approved for session {}", scope(&call.grant_prefix))
                 }
-                Some(ToolDecision::Deny) => " · denied".to_string(),
+                Some(ToolDecision::Deny | ToolDecision::Unattended) => " · denied".to_string(),
                 None => String::new(),
             };
             let marker = match self.decisions[index] {
                 _ if index == self.current && !complete => "›",
-                Some(ToolDecision::Deny) => "✗",
+                Some(ToolDecision::Deny | ToolDecision::Unattended) => "✗",
                 Some(_) => "✓",
                 None => " ",
             };

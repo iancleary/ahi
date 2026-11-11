@@ -3,29 +3,34 @@
 //! A prompt in (`-p`, a file, or stdin), the final answer out (stdout, and
 //! a result file when asked), one exit code a caller can act on without
 //! parsing text. The turn runs through the same `HttpBackend` as `ahi tui`,
-//! so every transport, credential, and stream boundary is shared; what
+//! so every transport, credential, tool, and stream boundary is shared; what
 //! differs is the input discipline and the absence of a terminal.
 //!
 //! `--headless` is the worker contract a coordinator drives: prompt file
-//! only, result file required, nothing inferred from the environment. See
-//! `docs/HEADLESS_EXEC.md` for the plan this slice implements the first
-//! part of: no tools are advertised yet, so `tools`, `effects`, and
-//! `ledger` in the result are present but trivial.
+//! only, result file required, tools only from an explicit `--tools` file,
+//! `ask` rules answered as denials because nobody is there to answer. See
+//! `docs/HEADLESS_EXEC.md` for the plan; this module implements its first
+//! two slices. The result file carries a ledger of every effectful call and
+//! an `effects` verdict so a coordinator knows what changed even when the
+//! turn failed.
 
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use super::backend::{
-    ChatRequest, CompletionBackend, HttpBackend, ResponseEvent, Selection, EXIT_DENIED, EXIT_OK,
+    tools, ApprovalRequest, Caller, ChatRequest, CompletionBackend, HttpBackend, ResponseEvent,
+    Selection, ToolDecision, ToolRecord, EXIT_DENIED, EXIT_OK,
 };
 use super::thinking::ThinkingLevel;
 use super::transcript::{ChatMessage, TranscriptRole};
 use crate::directories::Directories;
 use crate::error::ErrorKind;
+use crate::tool_policy;
 
 /// Version of the result object. Bumped only for an incompatible change.
 pub const RESULT_SCHEMA: u32 = 1;
@@ -64,12 +69,23 @@ pub struct Options {
     /// `gateway/model-id`, as the picker saves it.
     pub model: String,
     pub prompt: PromptSource,
+    /// Hex SHA-256 the prompt bytes must hash to, when the caller knows it.
+    pub prompt_sha256: Option<String>,
     /// `off`, `minimal`, `low`, `medium`, or `high`.
     pub thinking: String,
     pub format: Format,
     pub result_file: Option<PathBuf>,
     pub headless: bool,
     pub run_id: Option<String>,
+    /// Tool root and, without `tools`, where `ahi.tools.yaml` is looked up.
+    /// The process's working directory when absent.
+    pub workdir: Option<PathBuf>,
+    /// An explicit policy file. Headless runs advertise no tool without one.
+    pub tools: Option<PathBuf>,
+    /// Validate everything up to the model call and stop.
+    pub check: bool,
+    /// Progress lines on stderr in interactive mode too.
+    pub verbose: bool,
 }
 
 /// Process exit codes. A coordinator reacts to these, not to text.
@@ -80,12 +96,15 @@ pub enum Exit {
     Ok = 0,
     /// Transport, malformed stream, refusal, truncation, tools disabled.
     Turn = 1,
-    /// Bad arguments, unreadable or invalid prompt, result file in the way.
+    /// Bad arguments, unreadable or invalid prompt, result file in the way,
+    /// bad working directory, operator file inside it, digest mismatch.
     Usage = 2,
     /// `models.json` missing or invalid, unknown gateway or model.
     Config = 3,
     /// Credential missing, rejected, or its refresh failed.
     Credential = 4,
+    /// The policy file is missing or invalid. Nothing was sent.
+    Policy = 5,
     /// Timeout or a signal (a later slice).
     Timeout = 6,
     /// The turn finished but the result file could not be written.
@@ -103,7 +122,7 @@ pub struct Finished {
 #[derive(Debug)]
 struct Failure {
     exit: Exit,
-    /// `usage`, `config`, or an `ErrorKind` name.
+    /// `usage`, `config`, `policy`, or an `ErrorKind` name.
     kind: &'static str,
     message: String,
 }
@@ -125,13 +144,22 @@ impl Failure {
         }
     }
 
+    fn policy(message: impl Into<String>) -> Self {
+        Self {
+            exit: Exit::Policy,
+            kind: "policy",
+            message: message.into(),
+        }
+    }
+
     fn turn(message: impl Into<String>, kind: ErrorKind) -> Self {
         Self {
             exit: match kind {
                 ErrorKind::Auth => Exit::Credential,
                 // A policy failure here is `tool execution is disabled`: the
                 // model asked for a tool no policy offered. That is the
-                // turn's failure, not a bad policy file (exit 5, later).
+                // turn's failure; a bad policy file never reaches the model
+                // (exit 5 from the preflight).
                 _ => Exit::Turn,
             },
             kind: kind_name(kind),
@@ -160,6 +188,7 @@ struct Report {
     usage: Option<Value>,
     context_window: Option<u64>,
     tools: ToolCounts,
+    ledger: Ledger,
 }
 
 #[derive(Default)]
@@ -171,7 +200,103 @@ struct ToolCounts {
     rounds: u64,
 }
 
+/// What the turn did to the working directory, as the audit log records
+/// it. `effects` is decided from the records and from what never came back.
+#[derive(Default)]
+struct Ledger {
+    entries: Vec<Value>,
+    /// A write landed or a program ran.
+    some: bool,
+    /// A command failed in a way whose side effects cannot be known.
+    unknown: bool,
+    /// Effectful calls requested whose result has not arrived; a run that
+    /// ends with any of these left things in an unknown state.
+    in_flight: Vec<String>,
+}
+
+impl Ledger {
+    fn requested(&mut self, calls: &[super::backend::ToolCall]) {
+        for call in calls {
+            if matches!(
+                call.name.as_str(),
+                tools::EDIT_FILE | tools::WRITE_FILE | tools::RUN_COMMAND
+            ) {
+                self.in_flight.push(call.id.clone());
+            }
+        }
+    }
+
+    fn returned(&mut self, call_id: &str, record: Option<ToolRecord>) {
+        self.in_flight.retain(|id| id != call_id);
+        let Some(record) = record else {
+            return;
+        };
+        match record.effect() {
+            Some(true) => self.some = true,
+            Some(false) => {}
+            None => self.unknown = true,
+        }
+        self.entries.push(match record {
+            ToolRecord::Write {
+                tool,
+                path,
+                outcome,
+                before,
+                after,
+                lines_added,
+                lines_removed,
+            } => json!({
+                "tool": tool,
+                "target": path,
+                "outcome": outcome,
+                "before": before,
+                "after": after,
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+            }),
+            ToolRecord::Command {
+                argv,
+                cwd,
+                outcome,
+                ran,
+                exit_code,
+                duration_ms,
+            } => json!({
+                "tool": tools::RUN_COMMAND,
+                "argv": argv,
+                "cwd": if cwd.is_empty() { "." } else { cwd.as_str() },
+                "outcome": outcome,
+                "ran": ran,
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+            }),
+        });
+    }
+
+    fn effects(&self) -> &'static str {
+        if self.unknown || !self.in_flight.is_empty() {
+            "unknown"
+        } else if self.some {
+            "some"
+        } else {
+            "none"
+        }
+    }
+}
+
 impl Report {
+    fn new(run_id: String, gateway: String, model: String) -> Self {
+        Self {
+            run_id,
+            gateway,
+            model,
+            usage: None,
+            context_window: None,
+            tools: ToolCounts::default(),
+            ledger: Ledger::default(),
+        }
+    }
+
     fn result(&self, outcome: &Result<String, Failure>) -> Value {
         let mut object = json!({
             "schema": RESULT_SCHEMA,
@@ -208,10 +333,8 @@ impl Report {
             "invalid": self.tools.invalid,
             "rounds": self.tools.rounds,
         });
-        // No tool can change a file or run a program until a policy is
-        // accepted, so this slice never has effects to account for.
-        object["effects"] = json!("none");
-        object["ledger"] = json!([]);
+        object["effects"] = json!(self.ledger.effects());
+        object["ledger"] = Value::Array(self.ledger.entries.clone());
         object["history"] = json!("none");
         object
     }
@@ -251,14 +374,7 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
             ))
         }
     };
-    let mut report = Report {
-        run_id,
-        gateway,
-        model,
-        usage: None,
-        context_window: None,
-        tools: ToolCounts::default(),
-    };
+    let mut report = Report::new(run_id, gateway, model);
     // The result file is checked before anything else can fail, so every
     // later outcome has somewhere to go. An existing file is someone else's
     // result: refusing it is what keeps a coordinator from reading a stale
@@ -268,7 +384,26 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
             return finish_without_result(failure);
         }
     }
-    let outcome = turn(state, options, &mut report);
+    let outcome = match preflight(state, options, &report) {
+        Err(failure) => Err(failure),
+        Ok(prepared) if options.check => {
+            eprintln!(
+                "check: ok; {}/{}; tools: {}; working directory: {}",
+                report.gateway,
+                report.model,
+                match &prepared.advertised {
+                    None => "none".to_string(),
+                    Some(names) => names.join(","),
+                },
+                prepared.root.display()
+            );
+            return Finished {
+                code: Exit::Ok as u8,
+                stdout: None,
+            };
+        }
+        Ok(prepared) => complete(state, options, prepared, &mut report),
+    };
     let result = report.result(&outcome);
     if let Some(path) = &options.result_file {
         if let Err(err) = write_new(path, format!("{result:#}\n").as_bytes()) {
@@ -334,9 +469,28 @@ fn generate_run_id() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// The validated contract, then the model. Everything a result object needs
-/// lands in `report` on the way.
-fn turn(state: &Directories, options: &Options, report: &mut Report) -> Result<String, Failure> {
+/// The validated contract: everything that can be known before a byte is
+/// sent, so every fault short of the model's has its own exit code.
+struct Prepared {
+    prompt: String,
+    thinking: ThinkingLevel,
+    /// Canonical tool root.
+    root: PathBuf,
+    /// Advertised tool names; `None` when no tool is offered to the model.
+    advertised: Option<Vec<String>>,
+    tools: ToolSetup,
+}
+
+enum ToolSetup {
+    /// No policy is read; a requested call fails the turn.
+    Disabled,
+    /// The root's own `ahi.tools.yaml`, as the chat reads it.
+    Workdir,
+    /// An explicit `--tools` file.
+    File(PathBuf),
+}
+
+fn preflight(state: &Directories, options: &Options, report: &Report) -> Result<Prepared, Failure> {
     if options.headless {
         if !matches!(options.prompt, PromptSource::File(_)) {
             return Err(Failure::usage(
@@ -349,7 +503,65 @@ fn turn(state: &Directories, options: &Options, report: &mut Report) -> Result<S
     }
     let thinking = ThinkingLevel::parse(&options.thinking)
         .ok_or_else(|| Failure::usage("--thinking must be off, minimal, low, medium, or high"))?;
+    let root = resolve_workdir(options.workdir.as_deref())?;
+    // Which policy, and whether anything is advertised. A bad file is exit
+    // 5 here, before the prompt is even read: nothing about the task should
+    // leak when the operator's own configuration is broken.
+    let (tools, policy) = match (&options.tools, options.headless) {
+        (Some(path), _) => {
+            let policy = tool_policy::load_file(path, &tools::BUILTIN)
+                .map_err(|err| Failure::policy(err.to_string()))?;
+            (ToolSetup::File(path.clone()), Some(policy))
+        }
+        (None, true) => (ToolSetup::Disabled, None),
+        (None, false) => {
+            let policy = tool_policy::load(&root, &tools::BUILTIN)
+                .map_err(|err| Failure::policy(err.to_string()))?;
+            (ToolSetup::Workdir, policy)
+        }
+    };
+    let advertised = policy
+        .map(|policy| policy.advertised_tools())
+        .filter(|names| !names.is_empty());
+    let tools = if advertised.is_some() {
+        tools
+    } else {
+        ToolSetup::Disabled
+    };
+    // With a tool that can read the working directory, the operator's own
+    // files must not be in it: reads are not protected by name, and a
+    // worker that can read its own result file or policy learns things the
+    // coordinator did not say.
+    if advertised.is_some() {
+        let mut operator_files: Vec<(&str, &Path)> = Vec::new();
+        if let PromptSource::File(path) = &options.prompt {
+            operator_files.push(("prompt file", path));
+        }
+        if let Some(path) = &options.result_file {
+            operator_files.push(("result file", path));
+        }
+        if let ToolSetup::File(path) = &tools {
+            operator_files.push(("policy file", path));
+        }
+        for (label, path) in operator_files {
+            if inside(&root, path) {
+                return Err(Failure::usage(format!(
+                    "{label} {} is inside the working directory {}; operator files must live outside it because tools may read it",
+                    path.display(),
+                    root.display()
+                )));
+            }
+        }
+    }
     let prompt = read_prompt(&options.prompt)?;
+    if let Some(expected) = &options.prompt_sha256 {
+        let actual = sha256_hex(prompt.as_bytes());
+        if !expected.eq_ignore_ascii_case(&actual) {
+            return Err(Failure::usage(
+                "prompt digest mismatch: the prompt is not the one --prompt-sha256 names",
+            ));
+        }
+    }
     // Resolve the destination and credential before any request so a
     // configuration fault and a missing credential get their own codes.
     // Secrets are read here and never printed.
@@ -359,16 +571,93 @@ fn turn(state: &Directories, options: &Options, report: &mut Report) -> Result<S
             _ => Failure::config(err.to_string()),
         },
     )?;
-    let mut backend = HttpBackend::new(state.clone()).without_tools();
+    Ok(Prepared {
+        prompt,
+        thinking,
+        root,
+        advertised,
+        tools,
+    })
+}
+
+fn resolve_workdir(workdir: Option<&Path>) -> Result<PathBuf, Failure> {
+    let path = match workdir {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().map_err(|err| {
+            Failure::usage(format!("cannot resolve the working directory: {err}"))
+        })?,
+    };
+    let shown = path.display();
+    let metadata = fs::metadata(&path)
+        .map_err(|err| Failure::usage(format!("working directory {shown}: {err}")))?;
+    if !metadata.is_dir() {
+        return Err(Failure::usage(format!(
+            "working directory {shown} is not a directory"
+        )));
+    }
+    path.canonicalize()
+        .map_err(|err| Failure::usage(format!("working directory {shown}: {err}")))
+}
+
+/// Whether `path` (which may not exist yet) lies under `root`. The parent is
+/// canonicalized so a symbolic link into the working directory counts.
+fn inside(root: &Path, path: &Path) -> bool {
+    let canonical = match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            match (parent.canonicalize(), path.file_name()) {
+                (Ok(parent), Some(name)) => parent.join(name),
+                _ => return false,
+            }
+        }
+    };
+    canonical.starts_with(root)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The model, with tools when the preflight offered any.
+fn complete(
+    state: &Directories,
+    options: &Options,
+    prepared: Prepared,
+    report: &mut Report,
+) -> Result<String, Failure> {
+    let mut backend = HttpBackend::new(state.clone())
+        .in_workspace(prepared.root.clone())
+        .with_caller(Caller {
+            origin: "exec",
+            run_id: Some(report.run_id.clone()),
+        });
+    backend = match prepared.tools {
+        ToolSetup::Disabled => backend.without_tools(),
+        ToolSetup::Workdir => backend,
+        ToolSetup::File(path) => backend.with_actions(Some(path)),
+    };
     let receiver = backend.submit(ChatRequest {
         selection: Selection {
             gateway: report.gateway.clone(),
             model: report.model.clone(),
         },
-        thinking,
-        messages: vec![ChatMessage::new(TranscriptRole::Operator, prompt)],
+        thinking: prepared.thinking,
+        messages: vec![ChatMessage::new(TranscriptRole::Operator, prepared.prompt)],
     });
-    drain(receiver, report)
+    // Approvals are answered only by a person at a terminal. A headless run
+    // has none by contract; a run reading its prompt from a pipe has no
+    // stdin to answer on either.
+    let attended = !options.headless && io::stdin().is_terminal() && io::stderr().is_terminal();
+    let progress = options.headless || options.verbose;
+    drain(receiver, report, attended, progress)
 }
 
 fn read_prompt(source: &PromptSource) -> Result<String, Failure> {
@@ -426,9 +715,15 @@ fn decode_prompt(bytes: Vec<u8>, origin: &str) -> Result<String, Failure> {
 }
 
 /// Consume the turn's events. Text accumulates; usage and the window are
-/// kept; `Completed` is the only success. An approval request cannot arrive
-/// without tools, and if one ever did, dropping its reply denies the batch.
-fn drain(receiver: Receiver<ResponseEvent>, report: &mut Report) -> Result<String, Failure> {
+/// kept; every tool result feeds the ledger; `Completed` is the only
+/// success. Approvals are answered per call, so the calls that rules alone
+/// approved still run in an unattended batch.
+fn drain(
+    receiver: Receiver<ResponseEvent>,
+    report: &mut Report,
+    attended: bool,
+    progress: bool,
+) -> Result<String, Failure> {
     let mut text = String::new();
     loop {
         let event = receiver.recv().map_err(|_| {
@@ -466,20 +761,110 @@ fn drain(receiver: Receiver<ResponseEvent>, report: &mut Report) -> Result<Strin
             ResponseEvent::ToolCallsRequested { calls, .. } => {
                 report.tools.rounds += 1;
                 report.tools.calls += calls.len() as u64;
+                report.ledger.requested(&calls);
             }
             ResponseEvent::ToolApprovalRequested(request) => {
-                report.tools.ask_denied += request.calls.len() as u64;
+                let decisions = if attended {
+                    ask_operator(&request)
+                } else {
+                    vec![ToolDecision::Unattended; request.calls.len()]
+                };
+                report.tools.ask_denied += decisions
+                    .iter()
+                    .filter(|decision| {
+                        matches!(decision, ToolDecision::Deny | ToolDecision::Unattended)
+                    })
+                    .count() as u64;
+                let ApprovalRequest { reply, .. } = request;
+                reply.send(decisions);
             }
-            ResponseEvent::ToolResult { exit_code, .. } => match exit_code {
-                EXIT_DENIED => report.tools.denied += 1,
-                EXIT_OK => {}
-                _ => report.tools.invalid += 1,
-            },
+            ResponseEvent::ToolResult {
+                call_id,
+                tool,
+                exit_code,
+                elapsed,
+                record,
+                ..
+            } => {
+                match exit_code {
+                    EXIT_DENIED => report.tools.denied += 1,
+                    EXIT_OK => {}
+                    _ => report.tools.invalid += 1,
+                }
+                if progress {
+                    eprintln!(
+                        "progress: run {} round {} {} exit {} {}",
+                        report.run_id,
+                        report.tools.rounds,
+                        describe(&tool, record.as_deref()),
+                        exit_code,
+                        elapsed_text(elapsed)
+                    );
+                }
+                report
+                    .ledger
+                    .returned(&call_id, record.map(|record| *record));
+            }
             ResponseEvent::ToolCallReturned => {}
             ResponseEvent::Completed => return Ok(text),
             ResponseEvent::Failed { message, kind } => return Err(Failure::turn(message, kind)),
         }
     }
+}
+
+/// `tool target` for the progress line, from the record alone: never from
+/// arguments. A read or a denial shows the tool name only.
+fn describe(tool: &str, record: Option<&ToolRecord>) -> String {
+    match record {
+        Some(ToolRecord::Write { path, .. }) => format!("{tool} {path}"),
+        Some(ToolRecord::Command { cwd, .. }) if !cwd.is_empty() => format!("{tool} {cwd}"),
+        _ => tool.to_string(),
+    }
+}
+
+fn elapsed_text(elapsed: Duration) -> String {
+    if elapsed < Duration::from_secs(1) {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    }
+}
+
+/// A terminal prompt per call, on stderr, answered on stdin: `y` once, `s`
+/// for the session when a grant is offered, anything else denies. End of
+/// input denies the rest.
+fn ask_operator(request: &ApprovalRequest) -> Vec<ToolDecision> {
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+    request
+        .calls
+        .iter()
+        .map(|call| {
+            let detail = if call.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", call.detail)
+            };
+            let session = if call.grant_prefix.is_empty() && call.tool != tools::RUN_COMMAND {
+                ""
+            } else {
+                ", s for the session"
+            };
+            eprint!(
+                "approve {} {}{detail}? [y once{session}, anything else denies] ",
+                call.tool, call.target
+            );
+            let _ = io::stderr().flush();
+            match lines.next() {
+                Some(Ok(answer)) => match answer.trim() {
+                    "y" | "Y" => ToolDecision::Approve,
+                    "s" | "S" if !session.is_empty() => ToolDecision::ApproveForSession,
+                    _ => ToolDecision::Deny,
+                },
+                _ => ToolDecision::Deny,
+            }
+        })
+        .collect()
 }
 
 fn check_result_path(path: &Path) -> Result<(), Failure> {
@@ -538,14 +923,7 @@ mod tests {
     use super::*;
 
     fn report() -> Report {
-        Report {
-            run_id: "r1".into(),
-            gateway: "local".into(),
-            model: "vendor/model".into(),
-            usage: None,
-            context_window: None,
-            tools: ToolCounts::default(),
-        }
+        Report::new("r1".into(), "local".into(), "vendor/model".into())
     }
 
     #[test]
@@ -580,6 +958,7 @@ mod tests {
     fn exit_codes_follow_the_failure_class() {
         assert_eq!(Failure::usage("x").exit, Exit::Usage);
         assert_eq!(Failure::config("x").exit, Exit::Config);
+        assert_eq!(Failure::policy("x").exit, Exit::Policy);
         assert_eq!(Failure::turn("x", ErrorKind::Auth).exit, Exit::Credential);
         for kind in [
             ErrorKind::Other,
@@ -591,6 +970,77 @@ mod tests {
             assert_eq!(Failure::turn("x", kind).exit, Exit::Turn, "{kind:?}");
         }
         assert_eq!(Failure::turn("x", ErrorKind::Policy).kind, "policy");
+    }
+
+    #[test]
+    fn the_ledger_decides_effects_from_records_and_what_never_returned() {
+        use super::super::backend::ToolCall;
+        let call = |id: &str, name: &str| ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::Map::new(),
+        };
+        let write_ok = ToolRecord::Write {
+            tool: "edit_file".into(),
+            path: "src/a.rs".into(),
+            outcome: "ok".into(),
+            before: Some("00".into()),
+            after: Some("ff".into()),
+            lines_added: 1,
+            lines_removed: 1,
+        };
+        let write_failed = ToolRecord::Write {
+            tool: "edit_file".into(),
+            path: "src/a.rs".into(),
+            outcome: "old text not found".into(),
+            before: None,
+            after: None,
+            lines_added: 0,
+            lines_removed: 0,
+        };
+        let command = |ran: Option<bool>| ToolRecord::Command {
+            argv: vec!["true".into()],
+            cwd: String::new(),
+            outcome: "ok".into(),
+            ran,
+            exit_code: Some(0),
+            duration_ms: 3,
+        };
+
+        let mut ledger = Ledger::default();
+        ledger.requested(&[call("r", "read_file"), call("w", "edit_file")]);
+        assert_eq!(ledger.effects(), "unknown", "a write is in flight");
+        ledger.returned("r", None);
+        assert_eq!(
+            ledger.effects(),
+            "unknown",
+            "the read returning changes nothing"
+        );
+        ledger.returned("w", Some(write_failed));
+        assert_eq!(ledger.effects(), "none", "a failed write wrote nothing");
+        assert_eq!(ledger.entries.len(), 1, "but it is on the ledger");
+
+        ledger.requested(&[call("c", "run_command")]);
+        ledger.returned("c", Some(command(Some(false))));
+        assert_eq!(ledger.effects(), "none", "a program that never started");
+        ledger.requested(&[call("c2", "run_command")]);
+        ledger.returned("c2", Some(command(Some(true))));
+        assert_eq!(ledger.effects(), "some");
+        ledger.requested(&[call("c3", "run_command")]);
+        ledger.returned("c3", Some(command(None)));
+        assert_eq!(ledger.effects(), "unknown", "unknown beats some");
+
+        let mut ledger = Ledger::default();
+        ledger.requested(&[call("w", "write_file")]);
+        ledger.returned("w", Some(write_ok));
+        assert_eq!(ledger.effects(), "some");
+        let entry = &ledger.entries[0];
+        assert_eq!(entry["tool"], "edit_file");
+        assert_eq!(entry["target"], "src/a.rs");
+        assert_eq!(entry["after"], "ff");
+        // A read-only in-flight call never makes the outcome unknown.
+        ledger.requested(&[call("r2", "read_file")]);
+        assert_eq!(ledger.effects(), "some");
     }
 
     #[test]
@@ -630,6 +1080,50 @@ mod tests {
             "hi"
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn operator_files_are_located_against_the_canonical_root() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("exec-inside");
+        let root = dir.join("work");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::create_dir_all(dir.join("ops")).unwrap();
+        let root = resolve_workdir(Some(&root)).unwrap();
+        assert!(
+            inside(&root, &root.join("sub/result.json")),
+            "not yet created"
+        );
+        assert!(inside(&root, &root.join("task.md")));
+        assert!(!inside(&root, &dir.join("ops/task.md")));
+        assert!(
+            !inside(&root, &dir.join("ops/nowhere/task.md")),
+            "unknowable parent is outside"
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&root, dir.join("ops/link")).unwrap();
+            assert!(
+                inside(&root, &dir.join("ops/link/result.json")),
+                "a link into the root counts"
+            );
+        }
+        let error = resolve_workdir(Some(&dir.join("missing"))).err().unwrap();
+        assert_eq!(error.exit, Exit::Usage);
+        fs::write(dir.join("file"), "x").unwrap();
+        assert!(resolve_workdir(Some(&dir.join("file")))
+            .err()
+            .unwrap()
+            .message
+            .contains("not a directory"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn digests_are_hex_sha256_compared_without_case() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

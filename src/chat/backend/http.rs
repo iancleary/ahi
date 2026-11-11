@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::protocol::{self, RequestContext, StreamOutcome};
-use super::tool_loop::{SessionGrants, ToolRuntime};
+use super::tool_loop::{Caller, SessionGrants, ToolRuntime};
 use super::{ChatRequest, CompletionBackend, ResponseEvent};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::directories::Directories;
@@ -40,6 +40,8 @@ pub(crate) struct HttpBackend {
     /// `false` advertises no tool and reads no policy, whatever the working
     /// directory holds (`ahi exec` before its tools slice).
     tools: bool,
+    /// Named in every audit line a tool round appends.
+    caller: Caller,
     grants: SessionGrants,
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
@@ -57,6 +59,7 @@ impl HttpBackend {
             workspace: None,
             actions: None,
             tools: true,
+            caller: Caller::default(),
             grants: SessionGrants::default(),
             agent: ureq::Agent::config_builder()
                 .max_redirects(0)
@@ -83,6 +86,20 @@ impl HttpBackend {
         self
     }
 
+    /// Confine tools to `directory` and read its `ahi.tools.yaml` (unless
+    /// `with_actions` named a file) instead of the process's working
+    /// directory. `ahi exec --workdir`.
+    pub(crate) fn in_workspace(mut self, directory: PathBuf) -> Self {
+        self.workspace = Some(directory);
+        self
+    }
+
+    /// Who the audit log says ran each tool.
+    pub(crate) fn with_caller(mut self, caller: Caller) -> Self {
+        self.caller = caller;
+        self
+    }
+
     #[cfg(test)]
     fn with_workspace(state: Directories, workspace: PathBuf) -> Self {
         Self {
@@ -103,6 +120,7 @@ impl CompletionBackend for HttpBackend {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Arc::clone(&cancel);
         let tools = self.tools;
+        let caller = self.caller.clone();
         let handle = std::thread::spawn(move || {
             let workspace = if tools {
                 workspace.or_else(|| std::env::current_dir().ok())
@@ -114,6 +132,7 @@ impl CompletionBackend for HttpBackend {
                 ToolSource {
                     workspace: workspace.as_deref(),
                     actions: actions.as_deref(),
+                    caller,
                 },
                 grants,
                 &agent,
@@ -188,6 +207,7 @@ struct ToolSource<'a> {
     /// Tool root; `None` disables tools for the turn.
     workspace: Option<&'a Path>,
     actions: Option<&'a Path>,
+    caller: Caller,
 }
 
 fn complete(
@@ -208,7 +228,11 @@ fn complete(
     if let Some(window) = metadata.context_window {
         protocol::emit(sender, ResponseEvent::ContextWindow(window.get()))?;
     }
-    let ToolSource { workspace, actions } = source;
+    let ToolSource {
+        workspace,
+        actions,
+        caller,
+    } = source;
     let mut tools = match workspace {
         Some(directory) => ToolRuntime::load(
             directory,
@@ -217,6 +241,7 @@ fn complete(
             connection.destination(),
             grants,
             actions,
+            caller,
         )?,
         None => None,
     };
