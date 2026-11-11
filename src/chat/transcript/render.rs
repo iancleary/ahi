@@ -105,6 +105,10 @@ pub(crate) struct Styled {
     /// with, so wrapped text lines up under the content, not under a gutter
     /// or marker. A row too narrow for the padding and a grapheme goes without.
     pub(crate) hang: usize,
+    /// Wrap at spaces so a word is not split across rows, falling back to a
+    /// cell-width break for a word longer than the row. Prose only: code,
+    /// tables, diffs, and file lines keep their columns.
+    pub(crate) words: bool,
 }
 
 impl Styled {
@@ -112,6 +116,14 @@ impl Styled {
         Self {
             text: text.into(),
             ..Self::default()
+        }
+    }
+
+    /// Plain prose: wraps at spaces.
+    pub(crate) fn prose(text: impl Into<String>) -> Self {
+        Self {
+            words: true,
+            ..Self::plain(text)
         }
     }
 
@@ -276,7 +288,7 @@ fn layout_message(
 /// Wrap `text` by grapheme cell width, one row per soft wrap or newline.
 fn layout_paragraphs(rows: &mut Vec<TranscriptRow>, text: &str, style: Style, width: usize) {
     for paragraph in text.split('\n') {
-        layout_styled(rows, &Styled::plain(paragraph), style, width);
+        layout_styled(rows, &Styled::prose(paragraph), style, width);
     }
 }
 
@@ -344,25 +356,50 @@ pub(crate) fn layout_styled(
         });
         *row_start = end;
     };
+    // Where the current row could break at a space: bytes of `text`, the
+    // offset in the paragraph, and cells, all just after the space.
+    let mut soft: Option<(usize, usize, usize)> = None;
+    let mut seen_word = false;
     for (offset, grapheme) in paragraph.text.grapheme_indices(true) {
         if grapheme == "\n" {
             flush(rows, &mut text, &mut row_start, lead, offset, true);
             row_start = offset + 1;
             lead = 0;
             cells = 0;
+            soft = None;
+            seen_word = false;
             continue;
         }
         let size = grapheme.width();
-        // Padding alone never counts as content to wrap.
-        if cells + size > width && text.len() > lead {
-            flush(rows, &mut text, &mut row_start, lead, offset, false);
+        let space = grapheme.chars().all(|c| c.is_whitespace() && c != '\u{a0}');
+        // Padding alone never counts as content to wrap. A space past the
+        // edge stays on its row, where it cannot be seen, so a word that
+        // ends exactly at the edge does not move down.
+        while cells + size > width && text.len() > lead && !(paragraph.words && space) {
+            // Break after the last space when the row has one, carrying the
+            // word that follows; otherwise break at the cell edge.
+            let (keep, end) = match soft.take() {
+                Some((keep, end, _)) => (keep, end),
+                None => (text.len(), offset),
+            };
+            let carry = text.split_off(keep);
+            flush(rows, &mut text, &mut row_start, lead, end, false);
             // A grapheme too wide to sit beside the padding gets the row.
             lead = if hang + size <= width { hang } else { 0 };
             text.extend(std::iter::repeat_n(' ', lead));
-            cells = lead;
+            text.push_str(&carry);
+            cells = lead + UnicodeWidthStr::width(carry.as_str());
+            seen_word = !carry.is_empty();
         }
         text.push_str(grapheme);
         cells += size;
+        if paragraph.words {
+            if space && seen_word {
+                soft = Some((text.len(), offset + grapheme.len(), cells));
+            } else if !space {
+                seen_word = true;
+            }
+        }
     }
     flush(
         rows,

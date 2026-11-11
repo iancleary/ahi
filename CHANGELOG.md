@@ -12,11 +12,13 @@
 ### Changed
 
 - Wrapped rows in the chat line up under their content instead of starting flush left: file lines under the code, diff lines under the code after the old/new gutter, list items under their text after the marker, and quotes after the bar. Selection and copy skip the padding, so a wrapped line still copies as one line.
+- Prose in the chat (assistant text, headings, list items, quotes, notices, operator text) wraps at spaces instead of mid-word. A word longer than the row, such as a URL, still breaks at the edge. Code blocks, tables, diffs, and file lines keep cell-width wrapping so their columns hold. A space that lands past the edge stays on its row, so a word ending exactly at the edge does not move down.
+- Diff word emphasis now survives tab expansion and the 400-character clip: it follows its word on tab-indented lines and stops at the clip, instead of being dropped.
 - The repository `ahi.tools.yaml` lets the model edit existing files under `src` and write `TODO.md`, each after a prompt.
 
 ### Fixed
 
-- The chat no longer panics when drawing an `edit_file` or `write_file` diff whose changed line is longer than 400 characters or contains a tab. Word emphasis was computed on the line as written and applied to the clipped, tab-expanded row, which could split the multi-byte ellipsis. Such rows now skip emphasis.
+- The chat no longer panics when drawing an `edit_file` or `write_file` diff whose changed line is longer than 400 characters or contains a tab. Word emphasis was computed on the line as written and applied to the clipped, tab-expanded row, which could split the multi-byte ellipsis. Emphasis ranges are now mapped through tab expansion and cut at the clip.
 
 ## 0.14.1 (2026-11-08)
 

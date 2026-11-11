@@ -74,7 +74,7 @@ pub(crate) fn paragraphs(message: &ChatMessage, options: &Options, width: usize)
             .text
             .split('\n')
             .map(|line| {
-                let mut styled = Styled::plain(line);
+                let mut styled = Styled::prose(line);
                 annotate_links(&mut styled, options, true);
                 styled
             })
@@ -144,7 +144,7 @@ fn markdown_blocks(text: &str, out: &mut Vec<Styled>, options: &Options, width: 
         match parsed.block {
             markdown::Block::Blank => block_rows.push(Styled::default()),
             markdown::Block::Heading { level, runs } => {
-                let mut styled = Styled::default();
+                let mut styled = Styled::prose("");
                 let mut level_marks = String::new();
                 if level >= 3 {
                     level_marks.push_str(&"#".repeat(level as usize));
@@ -155,12 +155,12 @@ fn markdown_blocks(text: &str, out: &mut Vec<Styled>, options: &Options, width: 
                 block_rows.push(styled);
             }
             markdown::Block::Paragraph { runs } => {
-                let mut styled = Styled::default();
+                let mut styled = Styled::prose("");
                 push_runs(&mut styled, &runs, Style::default());
                 block_rows.push(styled);
             }
             markdown::Block::Quote { runs } => {
-                let mut styled = Styled::default();
+                let mut styled = Styled::prose("");
                 styled.push("▎ ", theme::quote_bar());
                 styled.hang = 2;
                 push_runs(&mut styled, &runs, theme::italic());
@@ -171,7 +171,7 @@ fn markdown_blocks(text: &str, out: &mut Vec<Styled>, options: &Options, width: 
                 marker,
                 runs,
             } => {
-                let mut styled = Styled::default();
+                let mut styled = Styled::prose("");
                 styled.push(&"  ".repeat(depth as usize), Style::default());
                 styled.push(&marker, theme::list_marker());
                 styled.push(" ", Style::default());
@@ -276,8 +276,13 @@ fn push_highlighted(styled: &mut Styled, language: Option<highlight::Language>, 
 }
 
 fn expand_tabs(line: &str) -> String {
+    clip(&tab_stops(line))
+}
+
+/// `line` with each tab replaced by spaces up to the next multiple of four.
+fn tab_stops(line: &str) -> String {
     if !line.contains('\t') {
-        return clip(line);
+        return line.to_string();
     }
     let mut out = String::new();
     let mut column = 0;
@@ -291,7 +296,12 @@ fn expand_tabs(line: &str) -> String {
             column += 1;
         }
     }
-    clip(&out)
+    out
+}
+
+/// Where byte `at` of `line` lands once `tab_stops` has expanded it.
+fn expanded_offset(line: &str, at: usize) -> usize {
+    tab_stops(&line[..at]).len()
 }
 
 fn clip(line: &str) -> String {
@@ -515,7 +525,7 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
         }
         _ => {
             for line in lines {
-                let mut styled = Styled::plain(line);
+                let mut styled = Styled::prose(line);
                 annotate_links(&mut styled, options, true);
                 out.push(styled);
             }
@@ -724,18 +734,28 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
             styled.hang = UnicodeWidthStr::width(styled.text.as_str());
             let content_start = styled.text.len();
             let source = text.trim_end_matches('\r');
-            let text = expand_tabs(source);
+            let expanded = tab_stops(source);
+            let text = clip(&expanded);
+            // The bytes of `text` that come from the line, not its ellipsis.
+            let kept = if expanded.chars().nth(MAX_LINE_CHARS).is_some() {
+                text.len() - '…'.len_utf8()
+            } else {
+                text.len()
+            };
             push_highlighted(&mut styled, language, &text);
             // Emphasis overrides the token color's background only; merge
             // by splitting spans is overkill: emphasised ranges are pushed
             // as extra spans that patch over, so they must come after.
-            // The ranges index the line as written. Tab expansion and the
-            // length clip rewrite it, so they apply only to the same bytes.
-            for range in emphasis.iter().filter(|_| text == source) {
-                if range.end <= text.len() {
+            // The ranges index the line as written; move them through tab
+            // expansion and drop what the clip cut. They go after the token
+            // spans so they patch over them.
+            for range in emphasis {
+                let start = expanded_offset(source, range.start);
+                let end = expanded_offset(source, range.end).min(kept);
+                if start < end {
                     styled.spans.push(RowSpan {
-                        start: content_start + range.start,
-                        end: content_start + range.end,
+                        start: content_start + start,
+                        end: content_start + end,
                         style: strong,
                     });
                 }

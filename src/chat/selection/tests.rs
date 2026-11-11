@@ -17,7 +17,7 @@ fn unicode_selection_rejoins_soft_wraps_in_both_directions() {
     let rows = render::rows(&messages, 5);
     assert_eq!(
         rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
-        ["ab界e\u{301}", "🙂Z", "last ", " ", "next"]
+        ["ab界e\u{301}", "🙂Z", "last  ", "next"]
     );
     let area = Rect::new(3, 4, 5, 5);
     for reverse in [false, true] {
@@ -126,12 +126,12 @@ fn keyboard_cursor_snaps_to_graphemes_and_visual_range_yanks_exact_text() {
     selection.move_cursor(CursorMove::LineEnd, &rows, 2);
     assert_eq!(
         selection.text(&rows).as_deref(),
-        Some("界e\u{301}🙂Z\nlast ")
+        Some("界e\u{301}🙂Z\nlast  ")
     );
     selection.move_cursor(CursorMove::Bottom, &rows, 2);
-    assert_eq!(selection.cursor().unwrap().row, 4);
+    assert_eq!(selection.cursor().unwrap().row, 3);
     selection.move_cursor(CursorMove::PageOlder, &rows, 2);
-    assert_eq!(selection.cursor().unwrap().row, 2);
+    assert_eq!(selection.cursor().unwrap().row, 1);
     selection.move_cursor(CursorMove::Top, &rows, 2);
     selection.move_cursor(CursorMove::LineStart, &rows, 2);
     // Range is ordered regardless of direction.
@@ -150,7 +150,7 @@ fn keyboard_cursor_snaps_to_graphemes_and_visual_range_yanks_exact_text() {
     assert!(!selection.keyboard_active());
     assert_eq!(selection.text(&rows).as_deref(), Some("a"));
     // Transcript shrinks under an active cursor.
-    selection.enter_keyboard(4);
+    selection.enter_keyboard(3);
     selection.clamp_cursor(&rows[..2]);
     assert_eq!(selection.cursor().unwrap().row, 1);
     selection.clamp_cursor(&[]);

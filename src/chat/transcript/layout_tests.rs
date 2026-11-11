@@ -106,7 +106,8 @@ fn check_rows(layout: &TranscriptLayout, width: usize) {
         let context = format!("row {index} {:?} at width {width}", row.text);
         // Only a single grapheme wider than the screen may overflow it.
         assert!(
-            row.text.width() <= width || row.text.graphemes(true).count() == 1,
+            row.text.trim_end().width() <= width
+                || row.text.trim_end().graphemes(true).count() == 1,
             "{context}"
         );
         assert!(row.hang <= row.text.len(), "{context}");
@@ -273,29 +274,44 @@ let x = 1;
 }
 
 #[test]
-fn wrapped_markdown_lines_up_under_its_text() {
-    // Rows wrap by cell width, so a wrap may fall inside a word; what matters
-    // is the column the continuation starts in.
+fn wrapped_markdown_breaks_at_spaces_and_lines_up_under_its_text() {
     let list =
         "- alpha beta gamma delta\n  - nested iota kappa lambda\n10. ten omicron pi rho sigma";
     assert_eq!(
         trimmed(&[assistant(list)], 14),
         vec![
-            "• alpha beta g",
-            "  amma delta",
-            "  • nested iot",
-            "    a kappa la",
-            "    mbda",
-            "10. ten omicro",
-            "    n pi rho s",
-            "    igma",
+            "• alpha beta",
+            "  gamma delta",
+            "  • nested",
+            "    iota kappa",
+            "    lambda",
+            "10. ten",
+            "    omicron pi",
+            "    rho sigma",
         ]
     );
     let quote = "> one two three four five six seven";
     assert_eq!(
         trimmed(&[assistant(quote)], 14),
-        vec!["▎ one two thre", "  e four five", "  six seven"]
+        vec!["▎ one two", "  three four", "  five six", "  seven"]
     );
+    // A word longer than the row still breaks at the cell edge, after the
+    // words before it have moved up.
+    assert_eq!(
+        trimmed(&[assistant("see https://example.com/a/long/path ok")], 12),
+        vec!["see", "https://exam", "ple.com/a/lo", "ng/path ok"]
+    );
+}
+
+#[test]
+fn word_wrapped_rows_copy_as_the_original_text() {
+    let text = "alpha beta gamma  delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron";
+    for width in 1..40 {
+        let messages = [ChatMessage::new(TranscriptRole::Notice, text)];
+        let laid = layout(&messages, width);
+        check_rows(&laid, width);
+        assert_eq!(copied(laid.rows()), text, "width {width}");
+    }
 }
 
 #[test]
@@ -413,10 +429,48 @@ fn diff_rows_wrap_under_the_code_not_the_gutter() {
     );
 }
 
+/// The text of the row's spans that carry the given emphasis style.
+fn emphasised(row: &TranscriptRow) -> Vec<&str> {
+    let strong = [
+        super::theme::diff_added_emphasis(),
+        super::theme::diff_removed_emphasis(),
+    ];
+    row.spans
+        .iter()
+        .filter(|span| strong.contains(&span.style))
+        .map(|span| &row.text[span.start..span.end])
+        .collect()
+}
+
+fn added_row<'a>(laid: &'a TranscriptLayout, needle: &str) -> &'a TranscriptRow {
+    laid.rows()
+        .iter()
+        .find(|row| row.text.contains(needle))
+        .unwrap_or_else(|| panic!("no row with {needle:?}"))
+}
+
 #[test]
-fn diff_emphasis_survives_only_on_untouched_text() {
-    // The changed word sits beyond the 400-character clip. The clipped row
-    // ends in a multi-byte ellipsis that no emphasis range may split.
+fn diff_emphasis_lands_on_the_changed_word() {
+    let laid = layout(&[write(Some("let a = 1;"), "let a = 2;")], 40);
+    assert_eq!(emphasised(added_row(&laid, "+let a = 2;")), ["2"]);
+    // Tabs expand to a different byte length than the line the emphasis was
+    // computed on; the emphasis follows its word.
+    let laid = layout(&[write(Some("\t\told word here"), "\t\tnew word here")], 40);
+    let row = added_row(&laid, "new word");
+    assert!(
+        row.text.contains("+        new word here"),
+        "{:?}",
+        row.text
+    );
+    assert_eq!(emphasised(row), ["new"]);
+    // A change after non-tab text on a tab-indented line.
+    let laid = layout(&[write(Some("a\tb old"), "a\tb new")], 40);
+    assert_eq!(emphasised(added_row(&laid, "+a")), ["new"]);
+}
+
+#[test]
+fn diff_emphasis_stops_at_the_clip_without_splitting_the_ellipsis() {
+    // A changed word that straddles, or sits beyond, the 400-character clip.
     for pad in 380..420 {
         let before = format!("{} old tail", "a".repeat(pad));
         let after = format!("{} new tail", "a".repeat(pad));
@@ -425,22 +479,13 @@ fn diff_emphasis_survives_only_on_untouched_text() {
             check_rows(&layout(std::slice::from_ref(&message), width), width);
         }
     }
-    // Tabs expand to a different byte length than the line the emphasis was
-    // computed on; the row must stay valid.
-    let message = write(Some("\t\told word here"), "\t\tnew word here");
-    check_rows(&layout(&[message], 30), 30);
-    // Short, untouched lines keep their word emphasis.
-    let message = write(Some("let a = 1;"), "let a = 2;");
-    let laid = layout(&[message], 40);
-    let added = laid
-        .rows()
-        .iter()
-        .find(|row| row.text.contains("+let a = 2;"))
-        .expect("added row");
-    assert!(added
-        .spans
-        .iter()
-        .any(|span| &added.text[span.start..span.end] == "2"));
+    // 401 characters: the clip keeps 400 and the changed word loses its tail.
+    let before = format!("{} old", "a".repeat(397));
+    let after = format!("{} new", "a".repeat(397));
+    let laid = layout(&[write(Some(&before), &after)], 500);
+    let row = added_row(&laid, "+aaa");
+    assert!(row.text.ends_with("ne…"), "{:?}", row.text.len());
+    assert_eq!(emphasised(row), ["ne"], "only the part before the clip");
 }
 
 #[test]
