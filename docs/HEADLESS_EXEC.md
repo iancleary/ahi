@@ -70,10 +70,19 @@ Not `ahi run`: that is the hook runner. Not `ahi worker` or `ahi coordinator`: r
 
 - [ ] The prompt, history, result, and `--tools` files must not lie inside `--workdir`; exit 2 if any canonicalized path does. Today only *writes* refuse the protected names (`PROTECTED` is checked in `prepare` for `edit_file` and `write_file` only); `read_file`, `search_files`, `find_files`, and `list_dir` resolve anything inside the root that is not an ahi directory, and an approved `run_command` can read or copy any file on the host. Rather than invent a read-side exclusion that `run_command` would bypass anyway, keep the model's files and the operator's files in different trees. hc places the task directory next to the checkout, not in it.
 
-### Continuity
+### Continuity: one durable session format
 
-- [ ] `--history-file <path>` carries continuity, owned by the caller. If it exists, its messages precede the prompt (a follow-up or steering turn). Versioned JSON with a header (`schema`, `ahi_version`, `gateway`, `model`, `run_id` of the last writer); the body is opaque and round-trippable, since hc only ferries it. Provider-native replay data is kept only when the protocol is unchanged, as in the TUI; a history produced under one gateway/model fed to another is exit 7, never silently dropped. A schema this ahi cannot read is exit 7, never a silent restart. If the file changed between read and write, exit 7 instead of overwriting (no lock files).
-- [ ] After a validated successful turn the file is rewritten atomically. On a failed turn it is also rewritten when, and only when, tools ran: the partial turn (the calls and their results) is appended and the header marks `last_turn: failed`, so the record of what the model did survives even though the turn did not. A failure before any tool ran leaves the file untouched. The old claim "unchanged on failure, so retrying is safe" is withdrawn: the tool loop fails turns *after* effects (the round cap, a cancelled batch, and any failed continuation request all return after the round's calls executed), so the working directory can change on a failed turn and a retry runs against a different checkout.
+The history file is not a serialized transcript rewritten after each turn. It is an append-only session log, and the same format records `ahi tui` sessions, which today are lost on exit ([Chat screen](CHAT_SCREEN.md)). The shape is borrowed from Pi's session store, inspected locally at `~/.pi/agent/sessions/<cwd-slug>/<timestamp>_<uuid>.jsonl` (Pi 1.4.0): one header line, then one entry per line, each with an `id` and a `parentId`, so a session is a tree whose branches are plain entries sharing a parent, grouped on disk by working directory.
+
+- [ ] **File**: JSONL, UTF-8, one JSON object per line, never rewritten. Header line: `{"type":"session","schema":1,"id":"<uuid>","started":"<rfc3339>","host":"<hostname>","cwd":"<workdir>","gateway":"...","model":"...","ahi_version":"..."}`. Entry lines carry `type`, `id` (8 hex chars from the OS, unique in the file), `parentId` (null for the first), `timestamp`, and the type's fields:
+  - `message`: `role` (`operator`, `assistant`, `tool`), `text`, and when present the structured `ToolPayload` (calls, or one result with `call_id`, `name`, `content`) and the provider's `NativeReplay` as an opaque `native` field tagged with its protocol. Screen-only notices are not entries.
+  - `turn`: one per `ahi exec` invocation or chat turn: `run_id`, `status`, `exit_code`, `usage`, `effects`, and the `ledger`. This is the line a reader uses to answer "what did that turn do" without replaying the messages.
+  - `model_change`, `thinking_change`: as in the chat's `/model` and `/thinking`.
+- [ ] **Tip, not rewrite.** A turn appends its entries under the current tip. A follow-up appends under the last `turn`. A failed turn that ran tools appends what ran and a `turn` with `status: failed`; the next attempt appends under the last *successful* entry, so the failed branch stays on disk and is simply not the active path. Nothing is edited or removed, so "history unchanged on failure" is replaced by one rule: every line that was written stays, and the reader follows parents from the newest `turn` to the root. The old claim "unchanged on failure, so retrying is safe" is withdrawn either way: the tool loop fails turns *after* effects (the round cap, a cancelled batch, and any failed continuation all return after the round's calls executed), so a retry runs against a changed checkout and the ledger on the failed `turn` line is how a coordinator knows what changed.
+- [ ] **Concurrency** is the tip check: the worker records the tip `id` at read and appends only if the file still ends there; otherwise exit 7, no lock files. Two workers on one file cannot both win.
+- [ ] `--history-file <path>` names the file for a worker; hc owns the path and ferries the file. Without it, `ahi exec` writes a session under `<state>/sessions/<cwd-slug>/` like the chat, so a one-shot human turn is as durable as a chat turn. `--no-history` disables the write for hermetic runs.
+- [ ] **Compatibility**: a header `schema` this ahi cannot read is exit 7, never a silent restart. `NativeReplay` is replayed only to the protocol that produced it (as the TUI does) and a history whose header names another gateway or model is exit 7 unless the caller passes `--history-model-change`, which appends a `model_change` and drops native items that cannot cross; nothing is dropped silently.
+- [ ] **Not borrowed from Pi**: the durable harness `@earendil-works/pi-durable` (1.5.2 upstream, not part of the installed 1.4.0) goes further: a storage engine (SQLite or JSONL) that commits conversation entries, task checkpoints, and documents in one transaction, resumes interrupted tasks on reopen, and lets a tool declare itself replay-safe so a crash mid-tool can rerun it (`replay?: "never" | "safe"` in the installed `pi-agent-core` types; `"safe" | "unsafe"` in the current upstream spec). Three of its ideas are adopted here without the engine: **intent before effect** (a `tool` entry's call line is appended before the tool runs, its result line after, so a crash leaves a visible unmatched call, which is what `effects: unknown` means on disk); **a request id for idempotent resubmission** (`run_id` plays that role: the same `run_id` appended twice is refused with exit 7); and **no cross-process locking** (one writer per file, detected by the tip check). Not adopted: in-process task scheduling, SQLite, documents, or automatic rerun of replay-safe tools; a worker is one turn and the coordinator decides whether to try again.
 
 ### Result
 
@@ -91,7 +100,7 @@ Not `ahi run`: that is the hook runner. Not `ahi worker` or `ahi coordinator`: r
     "effects": "none" | "some" | "unknown",
     "ledger": [{"tool": "...", "target": "...", "outcome": "ok", "before": "sha256", "after": "sha256"},
                {"tool": "run_command", "argv": ["..."], "cwd": "...", "exit_code": 0}],
-    "history": "written" | "unchanged" | "write_failed" | "none"
+    "history": {"status": "appended" | "write_failed" | "none", "session": "<uuid>", "tip": "<entry id>"}
   }
   ```
 
@@ -128,6 +137,18 @@ Not `ahi run`: that is the hook runner. Not `ahi worker` or `ahi coordinator`: r
 
 - [ ] A missing result file with any exit code, a code outside this table (SIGKILL, panic, OOM: 101, 137, …), or 255 means `effects: unknown` to a coordinator. Say so in the hc contract: an absent file is never "not started".
 
+## `ahi history`: reading sessions, here and across machines
+
+The session format is useful only if something reads it. ahi reads locally; hc reads across machines by running ahi where the files are, so no new protocol or index exists.
+
+- [ ] `ahi history list [--cwd <dir>] [--since <rfc3339|duration>] [--json]`: one row per session from headers and the last `turn` line only (first and last lines of each file): session id, started, host, cwd, gateway/model, turns, last status, last `run_id`. `--json` prints one object per line for a coordinator.
+- [ ] `ahi history show <session-id|path> [--json] [--branch <entry id>]`: the active path from the tip to the root as text (the chat's plain rendering, no ANSI) or as the raw entries. `--branch` shows a non-active branch, which is how a failed attempt is inspected.
+- [ ] `ahi history grep <pattern> [--cwd <dir>] [--json]`: regular expression over message text, tool targets, and argv across every session under `<state>/sessions/`, printed as `<session id>:<entry id>: <line>` in the `search_files` style. Prompt and answer text are in these files by nature, so the command reads only the owner-only state directory and never a path the model can reach.
+- [ ] `ahi history export <session-id> --to <path>`: copy one file; the file is already the interchange format, so this is a convenience with a refusal for an existing destination.
+- [ ] **Across machines is hc's job and costs hc nothing new.** hc already has a shell on every host: `ssh <host> ahi history list --json --since 1d` merged across hosts is the fleet view, and every row carries `host` and `cwd`, so merged rows are attributable. Worker histories hc placed itself are already local to hc. If hc wants them in one place, the directory is plain files with UUID names that never collide: `rsync` the `sessions/` directories and run `ahi history` once. No daemon, no database, no sync protocol in ahi.
+- [ ] **Across chats** is `ahi history grep` over one directory. A `delegate` result ([Delegation](DELEGATION.md)) records the worker's session id in the main session's `turn` line, so a main-session entry links to the worker file it came from, and `ahi history show` follows that link when the file is present.
+- [ ] Reading is `std::fs` and `serde_json`, line by line; nothing is loaded whole except the one session `show` prints. A file whose header schema is newer than this ahi is listed with `schema: unsupported` and skipped by `grep` and `show`, never an error for the whole listing.
+
 ## Implementation
 
 - [ ] `src/main.rs`: add an `Exec` subcommand; every existing subcommand, global flag, and help or error path stays unchanged. `--color` is accepted and ignored (no ANSI on this path). Proposed module `src/chat/exec.rs`, keeping terminal modules untouched.
@@ -144,22 +165,24 @@ Not `ahi run`: that is the hook runner. Not `ahi worker` or `ahi coordinator`: r
   - models and credentials: resolution and curation errors, missing credential, `--check`.
   - output: text and JSON success; result file on every status including pre-model failures; refusing an existing result file; stdout empty on failure; progress lines on stderr with no argument text; Unicode and multibyte fragmentation; EPIPE; no-terminal operation.
   - tools and workdir: headless with no `--tools` advertises nothing; `deny-all` turn semantics; `ask` answered as per-call deny with the reason and the batch's rule-approved calls still running; approved read, edit, and command rules; workdir escapes, `..`, symlinks, and case variants refused; `run_command` starts inside the workdir with no coordinator environment; operator files inside the workdir refused at startup; the ledger matching the audit log.
-  - continuity: history round trip; header checks; history rewritten with `last_turn: failed` after a failed turn with effects and untouched after one without; changed-during-run exit 7; unsupported schema; gateway/model mismatch.
+  - continuity: a follow-up appends under the last `turn` and the model sees the earlier messages; a failed turn with effects appends its calls, results, and a failed `turn`, and the next attempt branches from the last success; a crash between a call line and its result line (simulated by killing the binary while a `run_command` sleeps) leaves the unmatched call and `history list` reports the session's last status as `unknown`; tip check exit 7 when a second writer appended; unsupported schema exit 7; gateway/model mismatch exit 7 and the `--history-model-change` path; a duplicate `run_id` refused.
+  - history commands: `list`, `show` (active path and `--branch`), `grep`, `export` over a fixture directory holding sessions from two "hosts" and one with a newer schema; `--json` rows parse; nothing outside the state directory is read.
   - lifecycle: malformed or incomplete streams, refusal, truncation, `Reconnecting`, timeout with a running command (`effects: unknown`), SIGTERM and SIGHUP writing `cancelled`.
 - [ ] Regression: existing subcommands, TUI paths, and the clap help and version surface; the repository's normal format, lint, and test checks; Windows behavior (no SIGPIPE, no SIGHUP) alongside Unix.
 - [ ] Rollout in slices, each shippable and testable against the mock gateway:
   1. `ahi exec` with `-p`, stdin, `--prompt-file`, `--model`, `--thinking`, text and JSON output, `--result-file` with the schema above, exit codes 0..4 and 8, no tools. A human can use it the day it lands.
   2. `--workdir`, `--tools`, `--headless`, `ask` as deny, operator-files-outside check, the ledger and `effects`, exit 5, `--check`, progress on stderr, audit `origin`/`run_id`.
-  3. `--timeout`, signals, deadline plumbed into `ToolRuntime`, exit 6.
-  4. `--history-file`, exit 7.
+  3. `--timeout`, signals, deadline plumbed into `ToolRuntime`, exit 6. Signal handling needs `sigaction`, which `std` does not expose; per the repository's dependency policy that is an in-repo workspace crate holding the one `unsafe` call (as `ahi-win32` does for the clipboard), not a registry crate, and `ahi` itself keeps `forbid(unsafe_code)`.
+  4. The session format: the writer (`src/chat/session.rs`) used by both `ahi exec` (`--history-file`, default `<state>/sessions/`, `--no-history`) and `ahi tui` (every turn appended; `ahi tui --resume <id>` reopens one), the tip check, exit 7, and `ahi history list|show|grep|export`. Slice 4a ships the writer and `exec`; 4b adds the chat and `--resume`; 4c adds `history grep` and `export`. Each is independently testable on fixture files.
 
   Then agree the JSON schemas, exit codes, and timeout semantics with hc and add an hc-side integration test that launches the real binary in a shell against the mock gateway. Document invocation, security, limits, and exit codes in [`README.md`](../README.md) (Commands table and a section) and record each slice in [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## Later, not in this plan
 
 - Delegation from a main `ahi tui` session: a `delegate` builtin tool governed by `action: delegate` rules naming permitted worker labels. The tool hands hc a task (hc as a program on PATH, argv only, result file back; no library, no socket) and returns the worker's result `text` and `effects` as the tool result; hc places files, picks the host, and keeps the history. ahi still never chooses a host. This is the designed path, not a maybe; it gets its own document (`docs/DELEGATION.md`) once hc's command surface is known.
-- Steering a running worker (beep-boop's `message_task`) is an hc feature over its session; a worker is one turn. Follow-ups are new turns with the history file.
-- An events file or JSONL stream beyond the stderr progress lines, if hc wants structure rather than text.
+- Steering a running worker (beep-boop's `message_task`) is an hc feature over its session; a worker is one turn. Follow-ups are new turns appended to the session file.
+- An events file or JSONL stream beyond the stderr progress lines, if hc wants structure rather than text. The session file is append-only, so `tail -f` on it is already a progress stream; a separate events file exists only if hc needs one before the turn's lines are written.
+- A pi-durable style resumable task engine (checkpointed tool tasks, automatic rerun of replay-safe tools, documents beside the transcript). The session format leaves room for it (an unmatched call line is the checkpoint), but the coordinator decides on retry today, and ahi does not.
 - Workers without hc (`ahi.workers.yaml` with ssh targets). Only if a no-hc use case appears.
 
 ## Open questions
@@ -167,9 +190,12 @@ Not `ahi run`: that is the hook runner. Not `ahi worker` or `ahi coordinator`: r
 - Which four primitives does hc actually expose for a worker host: place a file, run a command in a session, read a file back, read the exit status? And is placement `scp`/`tailscale file cp` or a heredoc in the pty? The digest option exists because the answer may be the latter.
 - Should the result file's `text` cap be a flag or fixed? Proposed: fixed, generous, with `text_truncated`.
 - Should `--tools` accept the shipped example names (`--tools read-all`) as well as paths? Proposed: paths only; `ahi tools init --example` already writes a file to start from.
+- Should `ahi tui` start writing sessions by default in slice 4b, or behind a flag first? The directory is owner-only and the chat already sends the same text to a provider, so the privacy posture is unchanged; the cost is disk. Proposed: default on, `--no-history` to opt out, and `ahi history` is how the human sees what is kept.
+- Should `history grep` read worker sessions hc placed outside `<state>/sessions/`? Proposed: only through an explicit `--path`, never by discovery.
 
 ## Decisions taken in this revision
 
 1. Operator files live outside `--workdir` and the worker refuses otherwise, instead of a new read-side exclusion mechanism.
 2. The result file carries a ledger and an `effects` field on every outcome, and history is rewritten after a failed turn that ran tools; "safe to retry" is withdrawn.
 3. `--timeout` is enforced inside the tool loop as far as the code allows (deadline plumbed to `ToolRuntime`, `run_command` clamped), and `status: timeout` may still report `effects: unknown`.
+4. History is an append-only JSONL session tree shared by `ahi exec` and `ahi tui`, modeled on Pi's session files, with a `turn` line per invocation and the call line written before the tool runs. Pi's durable engine is noted and not adopted. "Inspectable or opaque" is answered: inspectable, and `ahi history` is the reader; hc reads across machines by running it over ssh.
