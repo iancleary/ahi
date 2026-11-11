@@ -12,7 +12,7 @@ authors = ["Ian Cleary"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/ahi-widgets", "crates/ahi-win32"]
+members = [".", "crates/ahi-widgets", "crates/ahi-win32", "crates/ahi-signal"]
 
 [lib]
 name = "ahi"
@@ -50,6 +50,9 @@ yaml-rust2 = "=0.13.0"
 # In-repo Win32 clipboard; the only crate in the workspace with unsafe code.
 [target.'cfg(windows)'.dependencies]
 ahi-win32 = { path = "crates/ahi-win32", version = "=0.1.1" }
+
+[target.'cfg(unix)'.dependencies]
+ahi-signal = { path = "crates/ahi-signal", version = "=0.1.0" }
 
 
 [dev-dependencies]

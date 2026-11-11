@@ -7,12 +7,12 @@
 //! text, tool arguments, and tool output cannot add a rule or a grant.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::tools::{self, PreparedCall, ToolDetail, Workspace};
+use super::tools::{self, Arguments, PreparedCall, ToolDetail, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
     ToolRecord,
@@ -71,12 +71,24 @@ impl Default for Caller {
     }
 }
 
+/// What one turn brings to the runtime besides policy: who is asking, how
+/// long the run may take, and the flag that stops it.
+pub(super) struct TurnContext {
+    pub(super) caller: Caller,
+    /// The run's `--timeout` as an instant: no call starts past it and a
+    /// command's own timeout is clamped to what remains. `None` is unbounded.
+    pub(super) deadline: Option<Instant>,
+    /// The turn's cancel flag, shared with the stream reader. A running
+    /// command is killed when it is set.
+    pub(super) cancel: Arc<AtomicBool>,
+}
+
 pub(super) struct ToolRuntime {
     policy: ActionPolicy,
     workspace: Workspace,
     /// Where `audit.log` lives; every write appends a line there.
     state_dir: PathBuf,
-    caller: Caller,
+    turn: TurnContext,
     advertised: Vec<String>,
     gateway: String,
     destination: String,
@@ -116,7 +128,7 @@ impl ToolRuntime {
         destination: &str,
         grants: SessionGrants,
         policy_file: Option<&Path>,
-        caller: Caller,
+        turn: TurnContext,
     ) -> Result<Option<Self>> {
         let policy = match policy_file {
             Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
@@ -132,7 +144,7 @@ impl ToolRuntime {
         Ok(Some(Self {
             workspace: Workspace::open(directory, state)?,
             state_dir: state.state.clone(),
-            caller,
+            turn,
             policy,
             advertised,
             gateway: gateway.to_string(),
@@ -363,7 +375,24 @@ impl ToolRuntime {
         }
         let toolchain_env = self.toolchain_env(rule_id);
         let started = Instant::now();
-        let executed = tools::execute(prepared, &self.workspace, &toolchain_env);
+        // The run's deadline bounds every call: nothing starts past it, and a
+        // program gets at most the time that remains, so `--timeout` means
+        // what it says even for a command that asked for ten minutes.
+        let mut bounded = prepared.clone();
+        if let Some(deadline) = self.turn.deadline {
+            let remaining = deadline.saturating_duration_since(started);
+            if remaining.is_zero() {
+                return error(
+                    prepared.tool,
+                    Some(prepared.target()),
+                    "deadline reached: the run's timeout passed before this call started",
+                );
+            }
+            if let Arguments::Command { timeout_secs, .. } = &mut bounded.arguments {
+                *timeout_secs = (*timeout_secs).min(remaining.as_secs().max(1));
+            }
+        }
+        let executed = tools::execute(&bounded, &self.workspace, &toolchain_env, &self.turn.cancel);
         let elapsed = started.elapsed();
         match executed {
             Ok(tools::Executed {
@@ -436,8 +465,8 @@ impl ToolRuntime {
     ) -> ToolRecord {
         let after = (!report.after.is_empty()).then_some(report.after.as_str());
         let event = crate::hooks::audit::WriteEvent {
-            origin: self.caller.origin,
-            run_id: self.caller.run_id.as_deref(),
+            origin: self.turn.caller.origin,
+            run_id: self.turn.caller.run_id.as_deref(),
             tool: prepared.tool,
             repo: self.workspace.root(),
             path: prepared.target(),
@@ -469,8 +498,8 @@ impl ToolRuntime {
         ran: Option<bool>,
     ) -> ToolRecord {
         let event = crate::hooks::audit::CommandEvent {
-            origin: self.caller.origin,
-            run_id: self.caller.run_id.as_deref(),
+            origin: self.turn.caller.origin,
+            run_id: self.turn.caller.run_id.as_deref(),
             repo: self.workspace.root(),
             argv: prepared.argv(),
             cwd: &prepared.path,

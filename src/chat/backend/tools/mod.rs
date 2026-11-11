@@ -526,6 +526,7 @@ pub(super) fn execute(
     call: &PreparedCall,
     workspace: &Workspace,
     toolchain_env: &[String],
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Executed, &'static str> {
     // Result rows are one per line; headers and continuation notes are not
     // matches, so counts are approximate for the screen header only.
@@ -534,7 +535,7 @@ pub(super) fn execute(
         Arguments::Command { argv, timeout_secs } => {
             let cwd = workspace.resolve(&call.path)?;
             let (content, report, output) =
-                run_command::run(argv, &cwd, *timeout_secs, toolchain_env)?;
+                run_command::run(argv, &cwd, *timeout_secs, toolchain_env, cancel)?;
             Ok(Executed {
                 content,
                 detail: Some(ToolDetail::Command {
@@ -794,8 +795,11 @@ mod tests {
         (root, workspace)
     }
 
+    /// Tests never cancel a call.
+    static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
-        execute(call, workspace, &[]).map(|executed| executed.content)
+        execute(call, workspace, &[], &NEVER).map(|executed| executed.content)
     }
 
     fn read(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
@@ -1081,6 +1085,7 @@ mod tests {
                 },
                 &workspace,
                 &[],
+                &NEVER,
             )
         };
         let write = |path: &str, content: &str, overwrite| {
@@ -1095,6 +1100,7 @@ mod tests {
                 },
                 &workspace,
                 &[],
+                &NEVER,
             )
         };
         // Ambiguous, then unique, then replace_all.
@@ -1293,6 +1299,7 @@ mod tests {
                 },
                 &workspace,
                 &["AHI_TEST_TOOLCHAIN".to_string()],
+                &NEVER,
             )
         };
         std::env::set_var("AHI_TEST_SECRET_TOKEN", "leak");

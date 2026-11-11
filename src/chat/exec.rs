@@ -17,8 +17,8 @@
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -39,6 +39,14 @@ pub const RESULT_SCHEMA: u32 = 1;
 pub const PROMPT_CAP: usize = 1024 * 1024;
 /// Largest `text` stored in the result object. stdout gets the whole answer.
 pub const TEXT_CAP: usize = 4 * 1024 * 1024;
+/// `--timeout` when the caller does not set one.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 900;
+/// How often the event loop looks at the clock and the signal flag.
+const POLL: Duration = Duration::from_millis(100);
+/// After a cancel, how long the worker gets to report its terminal event
+/// before the run is reported without it. A blocked request ends by the
+/// deadline on its own; a killed command returns within one poll.
+const GRACE: Duration = Duration::from_secs(5);
 
 /// Where the prompt comes from. Exactly one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +94,8 @@ pub struct Options {
     pub check: bool,
     /// Progress lines on stderr in interactive mode too.
     pub verbose: bool,
+    /// Whole-run bound: the model, every tool call, every wait.
+    pub timeout: Duration,
 }
 
 /// Process exit codes. A coordinator reacts to these, not to text.
@@ -105,7 +115,7 @@ pub enum Exit {
     Credential = 4,
     /// The policy file is missing or invalid. Nothing was sent.
     Policy = 5,
-    /// Timeout or a signal (a later slice).
+    /// `--timeout` passed, or SIGINT, SIGTERM, or SIGHUP arrived.
     Timeout = 6,
     /// The turn finished but the result file could not be written.
     ResultUnwritable = 8,
@@ -149,6 +159,22 @@ impl Failure {
             exit: Exit::Policy,
             kind: "policy",
             message: message.into(),
+        }
+    }
+
+    fn timeout(limit: Duration) -> Self {
+        Self {
+            exit: Exit::Timeout,
+            kind: "timeout",
+            message: format!("timed out after {} s", limit.as_secs()),
+        }
+    }
+
+    fn cancelled(signal: &str) -> Self {
+        Self {
+            exit: Exit::Timeout,
+            kind: "cancelled",
+            message: format!("cancelled by {signal}"),
         }
     }
 
@@ -304,7 +330,8 @@ impl Report {
             "run_id": self.run_id,
             "status": match outcome {
                 Ok(_) => "ok",
-                Err(failure) if failure.exit == Exit::Timeout => "timeout",
+                Err(failure) if failure.kind == "timeout" => "timeout",
+                Err(failure) if failure.kind == "cancelled" => "cancelled",
                 Err(_) => "failed",
             },
             "gateway": self.gateway,
@@ -633,17 +660,25 @@ fn complete(
     prepared: Prepared,
     report: &mut Report,
 ) -> Result<String, Failure> {
+    let deadline = Instant::now() + options.timeout;
     let mut backend = HttpBackend::new(state.clone())
         .in_workspace(prepared.root.clone())
         .with_caller(Caller {
             origin: "exec",
             run_id: Some(report.run_id.clone()),
-        });
+        })
+        .with_deadline(deadline);
     backend = match prepared.tools {
         ToolSetup::Disabled => backend.without_tools(),
         ToolSetup::Workdir => backend,
         ToolSetup::File(path) => backend.with_actions(Some(path)),
     };
+    // From here a signal means "stop and report", not "die": the result
+    // file is the point. Installed once the preflight is done so a Ctrl+C
+    // during validation still ends the process the ordinary way.
+    if !watch_signals() {
+        eprintln!("warning: termination signals are not caught on this platform; an interrupted run writes no result file");
+    }
     let receiver = backend.submit(ChatRequest {
         selection: Selection {
             gateway: report.gateway.clone(),
@@ -657,7 +692,37 @@ fn complete(
     // stdin to answer on either.
     let attended = !options.headless && io::stdin().is_terminal() && io::stderr().is_terminal();
     let progress = options.headless || options.verbose;
-    drain(receiver, report, attended, progress)
+    let bound = Bound {
+        deadline,
+        limit: options.timeout,
+    };
+    drain(receiver, &mut backend, report, attended, progress, bound)
+}
+
+#[cfg(unix)]
+fn watch_signals() -> bool {
+    ahi_signal::watch()
+}
+
+#[cfg(not(unix))]
+fn watch_signals() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn signal_received() -> Option<&'static str> {
+    ahi_signal::received().map(ahi_signal::Signal::name)
+}
+
+#[cfg(not(unix))]
+fn signal_received() -> Option<&'static str> {
+    None
+}
+
+/// The run's time bound, for the loop and for the message.
+struct Bound {
+    deadline: Instant,
+    limit: Duration,
 }
 
 fn read_prompt(source: &PromptSource) -> Result<String, Failure> {
@@ -718,20 +783,57 @@ fn decode_prompt(bytes: Vec<u8>, origin: &str) -> Result<String, Failure> {
 /// kept; every tool result feeds the ledger; `Completed` is the only
 /// success. Approvals are answered per call, so the calls that rules alone
 /// approved still run in an unattended batch.
+///
+/// The loop also watches the clock and the signal flag. Past the deadline,
+/// or once a signal has arrived, the turn is cancelled and the loop keeps
+/// draining for a bounded grace period so the ledger sees every result the
+/// worker still reports; then the run is a timeout or a cancellation
+/// whatever else arrives, because the caller asked for a bound and gets it.
 fn drain(
     receiver: Receiver<ResponseEvent>,
+    backend: &mut HttpBackend,
     report: &mut Report,
     attended: bool,
     progress: bool,
+    bound: Bound,
 ) -> Result<String, Failure> {
     let mut text = String::new();
+    let mut stop: Option<Failure> = None;
+    let mut grace_until: Option<Instant> = None;
     loop {
-        let event = receiver.recv().map_err(|_| {
-            Failure::turn(
-                "model worker ended without a terminal event",
-                ErrorKind::Other,
-            )
-        })?;
+        let now = Instant::now();
+        if stop.is_none() {
+            let reason = match signal_received() {
+                Some(signal) => Some(Failure::cancelled(signal)),
+                None if now >= bound.deadline => Some(Failure::timeout(bound.limit)),
+                None => None,
+            };
+            if let Some(reason) = reason {
+                eprintln!("progress: {}; stopping the turn", reason.message);
+                backend.cancel();
+                grace_until = Some(now + GRACE);
+                stop = Some(reason);
+            }
+        }
+        let wait = match grace_until {
+            Some(until) if now >= until => {
+                return Err(stop.expect("grace runs only after a stop"));
+            }
+            Some(until) => (until - now).min(POLL),
+            None => bound.deadline.saturating_duration_since(now).min(POLL),
+        };
+        let event = match receiver.recv_timeout(wait) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(stop.unwrap_or_else(|| {
+                    Failure::turn(
+                        "model worker ended without a terminal event",
+                        ErrorKind::Other,
+                    )
+                }))
+            }
+        };
         match event {
             ResponseEvent::TextDelta(delta) => text.push_str(&delta),
             ResponseEvent::Usage {
@@ -764,7 +866,7 @@ fn drain(
                 report.ledger.requested(&calls);
             }
             ResponseEvent::ToolApprovalRequested(request) => {
-                let decisions = if attended {
+                let decisions = if attended && stop.is_none() {
                     ask_operator(&request)
                 } else {
                     vec![ToolDecision::Unattended; request.calls.len()]
@@ -806,8 +908,23 @@ fn drain(
                     .returned(&call_id, record.map(|record| *record));
             }
             ResponseEvent::ToolCallReturned => {}
-            ResponseEvent::Completed => return Ok(text),
-            ResponseEvent::Failed { message, kind } => return Err(Failure::turn(message, kind)),
+            ResponseEvent::Completed => {
+                return match stop {
+                    Some(reason) => Err(reason),
+                    None => Ok(text),
+                }
+            }
+            ResponseEvent::Failed { message, kind } => {
+                // A request that gave up at the deadline is the timeout, not
+                // a transport fault, whichever clock noticed first.
+                return Err(stop.unwrap_or_else(|| {
+                    if Instant::now() >= bound.deadline {
+                        Failure::timeout(bound.limit)
+                    } else {
+                        Failure::turn(message, kind)
+                    }
+                }));
+            }
         }
     }
 }
@@ -959,6 +1076,16 @@ mod tests {
         assert_eq!(Failure::usage("x").exit, Exit::Usage);
         assert_eq!(Failure::config("x").exit, Exit::Config);
         assert_eq!(Failure::policy("x").exit, Exit::Policy);
+        assert_eq!(Failure::timeout(Duration::from_secs(3)).exit, Exit::Timeout);
+        assert_eq!(Failure::cancelled("SIGHUP").exit, Exit::Timeout);
+        let report = report();
+        assert_eq!(
+            report.result(&Err(Failure::timeout(Duration::from_secs(3))))["status"],
+            "timeout"
+        );
+        let cancelled = report.result(&Err(Failure::cancelled("SIGHUP")));
+        assert_eq!(cancelled["status"], "cancelled");
+        assert_eq!(cancelled["error"]["message"], "cancelled by SIGHUP");
         assert_eq!(Failure::turn("x", ErrorKind::Auth).exit, Exit::Credential);
         for kind in [
             ErrorKind::Other,

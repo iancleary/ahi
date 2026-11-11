@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::protocol::{self, RequestContext, StreamOutcome};
-use super::tool_loop::{Caller, SessionGrants, ToolRuntime};
+use super::tool_loop::{Caller, SessionGrants, ToolRuntime, TurnContext};
 use super::{ChatRequest, CompletionBackend, ResponseEvent};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::directories::Directories;
@@ -25,6 +25,16 @@ use crate::harness::{CompletionConnection, CompletionTransport, Credential, Prot
 /// server may have received is never sent twice.
 const CONNECT_ATTEMPTS: u8 = 3;
 const CONNECT_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
+/// How long one request may take to connect, send, and answer.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .timeout_global(Some(timeout))
+        .build()
+        .new_agent()
+}
 
 #[cfg(test)]
 mod tests;
@@ -42,6 +52,9 @@ pub(crate) struct HttpBackend {
     tools: bool,
     /// Named in every audit line a tool round appends.
     caller: Caller,
+    /// `ahi exec --timeout` as an instant: bounds every tool call and the
+    /// wait for a response. `None` is the chat's unbounded turn.
+    deadline: Option<Instant>,
     grants: SessionGrants,
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
@@ -60,12 +73,9 @@ impl HttpBackend {
             actions: None,
             tools: true,
             caller: Caller::default(),
+            deadline: None,
             grants: SessionGrants::default(),
-            agent: ureq::Agent::config_builder()
-                .max_redirects(0)
-                .timeout_global(Some(Duration::from_secs(120)))
-                .build()
-                .new_agent(),
+            agent: agent(REQUEST_TIMEOUT),
             cancel: Arc::new(AtomicBool::new(false)),
             worker: None,
         }
@@ -100,6 +110,20 @@ impl HttpBackend {
         self
     }
 
+    /// Bound the run: no tool call starts past `deadline`, a command's own
+    /// timeout is clamped to what remains, and a request that has not
+    /// answered by then fails instead of waiting out the usual request
+    /// timeout. The caller still polls and cancels; this makes the wait end.
+    pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        // One second past the deadline, so the caller's own clock fires first
+        // and classifies the end as a timeout; this only makes sure a blocked
+        // request then ends soon after instead of at the usual limit.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        self.agent = agent((remaining + Duration::from_secs(1)).min(REQUEST_TIMEOUT));
+        self
+    }
+
     #[cfg(test)]
     fn with_workspace(state: Directories, workspace: PathBuf) -> Self {
         Self {
@@ -121,6 +145,7 @@ impl CompletionBackend for HttpBackend {
         self.cancel = Arc::clone(&cancel);
         let tools = self.tools;
         let caller = self.caller.clone();
+        let deadline = self.deadline;
         let handle = std::thread::spawn(move || {
             let workspace = if tools {
                 workspace.or_else(|| std::env::current_dir().ok())
@@ -133,6 +158,7 @@ impl CompletionBackend for HttpBackend {
                     workspace: workspace.as_deref(),
                     actions: actions.as_deref(),
                     caller,
+                    deadline,
                 },
                 grants,
                 &agent,
@@ -208,6 +234,7 @@ struct ToolSource<'a> {
     workspace: Option<&'a Path>,
     actions: Option<&'a Path>,
     caller: Caller,
+    deadline: Option<Instant>,
 }
 
 fn complete(
@@ -232,6 +259,7 @@ fn complete(
         workspace,
         actions,
         caller,
+        deadline,
     } = source;
     let mut tools = match workspace {
         Some(directory) => ToolRuntime::load(
@@ -241,7 +269,11 @@ fn complete(
             connection.destination(),
             grants,
             actions,
-            caller,
+            TurnContext {
+                caller,
+                deadline,
+                cancel: Arc::clone(cancel),
+            },
         )?,
         None => None,
     };

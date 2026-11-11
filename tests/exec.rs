@@ -7,8 +7,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[path = "support/fixture_directory.rs"]
 mod fixture_directory;
@@ -505,6 +507,7 @@ fn help_and_the_existing_surface_are_unchanged() {
         "--check",
         "--prompt-sha256",
         "--verbose",
+        "--timeout",
     ] {
         assert!(help.contains(flag), "{flag} missing from help");
     }
@@ -970,4 +973,170 @@ fn check_validates_the_whole_contract_without_a_request_and_digests_guard_the_pr
     assert_eq!(output.status.code(), Some(4), "{}", text(&output.stderr));
     fs::remove_dir_all(dir).unwrap();
     fs::remove_dir_all(dir2).unwrap();
+}
+
+/// A gateway that reads one request and then says nothing for `hold`. The
+/// flag is set once the request has fully arrived.
+fn silent_gateway(hold: Duration) -> (String, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let arrived = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&arrived);
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut body = vec![0; length];
+        let _ = reader.read_exact(&mut body);
+        flag.store(true, Ordering::SeqCst);
+        thread::sleep(hold);
+        drop(stream);
+    });
+    (url, arrived)
+}
+
+#[test]
+fn a_timeout_cancels_a_silent_turn_and_reports_it() {
+    let (url, _arrived) = silent_gateway(Duration::from_secs(8));
+    let dir = state(&url, "gateway");
+    let started = Instant::now();
+    let output = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "-p",
+        "a",
+        "--timeout",
+        "1",
+        "--result-file",
+        &result_path(&dir, "result.json"),
+    ]));
+    let elapsed = started.elapsed();
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(6), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("timed out after 1 s"), "{stderr}");
+    assert!(elapsed < Duration::from_secs(7), "took {elapsed:?}");
+    let result = result(&dir.join("result.json"));
+    assert_eq!(result["status"], "timeout");
+    assert_eq!(result["error"]["kind"], "timeout");
+    assert_eq!(result["effects"], "none");
+    assert!(result.get("text").is_none());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_timeout_kills_a_running_command_and_the_ledger_says_so() {
+    // Only the tool round is served: the turn never gets to ask for more.
+    let (url, server) = gateway_sequence(vec![tool_round(
+        &[(
+            "c1",
+            "run_command",
+            serde_json::json!({"argv": ["sh", "-c", "sleep 30"], "timeout": 600}),
+        )],
+        "unused",
+    )
+    .remove(0)]);
+    let dir = worker(&url);
+    fs::write(
+        dir.join("tools.yaml"),
+        "version: 1\nrules:\n  - {id: shell, action: command, match: {argv: [sh]}, effect: approve}\n",
+    )
+    .unwrap();
+    let started = Instant::now();
+    let output = run(ahi(&dir).args([
+        "--model",
+        "local/vendor/model",
+        "--headless",
+        "--prompt-file",
+        dir.join("task.md").to_str().unwrap(),
+        "--tools",
+        dir.join("tools.yaml").to_str().unwrap(),
+        "--result-file",
+        &result_path(&dir, "result.json"),
+        "--timeout",
+        "2",
+    ]));
+    server.join().unwrap();
+    let elapsed = started.elapsed();
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(6), "{stderr}");
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+    let result = result(&dir.join("result.json"));
+    assert_eq!(result["status"], "timeout");
+    // The command was killed and that is on the record: a program ran, so
+    // effects are known, not unknown. Which guard fired first is a race
+    // between the command's clamped timeout and the run's cancel; both say
+    // the program ran and was killed.
+    assert_eq!(result["effects"], "some");
+    let ledger = result["ledger"].as_array().unwrap();
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    let outcome = ledger[0]["outcome"].as_str().unwrap();
+    assert!(
+        outcome == "command cancelled and killed" || outcome == "command timed out and was killed",
+        "{outcome}"
+    );
+    assert_eq!(ledger[0]["ran"], true);
+    assert!(ledger[0]["exit_code"].is_null());
+    assert!(stderr.contains("run_command exit 1"), "{stderr}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_signal_writes_the_result_as_cancelled_before_exiting() {
+    let (url, arrived) = silent_gateway(Duration::from_secs(8));
+    let dir = state(&url, "gateway");
+    let child = ahi(&dir)
+        .args([
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "a",
+            "--timeout",
+            "60",
+            "--result-file",
+            &result_path(&dir, "result.json"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !arrived.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the request never arrived");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let output = child.wait_with_output().unwrap();
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(6), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("cancelled by SIGTERM"), "{stderr}");
+    let result = result(&dir.join("result.json"));
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["error"]["kind"], "cancelled");
+    assert_eq!(result["error"]["message"], "cancelled by SIGTERM");
+    fs::remove_dir_all(dir).unwrap();
 }

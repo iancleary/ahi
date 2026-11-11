@@ -141,8 +141,9 @@ enum Command {
     /// in `ahi tui`. When any tool is advertised, the prompt, result, and
     /// policy files must lie outside the working directory. Exit codes: 0
     /// success, 1 turn failure, 2 usage, 3 models.json or model, 4
-    /// credential, 5 policy file, 8 result file not written. See
-    /// docs/HEADLESS_EXEC.md.
+    /// credential, 5 policy file, 6 timeout or signal (SIGINT, SIGTERM,
+    /// SIGHUP write the result as `cancelled` first), 8 result file not
+    /// written. See docs/HEADLESS_EXEC.md.
     Exec(ExecArgs),
     /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
@@ -271,6 +272,9 @@ struct ExecArgs {
     /// Print one progress line per tool call on stderr (headless runs always do).
     #[arg(long, short = 'v', help_heading = "Output")]
     verbose: bool,
+    /// Seconds for the whole run: the model, every tool call, every wait. Past it the turn is cancelled, the result says `timeout`, and the exit code is 6.
+    #[arg(long, value_name = "SECS", default_value_t = ahi::chat::exec::DEFAULT_TIMEOUT_SECS, help_heading = "Limits")]
+    timeout: u64,
     /// Reasoning level sent to the model.
     #[arg(long, default_value = "off", value_name = "LEVEL", value_parser = ["off", "minimal", "low", "medium", "high"])]
     thinking: String,
@@ -942,6 +946,7 @@ fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
         tools: args.tools.clone(),
         check: args.check,
         verbose: args.verbose,
+        timeout: std::time::Duration::from_secs(args.timeout.max(1)),
     };
     let finished = exec::run(&state, &options);
     if let Some(text) = finished.stdout {

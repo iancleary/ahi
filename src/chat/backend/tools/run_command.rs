@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,10 +42,13 @@ pub(crate) struct CommandReport {
 
 /// The two failures that happen after the process started. Every other
 /// error `run` returns precedes `spawn`, so nothing ran.
-const RAN_BEFORE_FAILING: [&str; 2] = [
+const RAN_BEFORE_FAILING: [&str; 3] = [
     "cannot wait for the program",
     "command timed out and was killed",
+    CANCELLED,
 ];
+/// The turn was cancelled (`Esc`, `--timeout`, a signal) while the program ran.
+pub(super) const CANCELLED: &str = "command cancelled and killed";
 
 /// Whether a process ran before `run` failed with `message`: `Some(true)`
 /// for the post-spawn failures, `Some(false)` for a failure `run` itself
@@ -68,6 +72,7 @@ pub(super) fn run(
     cwd: &Path,
     timeout_secs: u64,
     toolchain_env: &[String],
+    cancel: &AtomicBool,
 ) -> Result<(String, CommandReport, CommandOutput), &'static str> {
     let (program, args) = argv.split_first().ok_or("argv must not be empty")?;
     if !cwd.is_dir() {
@@ -103,9 +108,16 @@ pub(super) fn run(
         .take()
         .map(|pipe| thread::spawn(move || drain(pipe)));
     let deadline = started + Duration::from_secs(timeout_secs);
+    let mut cancelled = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
+            Ok(None) if cancel.load(Ordering::Relaxed) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                cancelled = true;
+                break None;
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -128,7 +140,11 @@ pub(super) fn run(
     let (err, err_cut) = join(stderr);
     let duration_ms = started.elapsed().as_millis();
     let Some(status) = status else {
-        return Err("command timed out and was killed");
+        return Err(if cancelled {
+            CANCELLED
+        } else {
+            "command timed out and was killed"
+        });
     };
     let exit_code = status.code();
     let mut content = match exit_code {
