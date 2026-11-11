@@ -33,7 +33,30 @@ rules:
     match: {tool: read_file}
     effect: approve
   # ---------------------------------------------------------------------
-  # Repository commands: the checks `just check` runs, as `run_command`
+  # File changes, each after a prompt: `edit_file` may change existing files
+  # under src and the root TODO.md, and `write_file` may create TODO.md. A
+  # rule cannot tell creating from replacing (`overwrite`), so every
+  # `write_file` asks, and the prompt says "new file" or "replace with".
+  # No other file is created; policy files, hook configuration, .gitignore,
+  # and .git are never writable whatever is here.
+  # ---------------------------------------------------------------------
+  - id: edit-sources
+    action: file_write
+    match: {tool: edit_file, path: src}
+    effect: approve
+    ask: true
+  - id: edit-todo
+    action: file_write
+    match: {tool: edit_file, path: TODO.md}
+    effect: approve
+    ask: true
+  - id: write-todo
+    action: file_write
+    match: {tool: write_file, path: TODO.md}
+    effect: approve
+    ask: true
+  # ---------------------------------------------------------------------
+  # Repository commands:the checks `just check` runs, as `run_command`
   # rules. argv is a token-by-token prefix (`[cargo, test]` approves
   # `cargo test --all-features`, not `cargo testx`), no shell is involved,
   # and the process gets the hook runner's scrubbed environment plus the
@@ -41,7 +64,8 @@ rules:
   # `ahi tui` inside `ahi dev run` for a container boundary.
   #
   # Read-only cargo and git subcommands run without a prompt. Anything that
-  # rewrites the tree (fmt, clippy --fix, just recipes) asks first. Publishing,
+  # rewrites the tree (fmt, clippy --fix, just recipes) asks first, like the
+  # src edits above. Publishing,
   # installing, and pushing are denied outright, whatever else matches.
   # ---------------------------------------------------------------------
   - id: cargo-check
