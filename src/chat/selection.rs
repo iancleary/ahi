@@ -448,10 +448,11 @@ impl Selection {
         let mut result = String::new();
         for (index, row) in rows.iter().enumerate().take(last + 1).skip(first) {
             let (left, right) = self.columns(index)?;
+            let skip = wrap_padding(rows, index);
             let mut column = 0;
-            for grapheme in row.text.graphemes(true) {
+            for (offset, grapheme) in row.text.grapheme_indices(true) {
                 let next = column + grapheme.width();
-                if next > left && column < right {
+                if offset >= skip && next > left && column < right {
                     result.push_str(grapheme);
                 }
                 column = next;
@@ -494,7 +495,7 @@ impl Selection {
                     }
                 }
                 None => {
-                    plain_run.push_str(&row.text);
+                    plain_run.push_str(&row.text[wrap_padding(rows, index)..]);
                     if row.break_after && index < last {
                         plain_run.push('\n');
                     }
@@ -541,6 +542,15 @@ impl Selection {
 }
 
 /// First row of the logical line containing `row`: soft wraps are rejoined.
+/// Bytes at the start of `rows[row]` that only line a soft wrap up under its
+/// content; they are on screen but not part of the text.
+fn wrap_padding(rows: &[TranscriptRow], row: usize) -> usize {
+    match row.checked_sub(1) {
+        Some(previous) if !rows[previous].break_after => rows[row].hang,
+        _ => 0,
+    }
+}
+
 fn line_start(rows: &[TranscriptRow], row: usize) -> usize {
     (0..row)
         .rev()

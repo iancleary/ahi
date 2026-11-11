@@ -54,6 +54,9 @@ pub(crate) struct TranscriptRow {
     /// The source text (raw markdown) of the block this row renders, shared by
     /// every row of that block. `None` when the rendered text is the source.
     pub(crate) source: Option<Rc<str>>,
+    /// Bytes of leading padding that a soft wrap added so this row lines up
+    /// under its paragraph's content. Selection and copy skip them.
+    pub(crate) hang: usize,
 }
 
 impl TranscriptRow {
@@ -65,6 +68,7 @@ impl TranscriptRow {
             spans: Vec::new(),
             targets: Vec::new(),
             source: None,
+            hang: 0,
         }
     }
 
@@ -97,6 +101,10 @@ pub(crate) struct Styled {
     /// Patched over the role style for every row of this paragraph, so a
     /// background (code block, diff line) covers the padding too.
     pub(crate) style: Option<Style>,
+    /// Cells of padding that every soft-wrapped continuation row starts
+    /// with, so wrapped text lines up under the content, not under a gutter
+    /// or marker. A row too narrow for the padding and a grapheme goes without.
+    pub(crate) hang: usize,
 }
 
 impl Styled {
@@ -282,12 +290,18 @@ pub(crate) fn layout_styled(
 ) {
     let width = width.max(1);
     let style = paragraph.style.map_or(style, |over| style.patch(over));
+    // Continuation rows start with `hang` spaces; a row too narrow to hold
+    // them and a grapheme goes without.
+    let hang = paragraph.hang;
     let mut row_start = 0;
     let mut text = String::new();
+    // Bytes of `text` that are wrap padding rather than paragraph text.
+    let mut lead = 0;
     let mut cells = 0;
     let flush = |rows: &mut Vec<TranscriptRow>,
                  text: &mut String,
                  row_start: &mut usize,
+                 lead: usize,
                  end: usize,
                  break_after: bool| {
         let shift = |start: usize, stop: usize| {
@@ -295,7 +309,7 @@ pub(crate) fn layout_styled(
             let stop = stop.min(end);
             // `then`, not `then_some`: the subtraction must not run when
             // the range lies before this row.
-            (start < stop).then(|| (start - *row_start, stop - *row_start))
+            (start < stop).then(|| (start - *row_start + lead, stop - *row_start + lead))
         };
         let spans = paragraph
             .spans
@@ -326,25 +340,38 @@ pub(crate) fn layout_styled(
             spans,
             targets,
             source: paragraph.source.clone(),
+            hang: lead,
         });
         *row_start = end;
     };
     for (offset, grapheme) in paragraph.text.grapheme_indices(true) {
         if grapheme == "\n" {
-            flush(rows, &mut text, &mut row_start, offset, true);
+            flush(rows, &mut text, &mut row_start, lead, offset, true);
             row_start = offset + 1;
+            lead = 0;
             cells = 0;
             continue;
         }
         let size = grapheme.width();
-        if cells + size > width && !text.is_empty() {
-            flush(rows, &mut text, &mut row_start, offset, false);
-            cells = 0;
+        // Padding alone never counts as content to wrap.
+        if cells + size > width && text.len() > lead {
+            flush(rows, &mut text, &mut row_start, lead, offset, false);
+            // A grapheme too wide to sit beside the padding gets the row.
+            lead = if hang + size <= width { hang } else { 0 };
+            text.extend(std::iter::repeat_n(' ', lead));
+            cells = lead;
         }
         text.push_str(grapheme);
         cells += size;
     }
-    flush(rows, &mut text, &mut row_start, paragraph.text.len(), true);
+    flush(
+        rows,
+        &mut text,
+        &mut row_start,
+        lead,
+        paragraph.text.len(),
+        true,
+    );
 }
 
 /// All rows of a message list. One-shot; the screen uses `TranscriptLayout`.

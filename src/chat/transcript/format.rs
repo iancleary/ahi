@@ -6,6 +6,7 @@
 use std::rc::Rc;
 
 use ratatui_core::style::Style;
+use unicode_width::UnicodeWidthStr;
 
 use super::render::{RowSpan, Styled, Target};
 use super::{diff, highlight, links, markdown, theme, ChatMessage, ToolPayload, TranscriptRole};
@@ -161,6 +162,7 @@ fn markdown_blocks(text: &str, out: &mut Vec<Styled>, options: &Options, width: 
             markdown::Block::Quote { runs } => {
                 let mut styled = Styled::default();
                 styled.push("▎ ", theme::quote_bar());
+                styled.hang = 2;
                 push_runs(&mut styled, &runs, theme::italic());
                 block_rows.push(styled);
             }
@@ -173,6 +175,8 @@ fn markdown_blocks(text: &str, out: &mut Vec<Styled>, options: &Options, width: 
                 styled.push(&"  ".repeat(depth as usize), Style::default());
                 styled.push(&marker, theme::list_marker());
                 styled.push(" ", Style::default());
+                // Wrapped text lines up under the item's text, not its marker.
+                styled.hang = UnicodeWidthStr::width(styled.text.as_str());
                 push_runs(&mut styled, &runs, Style::default());
                 block_rows.push(styled);
             }
@@ -304,7 +308,6 @@ fn table(
     width: usize,
     out: &mut Vec<Styled>,
 ) {
-    use unicode_width::UnicodeWidthStr;
     let cell_text =
         |runs: &[markdown::Run]| runs.iter().map(|r| r.text.as_str()).collect::<String>();
     let columns = header
@@ -506,13 +509,9 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
                 out.push(search_row(line, options));
             }
         }
-        Some(ToolDetail::Read { .. }) => {
+        Some(ToolDetail::Read { offset, .. }) => {
             let language = target.rsplit('.').next().and_then(highlight::language);
-            for line in lines {
-                let mut styled = Styled::default();
-                push_highlighted(&mut styled, language, &expand_tabs(line));
-                out.push(styled);
-            }
+            read_rows(lines, offset.unwrap_or(1), language, &mut out);
         }
         _ => {
             for line in lines {
@@ -523,6 +522,43 @@ fn tool_result(message: &ChatMessage, exit_code: i32, options: &Options) -> Vec<
         }
     }
     out
+}
+
+/// A `read_file` body: every file line behind its line number, wrapped text
+/// lined up under the code, and the tool's own bracketed or ellipsis notes
+/// (`[lines 3-9 of 40]`, `… 5 more lines`) dim and unnumbered.
+fn read_rows<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    first: usize,
+    language: Option<highlight::Language>,
+    out: &mut Vec<Styled>,
+) {
+    let lines: Vec<&str> = lines.collect();
+    let is_note = |index: usize, line: &str| {
+        let bracketed = line.starts_with('[') && line.ends_with(']');
+        (index == 0 && bracketed && line.starts_with("[lines "))
+            || (index + 1 == lines.len()
+                && (line.starts_with('…') || (bracketed && line.contains(" more lines;"))))
+    };
+    let body = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| !is_note(*index, line))
+        .count();
+    let digits = (first + body.saturating_sub(1)).to_string().len();
+    let mut number = first;
+    for (index, line) in lines.iter().enumerate() {
+        let mut styled = Styled::default();
+        if is_note(index, line) {
+            styled.push(&clip(line), theme::dim());
+        } else {
+            styled.push(&format!("{number:>digits$} "), theme::gutter());
+            styled.hang = digits + 1;
+            push_highlighted(&mut styled, language, &expand_tabs(line));
+            number += 1;
+        }
+        out.push(styled);
+    }
 }
 
 fn tools_exit_denied() -> i32 {
@@ -685,13 +721,17 @@ fn diff_rows(before: Option<&str>, after: &str, path: &str, out: &mut Vec<Styled
             };
             styled.push(&gutter(old, new), theme::gutter());
             styled.push(&marker.to_string(), Style::default());
+            styled.hang = UnicodeWidthStr::width(styled.text.as_str());
             let content_start = styled.text.len();
-            let text = expand_tabs(text.trim_end_matches('\r'));
+            let source = text.trim_end_matches('\r');
+            let text = expand_tabs(source);
             push_highlighted(&mut styled, language, &text);
             // Emphasis overrides the token color's background only; merge
             // by splitting spans is overkill: emphasised ranges are pushed
             // as extra spans that patch over, so they must come after.
-            for range in emphasis {
+            // The ranges index the line as written. Tab expansion and the
+            // length clip rewrite it, so they apply only to the same bytes.
+            for range in emphasis.iter().filter(|_| text == source) {
                 if range.end <= text.len() {
                     styled.spans.push(RowSpan {
                         start: content_start + range.start,
@@ -904,7 +944,10 @@ mod tests {
         let out = paragraphs(&read, &options(), 80);
         assert_eq!(
             texts(&out),
-            vec!["read_file src/main.rs · lines 10–10 · 3.8s", "fn main() {}"]
+            vec![
+                "read_file src/main.rs · lines 10–10 · 3.8s",
+                "10 fn main() {}"
+            ]
         );
         assert!(matches!(
             targets(&out[0])[..],
