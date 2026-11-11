@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- `ahi exec`: one model turn without the chat screen. The prompt comes from `-p <text>`, `--prompt-file <path>`, or stdin when it is a pipe; `--model gateway/model-id` names a curated model and nothing is fetched or picked. stdout carries only the final answer (`--format json`: the result object), written once after a validated success; diagnostics go to stderr. `--result-file <path>` writes one versioned JSON object on every outcome (`status`, `text`, `error`, `usage`, tool counts, `effects`, `ledger`, `history`, the `ahi_version`, and a `run_id` that `--run-id` sets); the file must not already exist, so a stale result is never mistaken for a new one. `--headless` is the worker contract for a coordinator: prompt file only, result file required, nothing read from stdin. Exit codes: 0 success, 1 turn failure, 2 usage, 3 `models.json` or model, 4 credential, 8 result file not written. No tool is advertised yet and the working directory's `ahi.tools.yaml` is not read; the plan in `docs/HEADLESS_EXEC.md` adds tools, timeouts, and history in later slices.
+
+### Changed
+
+- Prose in the chat (assistant text, headings, list items, quotes, notices, operator text) wraps at spaces instead of mid-word. A word longer than the row, such as a URL, still breaks at the edge. Code blocks, tables, diffs, and file lines keep cell-width wrapping so their columns hold. A space that lands past the edge stays on its row, so a word ending exactly at the edge does not move down.
+- Diff word emphasis now survives tab expansion and the 400-character clip: it follows its word on tab-indented lines and stops at the clip, instead of being dropped.
+
+### Fixed
+
+- A gateway credential whose `$NAME` environment variable is unset now fails as an authentication error (`ErrorKind::Auth`) instead of an unclassified one, so `ahi exec` exits 4 and the chat's `/login` hint logic sees it for what it is. The message is unchanged.
 ## 0.15.0 (2026-11-12)
 
 ### Added
@@ -12,13 +24,11 @@
 ### Changed
 
 - Wrapped rows in the chat line up under their content instead of starting flush left: file lines under the code, diff lines under the code after the old/new gutter, list items under their text after the marker, and quotes after the bar. Selection and copy skip the padding, so a wrapped line still copies as one line.
-- Prose in the chat (assistant text, headings, list items, quotes, notices, operator text) wraps at spaces instead of mid-word. A word longer than the row, such as a URL, still breaks at the edge. Code blocks, tables, diffs, and file lines keep cell-width wrapping so their columns hold. A space that lands past the edge stays on its row, so a word ending exactly at the edge does not move down.
-- Diff word emphasis now survives tab expansion and the 400-character clip: it follows its word on tab-indented lines and stops at the clip, instead of being dropped.
 - The repository `ahi.tools.yaml` lets the model edit existing files under `src` and write `TODO.md`, each after a prompt.
 
 ### Fixed
 
-- The chat no longer panics when drawing an `edit_file` or `write_file` diff whose changed line is longer than 400 characters or contains a tab. Word emphasis was computed on the line as written and applied to the clipped, tab-expanded row, which could split the multi-byte ellipsis. Emphasis ranges are now mapped through tab expansion and cut at the clip.
+- The chat no longer panics when drawing an `edit_file` or `write_file` diff whose changed line is longer than 400 characters or contains a tab. Word emphasis was computed on the line as written and applied to the clipped, tab-expanded row, which could split the multi-byte ellipsis. Such rows now skip emphasis.
 
 ## 0.14.1 (2026-11-08)
 

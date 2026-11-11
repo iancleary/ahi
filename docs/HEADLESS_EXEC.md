@@ -1,6 +1,6 @@
 # One-shot turns and headless workers (`ahi exec`)
 
-Status: design plan, not implemented. This document is for review; nothing here changes code yet, and the examples below are proposed syntax, not commands available today.
+Status: slice 1 is implemented (`ahi exec` with `-p`, stdin, `--prompt-file`, `--model`, `--thinking`, `--format`, `--result-file`, `--headless`, `--run-id`; exit codes 0..4 and 8; no tools). Everything else below is design for review: checked boxes are shipped, unchecked ones are proposed syntax, not commands available today.
 
 ## Roles
 

@@ -203,7 +203,7 @@ fn gateway_headers(entry: &ProviderEntry) -> Result<BTreeMap<String, String>> {
 fn resolve_marker(value: &str) -> Result<String> {
     let resolved = if let Some(name) = value.strip_prefix('$') {
         std::env::var(name).map_err(|_| {
-            Error::new("inference credential environment variable is missing or not Unicode")
+            Error::auth("inference credential environment variable is missing or not Unicode")
         })?
     } else {
         value.to_string()

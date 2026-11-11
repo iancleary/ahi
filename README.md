@@ -116,6 +116,7 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
 | [`ahi tools list`, `ahi tools examples [list\|show [<name>]]`, `ahi tools init [--example <name>] [--write]`](#ahi-tools) | Show the working directory's chat tool policy, show the shipped examples, or write one into the working directory. |
 | [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools. |
+| [`ahi exec --model <gateway/model> (-p <text> \| --prompt-file <path> \| stdin)`](#ahi-exec) | Run one model turn without the chat screen: the answer on stdout, a result file and exit codes a coordinator can act on. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 | [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
@@ -275,6 +276,19 @@ Explicit OpenAI refresh attempts `GET https://api.openai.com/v1/models` only wit
 Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the path from the configured `baseUrl`. Both the original flat catalog and supported Pi-shaped `{"providers": {"home": {...}}}` documents are accepted. A validated returned same-origin `baseUrl` supplies the inference path for new registration and is shown in Review; no `/v1` is guessed. Multiple candidates require an exact inference URL to disambiguate. Metadata survives caching and curation; discovery never automatically selects remote models. This is a gateway-specific discovery convention, not an OpenAI or industry-standard catalog endpoint. The gateway retains `/pi/agent/model.json` as a legacy alias; ahi uses only the canonical route. Gateways without this catalog route can still serve inference for explicitly configured model IDs.
 
 `ahi tui` never fetches on startup. `ahi tui --refresh` explicitly requests refreshes, preserves old catalogs on failure, and in a pipe exits 1 if any refresh failed while still printing the local load. Catalogs are atomically replaced objects containing provider, source URL, retrieval timestamp, ordered reported IDs, and typed metadata by model ID; old array-format and identifier-only object catalogs remain readable with unknown metadata. `retrieval time unknown (old catalog format)` means that the cached array lacks a timestamp, not that authentication is old. Refresh never edits the curated file.
+
+### ahi exec
+
+One model turn, no screen. The prompt comes from `-p <text>`, `--prompt-file <path>` (UTF-8, verbatim, at most 1 MiB), or stdin when neither is given and stdin is a pipe; exactly one source. `--model <gateway/model-id>` names a model curated in `models.json`, the same form `ahi tui` saves; nothing is fetched, no picker opens, and a missing credential points at `ahi login` and exits 4. `--thinking off|minimal|low|medium|high` (default `off`) sets the reasoning level the way the chat's `/thinking` does; the field is sent only when the model's metadata declares support.
+
+```sh
+git diff | ahi exec --model local/qwen-3.5 -p "Summarize this diff in three lines."
+ahi exec --model local/qwen-3.5 --prompt-file task.md --result-file result.json --format json
+```
+
+stdout carries only the final answer, written once after a validated success; a failed, truncated, or refused turn leaves stdout empty and explains itself on stderr. `--format json` prints the result object instead. `--result-file <path>` writes that object on every outcome, including failures before any request: `schema`, `ahi_version`, `run_id`, `status` (`ok`, `failed`), `gateway`, `model`, `text` and `text_truncated` (success only, capped at 4 MiB), `error` (`kind`, `message`), `usage` when the provider reported it, `context_window`, `tools` counts, `effects`, `ledger`, and `history`. The file is created owner-only in one step and must not already exist, so a coordinator never reads a stale success. `--run-id <id>` sets the identifier echoed into the result; a 16-hex-digit one is generated otherwise.
+
+`--headless` is the worker contract for a coordinator such as herdr-core: the prompt comes from `--prompt-file` only, `--result-file` is required, stdin is never read, and nothing is inferred from whether a terminal is attached. Exit codes: 0 success; 1 turn failure (transport, malformed stream, refusal, truncation, a tool call with no tools); 2 usage (arguments, prompt, result file in the way); 3 `models.json` or model; 4 credential; 8 the turn finished but the result file could not be written (the outcome is on stderr). No tool is advertised in this version and the working directory's `ahi.tools.yaml` is not read; [`docs/HEADLESS_EXEC.md`](docs/HEADLESS_EXEC.md) is the plan for tools, timeouts, and history.
 
 ### ahi login
 

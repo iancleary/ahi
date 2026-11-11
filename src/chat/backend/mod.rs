@@ -15,6 +15,7 @@ pub(crate) use tool_call::ToolCall;
 use std::sync::mpsc::{Receiver, Sender};
 
 pub(crate) use http::HttpBackend;
+pub(crate) use tool_loop::{EXIT_DENIED, EXIT_OK};
 
 use super::thinking::ThinkingLevel;
 use super::transcript::ChatMessage;

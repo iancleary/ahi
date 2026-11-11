@@ -37,6 +37,9 @@ pub(crate) struct HttpBackend {
     /// An explicit policy file (`ahi tui --tools`) used instead of the
     /// workspace's `ahi.tools.yaml`.
     actions: Option<PathBuf>,
+    /// `false` advertises no tool and reads no policy, whatever the working
+    /// directory holds (`ahi exec` before its tools slice).
+    tools: bool,
     grants: SessionGrants,
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
@@ -53,6 +56,7 @@ impl HttpBackend {
             state,
             workspace: None,
             actions: None,
+            tools: true,
             grants: SessionGrants::default(),
             agent: ureq::Agent::config_builder()
                 .max_redirects(0)
@@ -68,6 +72,14 @@ impl HttpBackend {
     /// `ahi.tools.yaml`. `None` keeps the working-directory lookup.
     pub(crate) fn with_actions(mut self, path: Option<PathBuf>) -> Self {
         self.actions = path;
+        self
+    }
+
+    /// Advertise no tool and read no policy file. A requested call then
+    /// fails the turn with `tool execution is disabled`, as it does for a
+    /// working directory without `ahi.tools.yaml`.
+    pub(crate) fn without_tools(mut self) -> Self {
+        self.tools = false;
         self
     }
 
@@ -90,8 +102,13 @@ impl CompletionBackend for HttpBackend {
         let agent = self.agent.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Arc::clone(&cancel);
+        let tools = self.tools;
         let handle = std::thread::spawn(move || {
-            let workspace = workspace.or_else(|| std::env::current_dir().ok());
+            let workspace = if tools {
+                workspace.or_else(|| std::env::current_dir().ok())
+            } else {
+                None
+            };
             let result = complete(
                 &state,
                 ToolSource {

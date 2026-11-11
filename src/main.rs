@@ -119,6 +119,25 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
     },
+    /// Run one model turn without the chat screen and print the answer.
+    ///
+    /// The prompt comes from `-p <text>`, `--prompt-file <path>`, or stdin
+    /// when neither is given and stdin is a pipe. `--model` names a curated
+    /// `gateway/model-id` from models.json; nothing is fetched, no picker
+    /// opens, and a missing credential points at `ahi login`. stdout carries
+    /// only the final answer (`--format json`: the result object), written
+    /// once after a validated success; diagnostics go to stderr.
+    ///
+    /// `--result-file <path>` writes one JSON object on every outcome
+    /// (status, text, error, usage, tool counts). The file must not exist.
+    /// `--headless` is the worker contract a coordinator drives: the prompt
+    /// comes from `--prompt-file` only and `--result-file` is required.
+    ///
+    /// No tool is advertised in this version; the working directory's
+    /// ahi.tools.yaml is not read. Exit codes: 0 success, 1 turn failure,
+    /// 2 usage, 3 models.json or model, 4 credential, 8 result file not
+    /// written. See docs/HEADLESS_EXEC.md.
+    Exec(ExecArgs),
     /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
     /// Tools are off until the directory `ahi tui` starts in has an
@@ -212,6 +231,40 @@ enum DevCommand {
     Status,
     /// Remove the local image.
     Clean,
+}
+
+#[derive(clap::Args)]
+struct ExecArgs {
+    /// Curated model as `gateway/model-id` (`ahi tui` saves the same form).
+    #[arg(long, value_name = "GATEWAY/MODEL")]
+    model: String,
+    /// The prompt, inline. Not allowed with --headless.
+    #[arg(
+        short = 'p',
+        long = "prompt",
+        value_name = "TEXT",
+        conflicts_with = "prompt_file",
+        help_heading = "Input"
+    )]
+    prompt: Option<String>,
+    /// Read the prompt from this UTF-8 file, verbatim (at most 1 MiB).
+    #[arg(long, value_name = "PATH", help_heading = "Input")]
+    prompt_file: Option<PathBuf>,
+    /// Reasoning level sent to the model.
+    #[arg(long, default_value = "off", value_name = "LEVEL", value_parser = ["off", "minimal", "low", "medium", "high"])]
+    thinking: String,
+    /// What stdout carries after a success: the answer, or the result object.
+    #[arg(long, default_value = "text", value_name = "FORMAT", value_parser = ["text", "json"], help_heading = "Output")]
+    format: String,
+    /// Write the result object here on every outcome. The file must not exist.
+    #[arg(long, value_name = "PATH", help_heading = "Output")]
+    result_file: Option<PathBuf>,
+    /// Worker mode for a coordinator: prompt from --prompt-file only, --result-file required, nothing read from stdin.
+    #[arg(long, requires = "prompt_file", requires = "result_file")]
+    headless: bool,
+    /// Caller-chosen identifier echoed into the result (1-64 letters, digits, '-', '_', '.'). Generated when omitted.
+    #[arg(long, value_name = "ID")]
+    run_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -353,6 +406,7 @@ fn main() -> ExitCode {
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
         Command::Tui { refresh, tools } => tui(&cli, *refresh, tools.as_deref()),
+        Command::Exec(args) => exec(&cli, args),
         Command::Tools { command } => match command {
             ToolsCommand::Init {
                 example,
@@ -835,6 +889,44 @@ fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode 
             ExitCode::from(1)
         }
     }
+}
+
+/// `ahi exec`: one turn, no screen. The library decides the exit code and
+/// writes diagnostics to stderr as it goes; this function only resolves the
+/// directories, maps the arguments, and writes stdout once.
+fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
+    use ahi::chat::exec::{self, Exit, Format, Options, PromptSource};
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(Exit::Config as u8);
+        }
+    };
+    let prompt = match (&args.prompt, &args.prompt_file) {
+        (Some(text), None) => PromptSource::Inline(text.clone()),
+        (None, Some(path)) => PromptSource::File(path.clone()),
+        _ => PromptSource::Stdin,
+    };
+    let options = Options {
+        model: args.model.clone(),
+        prompt,
+        thinking: args.thinking.clone(),
+        format: Format::parse(&args.format).unwrap_or(Format::Text),
+        result_file: args.result_file.clone(),
+        headless: args.headless,
+        run_id: args.run_id.clone(),
+    };
+    let finished = exec::run(&state, &options);
+    if let Some(text) = finished.stdout {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        // A closed pipe is the reader's choice, not a failure of the turn.
+        let _ = stdout
+            .write_all(text.as_bytes())
+            .and_then(|()| stdout.flush());
+    }
+    ExitCode::from(finished.code)
 }
 
 fn login(cli: &Cli) -> ExitCode {

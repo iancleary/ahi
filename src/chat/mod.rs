@@ -8,6 +8,7 @@
 mod approval;
 pub(crate) mod backend;
 mod command;
+pub mod exec;
 mod header;
 pub(crate) mod input;
 mod key_binding;

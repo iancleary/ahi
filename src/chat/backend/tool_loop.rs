@@ -27,9 +27,9 @@ pub(super) const MAX_TURN_OUTPUT_BYTES: usize = 256 * 1024;
 const PREVIEW_LINES: usize = 8;
 const PREVIEW_LINE_CHARS: usize = 200;
 
-pub(super) const EXIT_OK: i32 = 0;
+pub(crate) const EXIT_OK: i32 = 0;
 pub(super) const EXIT_ERROR: i32 = 1;
-pub(super) const EXIT_DENIED: i32 = 126;
+pub(crate) const EXIT_DENIED: i32 = 126;
 
 static NEXT_BATCH: AtomicU64 = AtomicU64::new(1);
 
