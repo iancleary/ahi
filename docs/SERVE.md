@@ -28,7 +28,9 @@ hc space / ahi tui --attach / ahi exec (client)          worker host
 
 - The server is `ahi serve`, a subcommand like the others. It is the only process on the host that opens `sessions.db` while it runs.
 - A turn runs on its own thread, through the same `ToolRuntime`, `HttpBackend`, and `Recorder` the tui and exec use today. Several sessions may have turns open at once; one session has at most one open turn (a second submission is `409 Conflict`).
-- Clients discover the server through its socket path. When the socket exists and answers `/v1/health`, `ahi tui`, `ahi exec`, and `ahi session` route through it; when it does not, they behave exactly as today. `--standalone` forces the direct path and is refused when the socket is live, because two writers to `sessions.db` is the thing this plan removes.
+- Clients discover the server through its socket path. When the socket exists and answers `/v1/health`, `ahi tui`, `ahi exec`, and `ahi session` route through it. `--standalone` forces the direct path and is refused when the socket is live, because two writers to `sessions.db` is the thing this plan removes.
+- `ahi tui` starts the server when none is live. It spawns `ahi serve` detached from its own process group and terminal (stdio to `<state>/serve.log`), waits for `/v1/health` (up to 2 s), then attaches. The server outlives the tui: closing the chat leaves the socket up for the next tui, for `ahi exec`, and for hc spaces, which is the point of having one. It idles at no cost beyond the open store, and `ahi serve stop` ends it (a `POST /v1/shutdown` over the socket only, never over TCP). Two tuis started at once race on the bind: the loser sees `EADDRINUSE`, waits for health, and attaches to the winner.
+- `ahi exec` and `ahi session` never start a server. hc drives exec over ssh on hosts it has not set up a server on, and a one-shot command leaving a daemon behind would surprise it; they use the socket when it is live and the direct path otherwise. A server started by a tui is a server hc may also use once it knows the host has one.
 - `ahi serve` has no model credentials of its own. It reads `models.json` and the credential file the way the tui does; a client never ships a token for the provider.
 
 ## Transport and authentication
@@ -100,7 +102,7 @@ data: {"run_id":"...","status":"ok","exit_code":0}
 
 ## Clients
 
-- **`ahi tui --attach [<url>]`** renders a session from `/entries` and `/events`, sends turns with `POST /turns`, and answers `ask` events in the approval dialog it already has. Without an argument it attaches to the local socket. `/model` and `/thinking` become `POST /settings`. Two tuis, or a tui and an hc space, on the same session see the same stream and take turns submitting; the `409` is shown as "a turn is running". The tui's local code path (today's `interact`) stays for hosts with no server.
+- **`ahi tui`** attaches to the local socket, starting the server first when needed (above). `--attach <url>` attaches to a remote server over TCP with the token from `<state>/serve.token` or `AHI_SERVE_TOKEN`; `--standalone` is the old in-process path. In every mode it renders a session from `/entries` and `/events`, sends turns with `POST /turns`, and answers `ask` events in the approval dialog it already has. Without an argument it attaches to the local socket. `/model` and `/thinking` become `POST /settings`. Two tuis, or a tui and an hc space, on the same session see the same stream and take turns submitting; the `409` is shown as "a turn is running". The tui's local code path (today's `interact`) stays for hosts with no server.
 - **`ahi exec`** on a host with a live socket submits its turn to the server, follows `/events` for the progress lines it prints today, and writes the result file from `GET /turns/{run_id}` so hc's file contract is unchanged. Exit codes map one to one from the result's `status`. `--headless` keeps meaning "no human, deny asks" by sending `unattended: true`. Without a socket, exec runs as it does now.
 - **`ahi session`** commands call the server when it is live and open the store directly otherwise; output is identical either way.
 - **hc** holds, per space, a base URL (or a socket and a host it reaches over ssh) and a session id. It creates sessions, submits turns with its own `run_id`s, renders `/events`, surfaces `ask` events to the human and posts the decision, and cancels with `DELETE`. ssh is still how hc starts `ahi serve` where no unit file does, and still how it reaches a host that only has `ahi exec`.
@@ -134,7 +136,7 @@ Each is a draft PR stacked on the previous; the first lands behind nothing becau
 - **S2 events.** Recorder fan-out, `/events` with `after`, `text` deltas, keepalive; `ahi exec` follows it for progress. Test: a dropped stream resumed with `after` sees every entry exactly once.
 - **S3 cancel and asks.** `DELETE` turns, `ask` events and answers, unattended fallback, drain on signal. Test: a cancelled `run_command` child is killed and the turn closes `cancelled` with `effects` reported; an unanswered ask is denied per call after the turn's deadline.
 - **S4 TCP and token.** `--listen`, token file, bearer check, `--listen-any` guard, Windows loopback. Test: no token is 401; wrong token is 401 in constant time; `0.0.0.0` without the flag is exit 3.
-- **S5 `ahi tui --attach`.** Render from events, submit, answer asks, settings. Test: two attached clients see the same stream and the second submission during a turn is shown as running.
+- **S5 `ahi tui` as a client.** Start the server when none is live (detached spawn, health wait, bind race), attach locally or with `--attach <url>`, render from events, submit, answer asks, settings; `ahi serve stop`. Test: two tuis started together end up on one server; two attached clients see the same stream and the second submission during a turn is shown as running; closing the tui leaves the socket answering.
 - **S6 import/export over HTTP and hc notes.** The two endpoints and a short section in `docs/DELEGATION.md` replacing "hc as a program on PATH" with "hc over the API" for hosts that run a server.
 
 ## Verification and rollout
@@ -152,7 +154,7 @@ Each is a draft PR stacked on the previous; the first lands behind nothing becau
 
 ## Open questions
 
-- Should `ahi tui` with no `--attach` start a server on first use so the socket is always there, or stay a standalone program until `ahi serve` is run? Proposed: standalone, and a one-line hint when the store is held by a server that is not running.
+- Should a server a tui started stop itself after some idle period, or only on `ahi serve stop`? Proposed: never on its own; an idle server is an open file, and a space that returns after an hour expects it there.
 - Does hc want one socket per host it reaches over ssh (`ssh -L` to the Unix socket) or TCP on the tailnet? Both work; the token story differs. Proposed: support both, document the ssh forward as the zero-config path.
 - Should `ask` answers be allowed to say `remember` and write a rule? Proposed: no; approvals stay per call, as in the tui today, until the policy file gains a documented write path.
 - Where does `<runtime>` go on macOS without `XDG_RUNTIME_DIR`? Proposed: `<state>/run`, created 700.
@@ -162,5 +164,5 @@ Each is a draft PR stacked on the previous; the first lands behind nothing becau
 1. ahi becomes addressable: one `ahi serve` per user per host owns the store and answers HTTP; this reverses "ahi does not become a daemon" in `docs/HEADLESS_EXEC.md` and keeps everything else there.
 2. The session is the resource. Turns, events, asks, cancel, and settings hang off `/v1/sessions/{id}`; there is no "chat" or "tui" resource.
 3. Unix socket by default with filesystem permissions; TCP is explicit, bearer-token authenticated, and never binds every interface without a second flag. No TLS of ahi's own; the tailnet provides it.
-4. Every existing entry point becomes a client when a server is live and keeps its direct path when none is. The result-file contract hc already uses is preserved by `ahi exec` as a client.
+4. Every existing entry point becomes a client when a server is live. `ahi tui` starts the server when none is and the server outlives it; `ahi exec` and `ahi session` never start one and keep their direct path when none is live. The result-file contract hc already uses is preserved by `ahi exec` as a client.
 5. `tiny_http` is the server dependency, pinned, used directly; the client side stays on `ureq`.
