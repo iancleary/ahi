@@ -13,6 +13,7 @@ pub mod directories;
 pub mod error;
 pub mod harness;
 pub mod hooks;
+pub mod program_status;
 pub mod sandbox;
 mod shlex;
 pub mod term;

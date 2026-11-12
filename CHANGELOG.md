@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- The chat reports what it is doing to the terminal multiplexer that holds it with OSC 7501, the Program Status Protocol herdr-core reads: `idle` when open, `working` while a turn runs (naming the tools being called), `blocked` with `kind=permission` while a tool call waits for approval, `done` with the first line of the answer, `error` with the failure's kind, and `clear` on exit. The title is the working directory and model. The sequence is written only when stdout is a terminal; terminals that do not know it ignore it, as with any unknown OSC. Nothing is read back and no dependency is added.
+
 ## 0.14.1 (2026-11-08)
 
 ### Added
