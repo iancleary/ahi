@@ -208,6 +208,7 @@ The store is useful only if something reads it. ahi reads locally from whichever
 
 ## Later, not in this plan
 
+- An addressable ahi: `ahi serve`, one process per host that owns the session store and answers HTTP, with `ahi tui --attach`, `ahi exec`, and `ahi session` as its clients. This reverses "ahi does not become a daemon" above and is planned in `docs/SERVE.md`; everything in this document is what it is built from, and `ahi exec` over ssh stays the path for hosts without a server.
 - Delegation from a main `ahi tui` session: a `delegate` builtin tool governed by `action: delegate` rules naming permitted worker labels. The tool hands hc a task (hc as a program on PATH, argv only, result file back; no library, no socket) and returns the worker's result `text` and `effects` as the tool result; hc places files, picks the host, and keeps the history. ahi still never chooses a host. This is the designed path, not a maybe; it gets its own document (`docs/DELEGATION.md`) once hc's command surface is known.
 - Steering a running worker (beep-boop's `message_task`) is an hc feature over its session; a worker is one turn. Follow-ups are new turns appended to the session file.
 - An events file or JSONL stream beyond the stderr progress lines, if hc wants structure rather than text. The session file is append-only, so `tail -f` on it is already a progress stream; a separate events file exists only if hc needs one before the turn's lines are written.
