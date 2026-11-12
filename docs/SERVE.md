@@ -154,7 +154,6 @@ Each is a draft PR stacked on the previous; the first lands behind nothing becau
 
 ## Open questions
 
-- Should a server a tui started stop itself after some idle period, or only on `ahi serve stop`? Proposed: never on its own; an idle server is an open file, and a space that returns after an hour expects it there.
 - Does hc want one socket per host it reaches over ssh (`ssh -L` to the Unix socket) or TCP on the tailnet? Both work; the token story differs. Proposed: support both, document the ssh forward as the zero-config path.
 - Should `ask` answers be allowed to say `remember` and write a rule? Proposed: no; approvals stay per call, as in the tui today, until the policy file gains a documented write path.
 - Where does `<runtime>` go on macOS without `XDG_RUNTIME_DIR`? Proposed: `<state>/run`, created 700.
@@ -164,5 +163,5 @@ Each is a draft PR stacked on the previous; the first lands behind nothing becau
 1. ahi becomes addressable: one `ahi serve` per user per host owns the store and answers HTTP; this reverses "ahi does not become a daemon" in `docs/HEADLESS_EXEC.md` and keeps everything else there.
 2. The session is the resource. Turns, events, asks, cancel, and settings hang off `/v1/sessions/{id}`; there is no "chat" or "tui" resource.
 3. Unix socket by default with filesystem permissions; TCP is explicit, bearer-token authenticated, and never binds every interface without a second flag. No TLS of ahi's own; the tailnet provides it.
-4. Every existing entry point becomes a client when a server is live. `ahi tui` starts the server when none is and the server outlives it; `ahi exec` and `ahi session` never start one and keep their direct path when none is live. The result-file contract hc already uses is preserved by `ahi exec` as a client.
+4. Every existing entry point becomes a client when a server is live. `ahi tui` starts the server when none is and the server outlives it and never idles out: it ends only on `ahi serve stop`, a signal, or the host going down; `ahi exec` and `ahi session` never start one and keep their direct path when none is live. The result-file contract hc already uses is preserved by `ahi exec` as a client.
 5. `tiny_http` is the server dependency, pinned, used directly; the client side stays on `ureq`.
