@@ -12,6 +12,10 @@
 //!
 //! `docs/SERVE.md` has the design.
 
+// Without a Unix socket nothing on this platform speaks the wire form yet;
+// the in-process client still goes through `dispatch`.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 pub(crate) mod ledger;
 pub(crate) mod wire;
 
