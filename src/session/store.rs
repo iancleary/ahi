@@ -1,18 +1,24 @@
 //! The store: a directory of session files, and one session open in memory.
 //!
 //! `<state>/sessions/<id>.jsonl`, owner-only. A `Session` holds the header
-//! and every entry of one file and appends to it; the `Store` creates,
-//! opens, lists, imports, and exports. Nothing locks: the chat that holds a
-//! session is its one writer, and a reader skips a torn last line.
+//! and every entry of one file; the `Store` creates, opens, holds, lists,
+//! imports, and exports. A session is appended to only while held: `hold`
+//! takes an advisory lock on the file (one writer per file across the
+//! server, a standalone chat, and `import`), truncates a torn last line
+//! the writer before it left behind, and refuses with `Conflict` when
+//! another process holds it. A reader skips a torn last line.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::{valid_id, Entry, Header, Kind, Role, Settings, Status, StoreError, StoredMessage};
 use crate::chat::transcript::ChatMessage;
 use crate::directories::Directories;
 use crate::harness::Protocol;
+
+/// How long `hold` keeps trying a lock another description still has.
+const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(crate) struct Store {
     dir: PathBuf,
@@ -50,9 +56,16 @@ impl Store {
             .map_err(|err| io(&self.dir, "cannot create the session directory", err))?;
         let path = self.path(&header.id);
         let mut file = crate::directories::private_file()
+            .read(true)
             .create_new(true)
             .open(&path)
             .map_err(|err| io(&path, "cannot create", err))?;
+        if !ahi_unix::try_lock_exclusive(&file).map_err(|err| io(&path, "cannot lock", err))? {
+            return Err(StoreError::Conflict(format!(
+                "session {} is held by another process",
+                header.id
+            )));
+        }
         let line = format!("{}\n", header.to_json());
         file.write_all(line.as_bytes())
             .map_err(|err| io(&path, "cannot write", err))?;
@@ -60,11 +73,24 @@ impl Store {
             path,
             header,
             entries: Vec::new(),
+            complete: line.len() as u64,
+            writer: Some(file),
         })
     }
 
-    /// The session with `id`.
+    /// The session with `id`, to read. It cannot be appended to.
     pub(crate) fn open(&self, id: &str) -> Result<Session, StoreError> {
+        Session::read(&self.existing(id)?)
+    }
+
+    /// The session with `id`, to write: held under an advisory lock until
+    /// it is dropped. `Conflict` when another process holds it. A torn
+    /// last line is cut off so the first append starts a whole line.
+    pub(crate) fn hold(&self, id: &str) -> Result<Session, StoreError> {
+        Session::hold(&self.existing(id)?)
+    }
+
+    fn existing(&self, id: &str) -> Result<PathBuf, StoreError> {
         if !valid_id(id) {
             return Err(StoreError::NotFound(format!(
                 "`{id}` is not a session id (a lower-case UUID)"
@@ -77,7 +103,7 @@ impl Store {
                 self.dir.display()
             )));
         }
-        Session::read(&path)
+        Ok(path)
     }
 
     /// Every session, newest first. A file this ahi cannot read is skipped
@@ -141,7 +167,7 @@ impl Store {
             session.entries = incoming.entries;
             return Ok((session, added));
         }
-        let mut stored = Session::read(&path)?;
+        let mut stored = Session::hold(&path)?;
         if stored.header != incoming.header
             || incoming.entries.len() < stored.entries.len()
             || incoming.entries[..stored.entries.len()] != stored.entries[..]
@@ -159,11 +185,15 @@ impl Store {
     }
 }
 
-/// One session, read whole and appended to in place.
+/// One session, read whole and, while held, appended to in place.
 pub(crate) struct Session {
     path: PathBuf,
     header: Header,
     entries: Vec<Entry>,
+    /// Bytes of whole lines: where the next line goes.
+    complete: u64,
+    /// The locked file, when this session is held for writing.
+    writer: Option<File>,
 }
 
 impl Session {
@@ -207,7 +237,39 @@ impl Session {
             path: path.to_path_buf(),
             header,
             entries,
+            complete: complete.len() as u64,
+            writer: None,
         })
+    }
+
+    /// Read `path` for writing: lock first, then read what the lock
+    /// guarantees is settled, then cut a torn last line.
+    fn hold(path: &Path) -> Result<Self, StoreError> {
+        let file = crate::directories::private_file()
+            .read(true)
+            .open(path)
+            .map_err(|err| io(path, "cannot open", err))?;
+        // A process forking at this moment holds a copy of every descriptor
+        // until it execs, the lock's among them, so a refusal is final only
+        // when it lasts.
+        let deadline = std::time::Instant::now() + LOCK_PATIENCE;
+        loop {
+            if ahi_unix::try_lock_exclusive(&file).map_err(|err| io(path, "cannot lock", err))? {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(StoreError::Conflict(format!(
+                    "{} is held by another process (a server or a chat)",
+                    path.display()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut session = Self::read(path)?;
+        file.set_len(session.complete)
+            .map_err(|err| io(path, "cannot cut the torn line", err))?;
+        session.writer = Some(file);
+        Ok(session)
     }
 
     pub(crate) fn header(&self) -> &Header {
@@ -265,18 +327,36 @@ impl Session {
         Ok(&self.entries[first..])
     }
 
-    fn write_lines(&self, entries: &[Entry]) -> Result<(), StoreError> {
+    fn write_lines(&mut self, entries: &[Entry]) -> Result<(), StoreError> {
         let mut bytes = Vec::new();
         for entry in entries {
             bytes.extend_from_slice(entry.to_json().to_string().as_bytes());
             bytes.push(b'\n');
         }
-        let mut file = crate::directories::private_file()
-            .append(true)
-            .open(&self.path)
-            .map_err(|err| io(&self.path, "cannot open", err))?;
+        let Some(file) = self.writer.as_mut() else {
+            return Err(StoreError::Conflict(format!(
+                "{} was opened to read, not to write",
+                self.path.display()
+            )));
+        };
+        // The lock makes this writer the only one; a length that moved
+        // anyway is another process writing without it.
+        let length = file
+            .metadata()
+            .map_err(|err| io(&self.path, "cannot stat", err))?
+            .len();
+        if length != self.complete {
+            return Err(StoreError::Conflict(format!(
+                "{} changed under its writer; nothing was written",
+                self.path.display()
+            )));
+        }
+        file.seek(SeekFrom::End(0))
+            .map_err(|err| io(&self.path, "cannot seek", err))?;
         file.write_all(&bytes)
-            .map_err(|err| io(&self.path, "cannot write", err))
+            .map_err(|err| io(&self.path, "cannot write", err))?;
+        self.complete += bytes.len() as u64;
+        Ok(())
     }
 
     /// The entry a new turn hangs off: the last `turn` that succeeded, or
@@ -473,6 +553,7 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
 
+        drop(session);
         let reopened = store.open(&id).unwrap();
         assert_eq!(reopened.entries().len(), 10);
         assert_eq!(reopened.tip(), Some(10));
@@ -511,6 +592,30 @@ mod tests {
         torn.push_str("{\"seq\":11,\"type\":\"mess");
         fs::write(&path, &torn).unwrap();
         assert_eq!(store.open(&id).unwrap().entries().len(), 10);
+        // Holding the session cuts the torn line, so an append starts whole.
+        let mut held = store.hold(&id).unwrap();
+        assert!(matches!(store.hold(&id), Err(StoreError::Conflict(_))));
+        held.append(Some(10), vec![message(Role::Operator, "q4")])
+            .unwrap();
+        drop(held);
+        let mended = store.open(&id).unwrap();
+        assert_eq!(mended.entries().len(), 11);
+        assert_eq!(mended.entries()[10].seq, 11);
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()),
+            "every line is whole"
+        );
+        // A session opened to read cannot be written.
+        assert!(matches!(
+            store
+                .open(&id)
+                .unwrap()
+                .append(None, vec![message(Role::Operator, "no")]),
+            Err(StoreError::Conflict(_))
+        ));
         // A whole bad line is corruption.
         let mut bad = fs::read_to_string(&path).unwrap();
         bad.push_str("{\"seq\":12}\n");
@@ -569,8 +674,12 @@ mod tests {
         let other = Store::new(&Directories::single_root(dir.join("other")));
         let (imported, added) = other.import(&out).unwrap();
         assert_eq!((imported.id(), added), (a.id(), 2));
-        let (_, again) = other.import(&out).unwrap();
-        assert_eq!(again, 0, "nothing new");
+        // While a process holds the session, import refuses it.
+        assert!(matches!(other.import(&out), Err(StoreError::Conflict(_))));
+        drop(imported);
+        let (again, added) = other.import(&out).unwrap();
+        assert_eq!(added, 0, "nothing new");
+        drop(again);
         a.append(
             Some(2),
             vec![message(Role::Operator, "q2"), turn("r2", Status::Ok)],
@@ -580,6 +689,7 @@ mod tests {
         store.export(a.id(), &longer).unwrap();
         let (extended, added) = other.import(&longer).unwrap();
         assert_eq!((extended.entries().len(), added), (4, 2));
+        drop(extended);
         let mut forked = fs::read_to_string(&out).unwrap();
         forked.push_str(
             &Entry {
