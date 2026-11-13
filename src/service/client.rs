@@ -2,6 +2,9 @@
 //! the service built in this process, or the socket of a running
 //! `ahi serve`. `ahi exec` and `ahi tui` both speak through it.
 
+// Without a Unix socket only the in-process transport exists on this platform.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
