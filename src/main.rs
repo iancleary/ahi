@@ -130,6 +130,9 @@ enum Command {
         /// The server's socket instead of the default; started there when none answers.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
+        /// Attach to a server elsewhere through this command's stdio, e.g. "ssh host ahi connect".
+        #[arg(long, value_name = "COMMAND")]
+        via: Option<String>,
     },
     /// Run one model turn from the command line and exit; the worker side of a coordinator.
     ///
@@ -279,6 +282,9 @@ struct ExecArgs {
     /// Run in this process even when a server is live.
     #[arg(long)]
     standalone: bool,
+    /// Reach a server through this command's stdio, e.g. "ssh host ahi connect".
+    #[arg(long, value_name = "COMMAND")]
+    via: Option<String>,
     /// Progress lines on stderr (always on with --headless).
     #[arg(short, long)]
     verbose: bool,
@@ -517,6 +523,7 @@ fn main() -> ExitCode {
             no_history,
             standalone,
             socket,
+            via,
         } => tui(
             &cli,
             *refresh,
@@ -525,6 +532,7 @@ fn main() -> ExitCode {
             !no_history,
             *standalone,
             socket.as_deref(),
+            via.as_deref(),
         ),
         Command::Session { command } => session(&cli, command),
         Command::Exec(args) => exec(&cli, args),
@@ -1006,6 +1014,7 @@ fn directories(cli: &Cli) -> ahi::Result<Directories> {
     Directories::resolve(cli.state_dir.as_deref(), cli.cache_dir.as_deref())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tui(
     cli: &Cli,
     refresh: bool,
@@ -1014,6 +1023,7 @@ fn tui(
     record: bool,
     standalone: bool,
     socket: Option<&std::path::Path>,
+    via: Option<&str>,
 ) -> ExitCode {
     let state = match directories(cli) {
         Ok(dirs) => dirs,
@@ -1022,7 +1032,9 @@ fn tui(
             return ExitCode::from(1);
         }
     };
-    match ahi::tui::run(&state, refresh, actions, resume, record, standalone, socket) {
+    match ahi::tui::run(
+        &state, refresh, actions, resume, record, standalone, socket, via,
+    ) {
         Ok(output) => {
             if !output.text.is_empty() {
                 println!("{}", output.text);
@@ -1083,6 +1095,7 @@ fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
         check: args.check,
         socket: args.socket.clone(),
         standalone: args.standalone,
+        via: args.via.clone(),
         verbose: args.verbose,
     };
     ExitCode::from(ahi::exec::run(&state, &options))

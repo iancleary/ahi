@@ -158,7 +158,7 @@ impl CompletionBackend for ServiceBackend {
             prompt,
             run_id: None,
             prompt_sha256: None,
-            workdir: self.workdir.clone(),
+            workdir: Some(self.workdir.clone()),
             tools: self.actions.clone(),
             timeout: None,
             thinking: Some(request.thinking.as_str().to_string()),

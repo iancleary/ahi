@@ -43,6 +43,7 @@ pub struct RunOutput {
 /// service: the server on `socket` (or the default socket), started when
 /// none answers. `record` is false for `--no-history` and applies to the
 /// standalone engine only; the service always records.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     state: &Directories,
     refresh: bool,
@@ -51,6 +52,7 @@ pub fn run(
     record: bool,
     standalone: bool,
     socket: Option<&Path>,
+    via: Option<&str>,
 ) -> Result<RunOutput> {
     let actions =
         match actions {
@@ -115,6 +117,11 @@ pub fn run(
         };
         let engine = if standalone {
             chat::Engine::Standalone { record }
+        } else if let Some(command) = via {
+            let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+            let client = crate::service::client::Client::via(&argv)
+                .map_err(|err| Error::new(err.message))?;
+            chat::Engine::Service(client)
         } else {
             let path = crate::serve::ensure_running(state, socket)?;
             let client = crate::service::client::Client::open(state, Some(&path), false)
@@ -995,6 +1002,14 @@ fn pick_loop(
         Some(selection) => PickerOutcome::Selected(selection),
         None => outcome,
     })
+}
+
+/// The model the picker last saved on this host (`<state>/selection`), as
+/// `gateway/model`, if any.
+pub(crate) fn saved_selection(state: &Directories) -> Option<String> {
+    let text = std::fs::read_to_string(state.state.join("selection")).ok()?;
+    let line = text.trim();
+    (!line.is_empty() && line.contains('/')).then(|| line.to_string())
 }
 
 /// Commit the new registry only after the complete local load succeeds.

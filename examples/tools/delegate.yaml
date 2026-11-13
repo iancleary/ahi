@@ -1,0 +1,33 @@
+# Reads anywhere; tasks may be handed to the workers labeled rust-ci and docs,
+# the first after a prompt; the worker labeled prod is denied. A label names
+# a worker in herdr-core's registry, never a host: `delegate` reaches it
+# through the command in AHI_DELEGATE_VIA (default `hc connect --worker
+# {worker}`), and this file cannot say where it is.
+version: 1
+default: deny
+rules:
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: search-tree
+    action: tool_call
+    match: {tool: search_files}
+    effect: approve
+  - id: ci
+    action: delegate
+    match: {worker: rust-ci}
+    effect: approve
+    ask: true
+  - id: docs
+    action: delegate
+    match: {worker: docs}
+    effect: approve
+  - id: no-prod
+    action: delegate
+    match: {worker: prod}
+    effect: deny

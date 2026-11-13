@@ -406,6 +406,7 @@ impl ToolRuntime {
                 content,
                 write,
                 command,
+                delegation,
                 detail,
             }) => {
                 let mut record = None;
@@ -414,6 +415,9 @@ impl ToolRuntime {
                 }
                 if let Some(report) = command {
                     record = Some(self.record_command(prepared, &report, "ok", Some(true)));
+                }
+                if let Some(report) = delegation {
+                    record = Some(self.record_delegation(&report, "ok"));
                 }
                 Outcome {
                     exit_code: EXIT_OK,
@@ -448,6 +452,17 @@ impl ToolRuntime {
                     };
                     record =
                         Some(self.record_command(prepared, &none, failure.message, failure.ran));
+                }
+                if prepared.tool == tools::DELEGATE {
+                    let none = tools::delegate::DelegationReport {
+                        worker: prepared.target().to_string(),
+                        session: String::new(),
+                        run_id: String::new(),
+                        status: "failed".to_string(),
+                        effects: "unknown".to_string(),
+                        duration_ms: elapsed.as_millis(),
+                    };
+                    record = Some(self.record_delegation(&none, failure.message));
                 }
                 let mut outcome = error(prepared.tool, Some(prepared.target()), failure.message);
                 outcome.elapsed = elapsed;
@@ -500,6 +515,26 @@ impl ToolRuntime {
         record
     }
 
+    /// The record of one delegation: the worker, its session and run, the
+    /// status and effects it reported. Never the task text or the answer.
+    fn record_delegation(
+        &self,
+        report: &tools::delegate::DelegationReport,
+        outcome: &str,
+    ) -> ToolRecord {
+        let record = ToolRecord::Delegate {
+            worker: report.worker.clone(),
+            session: report.session.clone(),
+            run_id: report.run_id.clone(),
+            outcome: outcome.to_string(),
+            status: report.status.clone(),
+            effects: report.effects.clone(),
+            duration_ms: report.duration_ms,
+        };
+        self.audit(&record, &[]);
+        record
+    }
+
     /// One audit line derived from a record, so the two cannot drift.
     fn audit(&self, record: &ToolRecord, env_names: &[String]) {
         let caller = &self.turn.caller;
@@ -546,6 +581,29 @@ impl ToolRuntime {
                     exit_code: *exit_code,
                     duration_ms: *duration_ms,
                     env_names,
+                },
+            ),
+            ToolRecord::Delegate {
+                worker,
+                session,
+                run_id,
+                outcome,
+                status,
+                effects,
+                duration_ms,
+            } => crate::hooks::audit::append_delegate(
+                &self.state_dir,
+                &crate::hooks::audit::DelegateEvent {
+                    origin: caller.origin,
+                    run_id: caller.run_id.as_deref(),
+                    repo: self.workspace.root(),
+                    worker,
+                    session,
+                    worker_run_id: run_id,
+                    outcome,
+                    status,
+                    effects,
+                    duration_ms: *duration_ms,
                 },
             ),
         };

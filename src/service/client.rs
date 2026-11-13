@@ -1,6 +1,8 @@
-//! A client of the service with one calling shape and two transports:
-//! the service built in this process, or the socket of a running
-//! `ahi serve`. `ahi exec` and `ahi tui` both speak through it.
+//! A client of the service with one calling shape and three transports:
+//! the service built in this process, the socket of a running `ahi serve`,
+//! or the stdio of a command that carries the lines somewhere else
+//! (`ssh host ahi connect`, `hc connect --worker label`). `ahi exec`,
+//! `ahi tui`, and the `delegate` tool all speak through it.
 
 // Without a Unix socket only the in-process transport exists on this platform.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
@@ -32,6 +34,8 @@ enum Transport {
     /// Over the socket of a running `ahi serve`.
     #[cfg(unix)]
     Remote(remote::Remote, PathBuf),
+    /// Over the stdio of a command, herdr-core's `--via`.
+    Via(remote::Remote, std::process::Child),
 }
 
 impl Client {
@@ -48,7 +52,11 @@ impl Client {
             if !standalone {
                 let path = crate::serve::socket_path(state, socket);
                 if let Some(stream) = crate::serve::try_connect(&path) {
-                    let (remote, events) = remote::Remote::new(stream);
+                    let reader = stream.try_clone().map_err(|err| ServiceError {
+                        kind: "session",
+                        message: format!("socket: {err}"),
+                    })?;
+                    let (remote, events) = remote::Remote::new(Box::new(reader), Box::new(stream));
                     return Ok(Self {
                         transport: Transport::Remote(remote, path),
                         events: Arc::new(Mutex::new(Some(events))),
@@ -75,12 +83,41 @@ impl Client {
         Arc::clone(&self.events)
     }
 
-    /// The socket in use, or `None` for the in-process service.
+    /// Over the stdin and stdout of `argv`: a bridge such as
+    /// `ssh host ahi connect`. The command runs with the hook runner's
+    /// scrubbed environment plus `PATH`, so a coordinator's secrets do not
+    /// travel with it; its stderr is the operator's.
+    pub(crate) fn via(argv: &[String]) -> Result<Self, ServiceError> {
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| usage("empty connect command"))?;
+        let env = crate::hooks::local_hook::scrub_env(std::env::vars_os(), &[]);
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .env_clear()
+            .envs(env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .map_err(|err| usage(format!("cannot start `{program}`: {err}")))?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(usage("the connect command has no stdio"));
+        };
+        let (remote, events) = remote::Remote::new(Box::new(stdout), Box::new(stdin));
+        Ok(Self {
+            transport: Transport::Via(remote, child),
+            events: Arc::new(Mutex::new(Some(events))),
+        })
+    }
+
+    /// The socket in use, or `None` for the in-process service and a bridge.
     pub(crate) fn socket(&self) -> Option<&Path> {
         match &self.transport {
             Transport::Local(_) => None,
             #[cfg(unix)]
             Transport::Remote(_, path) => Some(path),
+            Transport::Via(..) => None,
         }
     }
 
@@ -102,6 +139,7 @@ impl Client {
             }
             #[cfg(unix)]
             Transport::Remote(remote, _) => remote.call(&request),
+            Transport::Via(remote, _) => remote.call(&request),
         }
     }
 
@@ -120,6 +158,17 @@ pub(crate) fn next_event(events: &Events, timeout: Duration) -> Result<Event, Re
     }
 }
 
+impl Drop for Client {
+    fn drop(&mut self) {
+        // The bridge ends with its stdin; a command that lingers is killed.
+        if let Transport::Via(remote, child) = &mut self.transport {
+            remote.close();
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn usage(message: impl Into<String>) -> ServiceError {
     ServiceError {
         kind: "usage",
@@ -127,10 +176,8 @@ fn usage(message: impl Into<String>) -> ServiceError {
     }
 }
 
-#[cfg(unix)]
 mod remote {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::mpsc::{self, Receiver};
     use std::thread;
     use std::time::Duration;
@@ -140,36 +187,48 @@ mod remote {
     use crate::service::wire::Request;
     use crate::service::{Event, ServiceError};
 
-    /// One socket, one request at a time, events on the side.
+    /// One byte stream each way, one request at a time, events on the side.
     pub(super) struct Remote {
-        stream: UnixStream,
+        writer: Option<Box<dyn Write + Send>>,
         responses: Receiver<Value>,
     }
 
     impl Remote {
-        pub(super) fn new(stream: UnixStream) -> (Self, Receiver<Event>) {
+        pub(super) fn new(
+            reader: Box<dyn Read + Send>,
+            writer: Box<dyn Write + Send>,
+        ) -> (Self, Receiver<Event>) {
             let (answers, responses) = mpsc::channel();
             let (notify, events) = mpsc::channel();
-            if let Ok(reader) = stream.try_clone() {
-                thread::spawn(move || {
-                    for line in BufReader::new(reader).lines() {
-                        let Ok(line) = line else { break };
-                        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                            continue;
-                        };
-                        if value.get("event").is_some() {
-                            if let Some(event) = Event::from_json(&value) {
-                                if notify.send(event).is_err() {
-                                    break;
-                                }
+            thread::spawn(move || {
+                for line in BufReader::new(reader).lines() {
+                    let Ok(line) = line else { break };
+                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if value.get("event").is_some() {
+                        if let Some(event) = Event::from_json(&value) {
+                            if notify.send(event).is_err() {
+                                break;
                             }
-                        } else if answers.send(value).is_err() {
-                            break;
                         }
+                    } else if answers.send(value).is_err() {
+                        break;
                     }
-                });
-            }
-            (Self { stream, responses }, events)
+                }
+            });
+            (
+                Self {
+                    writer: Some(writer),
+                    responses,
+                },
+                events,
+            )
+        }
+
+        /// Drop the write side, which ends a bridge's stdin.
+        pub(super) fn close(&mut self) {
+            self.writer = None;
         }
 
         pub(super) fn call(&mut self, request: &Request) -> Result<Value, ServiceError> {
@@ -179,8 +238,10 @@ mod remote {
             };
             let mut line = request.to_json().to_string();
             line.push('\n');
-            self.stream
+            let writer = self.writer.as_mut().ok_or_else(closed)?;
+            writer
                 .write_all(line.as_bytes())
+                .and_then(|()| writer.flush())
                 .map_err(|_| closed())?;
             let answer = self
                 .responses

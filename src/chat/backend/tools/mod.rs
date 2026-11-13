@@ -9,6 +9,7 @@
 //! directory; a few paths are protected from the model whatever the rules
 //! say, because a model that could edit its own policy would have none.
 
+pub(crate) mod delegate;
 mod edit_file;
 mod find_files;
 mod glob;
@@ -39,7 +40,8 @@ pub(crate) const SEARCH_FILES: &str = "search_files";
 pub(crate) const EDIT_FILE: &str = "edit_file";
 pub(crate) const WRITE_FILE: &str = "write_file";
 pub(crate) const RUN_COMMAND: &str = "run_command";
-pub(crate) const BUILTIN: [&str; 7] = [
+pub(crate) const DELEGATE: &str = "delegate";
+pub(crate) const BUILTIN: [&str; 8] = [
     READ_FILE,
     LIST_DIR,
     FIND_FILES,
@@ -47,6 +49,7 @@ pub(crate) const BUILTIN: [&str; 7] = [
     EDIT_FILE,
     WRITE_FILE,
     RUN_COMMAND,
+    DELEGATE,
 ];
 
 /// Files the model may never change, whatever `ahi.tools.yaml` says: the
@@ -99,6 +102,15 @@ pub(super) enum Arguments {
         argv: Vec<String>,
         timeout_secs: u64,
     },
+    /// A task for a worker. `worker` holds the one label, as a list so
+    /// policy matches it the way it matches an argv prefix.
+    Delegate {
+        worker: Vec<String>,
+        prompt: String,
+        /// The worker session to continue, from an earlier result.
+        task: Option<String>,
+        timeout_secs: u64,
+    },
 }
 
 /// A call whose arguments parsed into a tool's typed input.
@@ -115,6 +127,9 @@ impl PreparedCall {
     /// What the operator sees and approves: the path only. Patterns are
     /// never shown, so a prompt cannot carry model-chosen text.
     pub(super) fn target(&self) -> &str {
+        if let Arguments::Delegate { worker, .. } = &self.arguments {
+            return &worker[0];
+        }
         if self.path.is_empty() {
             "."
         } else {
@@ -122,11 +137,13 @@ impl PreparedCall {
         }
     }
 
-    /// The argv of a `run_command` call; empty for every other tool. This
-    /// is what command rules and session grants match.
+    /// The argv of a `run_command` call, the worker label of a `delegate`
+    /// call, empty for every other tool. This is what command and delegate
+    /// rules and session grants match.
     pub(super) fn argv(&self) -> &[String] {
         match &self.arguments {
             Arguments::Command { argv, .. } => argv,
+            Arguments::Delegate { worker, .. } => worker,
             _ => &[],
         }
     }
@@ -138,6 +155,14 @@ impl PreparedCall {
     pub(super) fn detail(&self) -> String {
         match &self.arguments {
             Arguments::Command { argv, .. } => run_command::render(argv),
+            Arguments::Delegate { prompt, task, .. } => format!(
+                "{} lines{}",
+                write_file::line_count(prompt),
+                match task {
+                    Some(task) => format!(", continuing task {task}"),
+                    None => String::new(),
+                }
+            ),
             Arguments::Edit { old, new, .. } => format!(
                 "+{} -{} lines",
                 write_file::line_count(new),
@@ -271,6 +296,21 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
                     "additionalProperties": false
                 }),
             },
+            DELEGATE => ToolSchema {
+                name: DELEGATE,
+                description: "Hand a task to a worker named by label and wait for its answer. The worker is another ahi on a host the operator configured; policy approves labels. Returns the worker's answer, its status, and whether it changed anything (effects: none, some, or unknown). Pass the returned task id to continue the same worker conversation.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "worker": string("The worker's label, as the policy names it"),
+                        "prompt": string("The task, verbatim"),
+                        "task": string("A task id from an earlier delegate result, to continue that conversation"),
+                        "timeout": integer("Seconds to wait for the worker", 1)
+                    },
+                    "required": ["worker", "prompt"],
+                    "additionalProperties": false
+                }),
+            },
             _ => ToolSchema {
                 name: RUN_COMMAND,
                 description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. Policy approves commands by argv prefix. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.",
@@ -317,6 +357,9 @@ struct RawArguments {
     overwrite: Option<bool>,
     argv: Option<Vec<String>>,
     timeout: Option<u64>,
+    worker: Option<String>,
+    prompt: Option<String>,
+    task: Option<String>,
 }
 
 const INVALID: &str = "invalid tool arguments";
@@ -355,11 +398,45 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         && raw.content.is_none()
         && raw.overwrite.is_none();
     let no_paging = raw.offset.is_none() && raw.limit.is_none();
-    let no_command = raw.argv.is_none() && raw.timeout.is_none();
+    let no_command = raw.argv.is_none() && (raw.timeout.is_none() || tool == DELEGATE);
+    let no_delegate = raw.worker.is_none() && raw.prompt.is_none() && raw.task.is_none();
     if tool != RUN_COMMAND {
         only(no_command)?;
     }
+    if tool != DELEGATE {
+        only(no_delegate)?;
+    }
     let arguments = match tool {
+        DELEGATE => {
+            only(path.is_empty() && no_paging && no_search && no_write)?;
+            let worker = raw.worker.ok_or(INVALID)?;
+            if !crate::hooks::policy::valid_rule_id(&worker) {
+                return Err("worker is a label of 1 to 64 letters, digits, '-', '_', or '.'");
+            }
+            let prompt = raw.prompt.ok_or(INVALID)?;
+            if prompt.trim().is_empty() {
+                return Err("prompt must not be empty");
+            }
+            if prompt.len() > delegate::MAX_PROMPT_BYTES {
+                return Err("prompt is larger than 1 MiB");
+            }
+            if let Some(task) = &raw.task {
+                if !crate::session::valid_id(task) {
+                    return Err("task is a session id from an earlier delegate result");
+                }
+            }
+            let timeout_secs = match raw.timeout {
+                None => delegate::DEFAULT_TIMEOUT_SECS,
+                Some(0) => return Err(INVALID),
+                Some(secs) => secs.min(delegate::MAX_TIMEOUT_SECS),
+            };
+            Arguments::Delegate {
+                worker: vec![worker],
+                prompt,
+                task: raw.task,
+                timeout_secs,
+            }
+        }
         RUN_COMMAND => {
             only(no_paging && no_search && no_write)?;
             let argv = raw.argv.ok_or(INVALID)?;
@@ -479,6 +556,7 @@ pub(super) struct Executed {
     pub(super) content: String,
     pub(super) write: Option<WriteReport>,
     pub(super) command: Option<CommandReport>,
+    pub(super) delegation: Option<delegate::DelegationReport>,
     pub(super) detail: Option<ToolDetail>,
 }
 
@@ -557,6 +635,22 @@ pub(super) fn execute(
     // matches, so counts are approximate for the screen header only.
     let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
+        Arguments::Delegate {
+            worker,
+            prompt,
+            task,
+            timeout_secs,
+        } => {
+            let outcome =
+                delegate::run(&worker[0], prompt, task.as_deref(), *timeout_secs, cancel)?;
+            Ok(Executed {
+                content: outcome.content,
+                detail: None,
+                write: None,
+                command: None,
+                delegation: Some(outcome.report),
+            })
+        }
         Arguments::Command { argv, timeout_secs } => {
             let cwd = workspace
                 .resolve(&call.path)
@@ -578,6 +672,7 @@ pub(super) fn execute(
                 }),
                 write: None,
                 command: Some(report),
+                delegation: None,
             })
         }
         Arguments::Edit {
@@ -594,6 +689,7 @@ pub(super) fn execute(
                 content,
                 write: Some(report),
                 command: None,
+                delegation: None,
                 detail: Some(ToolDetail::Write {
                     before: texts.before,
                     after: texts.after,
@@ -607,6 +703,7 @@ pub(super) fn execute(
                 content,
                 write: Some(report),
                 command: None,
+                delegation: None,
                 detail: Some(ToolDetail::Write {
                     before: texts.before,
                     after: texts.after,
@@ -625,6 +722,7 @@ pub(super) fn execute(
                 content,
                 write: None,
                 command: None,
+                delegation: None,
             })
         }
         Arguments::List => {
@@ -634,6 +732,7 @@ pub(super) fn execute(
                 content,
                 write: None,
                 command: None,
+                delegation: None,
                 detail: None,
             })
         }
@@ -648,6 +747,7 @@ pub(super) fn execute(
                 content,
                 write: None,
                 command: None,
+                delegation: None,
             })
         }
         Arguments::Search {
@@ -680,6 +780,7 @@ pub(super) fn execute(
                 content,
                 write: None,
                 command: None,
+                delegation: None,
             })
         }
     }
@@ -1257,6 +1358,61 @@ mod tests {
             Some("path is inside ahi's own directories, which tools cannot read")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delegate_arguments_name_a_label_a_prompt_and_an_optional_task() {
+        let ok = prepare(&call(
+            "c",
+            DELEGATE,
+            json!({"worker": "rust-ci", "prompt": "run the tests\nreport", "timeout": 9999}),
+        ))
+        .unwrap();
+        assert_eq!(ok.target(), "rust-ci");
+        assert_eq!(ok.argv(), ["rust-ci"]);
+        assert_eq!(ok.detail(), "2 lines");
+        assert_eq!(ok.grant_prefix(), "");
+        assert!(matches!(
+            ok.arguments,
+            Arguments::Delegate { timeout_secs, .. } if timeout_secs == delegate::MAX_TIMEOUT_SECS
+        ));
+        let task = "0f1e2d3c-4b5a-4978-8765-43210fedcba9";
+        let continued = prepare(&call(
+            "c",
+            DELEGATE,
+            json!({"worker": "docs", "prompt": "more", "task": task}),
+        ))
+        .unwrap();
+        assert_eq!(
+            continued.detail(),
+            format!("1 lines, continuing task {task}")
+        );
+        for (bad, message) in [
+            (json!({"worker": "a b", "prompt": "x"}), "label"),
+            (json!({"worker": "w", "prompt": "  "}), "empty"),
+            (
+                json!({"worker": "w", "prompt": "x", "task": "nope"}),
+                "session id",
+            ),
+            (
+                json!({"worker": "w", "prompt": "x", "path": "src"}),
+                INVALID,
+            ),
+            (json!({"prompt": "x"}), INVALID),
+        ] {
+            let error = prepare(&call("c", DELEGATE, bad.clone())).unwrap_err();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
+        assert_eq!(
+            prepare(&call(
+                "c",
+                RUN_COMMAND,
+                json!({"argv": ["true"], "worker": "w"})
+            ))
+            .unwrap_err(),
+            INVALID,
+            "delegate keys belong to delegate"
+        );
     }
 
     #[test]
