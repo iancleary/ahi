@@ -213,6 +213,33 @@ impl Recorder {
             .is_some_and(|session| session.over_budget())
     }
 
+    /// The model read a skill; written after the tool result it accompanies.
+    pub(crate) fn skill_load(&mut self, record: &crate::chat::backend::ToolRecord) {
+        if self.turn.is_none() {
+            return;
+        }
+        if let crate::chat::backend::ToolRecord::Skill {
+            name,
+            root,
+            file,
+            outcome,
+            sha256,
+            bytes,
+        } = record
+        {
+            if outcome != "ok" {
+                return;
+            }
+            self.record(Kind::SkillLoad {
+                name: name.clone(),
+                root: root.clone(),
+                file: file.clone(),
+                sha256: sha256.clone(),
+                bytes: *bytes,
+            });
+        }
+    }
+
     /// The turn completed.
     pub(crate) fn end_turn(&mut self) {
         self.close(Status::Ok, json!({"status": "ok", "origin": self.origin}));
@@ -331,6 +358,8 @@ mod tests {
                 Kind::Turn(turn) => format!("turn:{}", turn.status.as_str()),
                 Kind::ModelChange { model, .. } => format!("model:{model}"),
                 Kind::ThinkingChange { level } => format!("thinking:{level}"),
+                Kind::SkillLoad { name, .. } => format!("skill:{name}"),
+                Kind::Unknown(value) => format!("unknown:{}", value["type"]),
             })
             .collect()
     }

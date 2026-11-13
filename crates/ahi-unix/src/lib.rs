@@ -1,6 +1,7 @@
 //! The POSIX calls `ahi` needs and `std` does not expose: a signal handler
 //! that records a termination signal, `kill` aimed at a whole process group,
-//! and `flock` for one writer per session file.
+//! `flock` for one writer per file, and the credentials of a Unix socket's
+//! peer.
 //!
 //! This in-repo crate exists so `ahi` itself can keep `unsafe_code = "forbid"`:
 //! it declares each libc function it calls and has no dependencies, the same
@@ -79,6 +80,29 @@ extern "C" {
     /// BSD `flock(2)`, on Linux and macOS alike: an advisory lock on the
     /// open file description, released when its last descriptor closes.
     fn flock(fd: i32, operation: i32) -> i32;
+    /// POSIX `getuid(2)`.
+    fn getuid() -> u32;
+}
+
+// Linux: the peer's credentials come from `SO_PEERCRED`.
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn getsockopt(fd: i32, level: i32, name: i32, value: *mut Ucred, length: *mut u32) -> i32;
+}
+
+/// `struct ucred`: pid, uid, gid, each a 32-bit integer on every Linux ABI.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct Ucred {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+}
+
+// BSDs and macOS: `getpeereid(3)`.
+#[cfg(all(unix, not(target_os = "linux")))]
+extern "C" {
+    fn getpeereid(fd: i32, uid: *mut u32, gid: *mut u32) -> i32;
 }
 
 /// `LOCK_EX | LOCK_NB`: exclusive, and fail instead of waiting.
@@ -175,6 +199,60 @@ pub fn try_lock_exclusive(_file: &std::fs::File) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// The real user id of this process.
+#[cfg(unix)]
+pub fn current_uid() -> u32 {
+    // SAFETY: `getuid` takes nothing, touches no memory, and cannot fail.
+    unsafe { getuid() }
+}
+
+/// Not Unix: there is no uid; zero stands in and `peer_uid` never succeeds.
+#[cfg(not(unix))]
+pub fn current_uid() -> u32 {
+    0
+}
+
+/// The user id of the process at the other end of a connected Unix socket,
+/// as the kernel reports it: what a server checks before it reads a byte.
+#[cfg(target_os = "linux")]
+pub fn peer_uid<S: std::os::unix::io::AsRawFd>(socket: &S) -> std::io::Result<u32> {
+    const SOL_SOCKET: i32 = 1;
+    const SO_PEERCRED: i32 = 17;
+    let mut cred = Ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<Ucred>() as u32;
+    // SAFETY: `cred` and `length` are live locals of the sizes the call is
+    // told; the kernel writes at most `length` bytes into `cred`.
+    let rc = unsafe {
+        getsockopt(
+            socket.as_raw_fd(),
+            SOL_SOCKET,
+            SO_PEERCRED,
+            &mut cred,
+            &mut length,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
+/// The user id of the process at the other end of a connected Unix socket.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn peer_uid<S: std::os::unix::io::AsRawFd>(socket: &S) -> std::io::Result<u32> {
+    let (mut uid, mut gid) = (0u32, 0u32);
+    // SAFETY: two live locals the call writes one integer each into.
+    let rc = unsafe { getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -232,6 +310,13 @@ mod tests {
     }
 
     #[test]
+    fn the_peer_of_a_socket_pair_is_this_user() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(peer_uid(&a).unwrap(), current_uid());
+        assert_eq!(peer_uid(&b).unwrap(), current_uid());
+    }
+
+    #[test]
     fn a_locked_file_refuses_a_second_description_until_the_first_closes() {
         let path = std::env::temp_dir().join(format!("ahi-unix-lock-{}", std::process::id()));
         let first = std::fs::File::create(&path).unwrap();
@@ -239,7 +324,14 @@ mod tests {
         assert!(try_lock_exclusive(&first).unwrap());
         assert!(!try_lock_exclusive(&second).unwrap());
         drop(first);
-        assert!(try_lock_exclusive(&second).unwrap());
+        // Another test in this process may have forked while `first` was
+        // open; the child's copy of the descriptor holds the lock until it
+        // execs, so the release can lag by a few milliseconds.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !try_lock_exclusive(&second).unwrap() {
+            assert!(Instant::now() < deadline, "the lock was not released");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         drop(second);
         std::fs::remove_file(&path).unwrap();
     }

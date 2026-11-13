@@ -40,9 +40,8 @@ pub(crate) enum ActionKind {
     Skill,
 }
 
-/// The builtin tool `action: skill` rules govern. Until the tool exists,
-/// a skill rule governs no tool and advertises nothing; the names it
-/// approves are still visible to `ahi tools list` and `ahi doctor`.
+/// The builtin tool `action: skill` rules govern. The tool is advertised
+/// only when an approved skill exists and validates; the runtime decides.
 pub(crate) const SKILL_TOOL: &str = "load_skill";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,9 +136,7 @@ impl ActionPolicy {
 
     /// The verdict for loading the skill called `name`: a deny rule matches
     /// without regard to case (`Deploy` is `deploy` to a deny), an approval
-    /// only exactly, and a name no rule approves is denied. The `load_skill`
-    /// tool is its caller once it exists.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// only exactly, and a name no rule approves is denied.
     pub(crate) fn evaluate_skill(&self, name: &str) -> Verdict {
         let skill_rules = || {
             self.rules
@@ -478,9 +475,7 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                     ));
                 }
                 argv = Some(vec![skill]);
-                // No tool behind the rule yet: the names are visible, nothing
-                // is advertised to the model.
-                (ActionKind::Skill, Vec::new())
+                (ActionKind::Skill, vec![SKILL_TOOL.to_string()])
             }
             "tool_call" => {
                 let Some(tool) = rule.matcher.tool else {
@@ -1002,7 +997,7 @@ mod delegate_tests {
     }
 
     #[test]
-    fn skill_rules_name_a_skill_and_advertise_no_tool_yet() {
+    fn skill_rules_name_a_skill_and_govern_load_skill() {
         let policy = parse_rules(
             "- {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n\
              - {id: release, action: skill, match: {skill: release}, effect: approve, ask: true}\n\
@@ -1010,10 +1005,7 @@ mod delegate_tests {
              - {id: twice, action: skill, match: {skill: rust-review}, effect: approve}\n",
         )
         .unwrap();
-        assert!(
-            policy.advertised_tools().is_empty(),
-            "no tool behind the rule yet"
-        );
+        assert_eq!(policy.advertised_tools(), ["load_skill"]);
         assert_eq!(policy.approved_skills(), ["rust-review", "release"]);
         assert_eq!(policy.rules[0].action, ActionKind::Skill);
         assert_eq!(policy.rules[0].argv, Some(vec!["rust-review".to_string()]));

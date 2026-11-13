@@ -772,7 +772,7 @@ mod tests {
             ..Default::default()
         };
         let messages = [ChatMessage::new(TranscriptRole::Operator, "q")];
-        let schemas = crate::chat::backend::tools::schemas(&["read_file".to_string()]);
+        let schemas = crate::chat::backend::tools::schemas(&["read_file".to_string()], &[]);
         let context = RequestContext {
             model: "claude-x",
             thinking: ThinkingLevel::High,

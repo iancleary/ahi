@@ -91,6 +91,11 @@ pub(super) struct ToolRuntime {
     state_dir: PathBuf,
     turn: TurnContext,
     advertised: Vec<String>,
+    /// Every skill both roots hold, for `load_skill`; names the policy does
+    /// not approve are refused by the rule, not by their absence here.
+    catalog: crate::skills::Catalog,
+    /// The approved, valid skills the tool description lists.
+    skills: Vec<crate::skills::Skill>,
     gateway: String,
     destination: String,
     grants: SessionGrants,
@@ -138,16 +143,33 @@ impl ToolRuntime {
         let Some(policy) = policy else {
             return Ok(None);
         };
-        let advertised = policy.advertised_tools();
+        let workspace = Workspace::open(directory, state)?;
+        // Skills are enumerated once per turn from the turn's canonical
+        // working directory (never a session header's `cwd`) and the
+        // operator root; only approved names that validate are offered.
+        let catalog = crate::skills::enumerate(workspace.root(), Some(&state.config));
+        let approved = policy.approved_skills();
+        let skills: Vec<crate::skills::Skill> = catalog
+            .skills
+            .iter()
+            .filter(|skill| approved.contains(&skill.name))
+            .cloned()
+            .collect();
+        let mut advertised = policy.advertised_tools();
+        if skills.is_empty() {
+            advertised.retain(|tool| tool != tools::LOAD_SKILL);
+        }
         if advertised.is_empty() {
             return Ok(None);
         }
         Ok(Some(Self {
-            workspace: Workspace::open(directory, state)?,
+            workspace,
             state_dir: state.state.clone(),
             turn,
             policy,
             advertised,
+            catalog,
+            skills,
             gateway: gateway.to_string(),
             destination: destination.to_string(),
             grants,
@@ -158,7 +180,7 @@ impl ToolRuntime {
 
     /// Protocol-neutral schemas of the advertised builtins.
     pub(super) fn schemas(&self) -> Vec<tools::ToolSchema> {
-        tools::schemas(&self.advertised)
+        tools::schemas(&self.advertised, &self.skills)
     }
 
     /// Decide and run one batch, emitting `ToolResult` then `ToolCallReturned`
@@ -244,10 +266,13 @@ impl ToolRuntime {
     }
 
     fn plan(&self, prepared: PreparedCall) -> Plan {
-        match self
-            .policy
-            .evaluate(prepared.tool, &prepared.path, prepared.argv())
-        {
+        let verdict = if prepared.tool == tools::LOAD_SKILL {
+            self.policy.evaluate_skill(prepared.target())
+        } else {
+            self.policy
+                .evaluate(prepared.tool, &prepared.path, prepared.argv())
+        };
+        match verdict {
             Verdict::Deny {
                 rule_id: Some(rule),
             } => Plan::Done(Box::new(denied(
@@ -349,7 +374,11 @@ impl ToolRuntime {
                         .rule(&rule)
                         .and_then(|rule| rule.argv.clone())
                         .unwrap_or_default();
-                    if !prefix.is_empty() || prepared.tool == tools::RUN_COMMAND {
+                    // A skill grant is the name alone (`argv`), under the
+                    // root, like a command grant for a rule without a path.
+                    if !prefix.is_empty()
+                        || matches!(prepared.tool, tools::RUN_COMMAND | tools::LOAD_SKILL)
+                    {
                         if let Ok(mut grants) = self.grants.lock() {
                             grants.push(SessionGrant {
                                 root: self.workspace.root().to_path_buf(),
@@ -408,7 +437,13 @@ impl ToolRuntime {
                 *timeout_secs = (*timeout_secs).min(remaining.as_secs().max(1));
             }
         }
-        let executed = tools::execute(&bounded, &self.workspace, &toolchain_env, &self.turn.cancel);
+        let executed = tools::execute(
+            &bounded,
+            &self.workspace,
+            &self.catalog,
+            &toolchain_env,
+            &self.turn.cancel,
+        );
         let elapsed = started.elapsed();
         match executed {
             Ok(tools::Executed {
@@ -416,11 +451,15 @@ impl ToolRuntime {
                 write,
                 command,
                 delegation,
+                skill,
                 detail,
             }) => {
                 let mut record = None;
                 if let Some(report) = write {
                     record = Some(self.record_write(prepared, &report, "ok"));
+                }
+                if let Some(report) = skill {
+                    record = Some(self.record_skill(&report, "ok"));
                 }
                 if let Some(report) = command {
                     record = Some(self.record_command(prepared, &report, "ok", Some(true)));
@@ -461,6 +500,19 @@ impl ToolRuntime {
                     };
                     record =
                         Some(self.record_command(prepared, &none, failure.message, failure.ran));
+                }
+                if prepared.tool == tools::LOAD_SKILL {
+                    let none = tools::SkillReport {
+                        name: prepared.target().to_string(),
+                        root: String::new(),
+                        file: match &prepared.arguments {
+                            Arguments::Skill { file, .. } => file.clone(),
+                            _ => None,
+                        },
+                        sha256: String::new(),
+                        bytes: 0,
+                    };
+                    record = Some(self.record_skill(&none, failure.message));
                 }
                 if prepared.tool == tools::DELEGATE {
                     let none = tools::delegate::DelegationReport {
@@ -522,6 +574,21 @@ impl ToolRuntime {
             duration_ms: report.duration_ms,
         };
         self.audit(&record, &report.env_names);
+        record
+    }
+
+    /// The record of one skill load: name, root, file, hash, size. Never
+    /// the text.
+    fn record_skill(&self, report: &tools::SkillReport, outcome: &str) -> ToolRecord {
+        let record = ToolRecord::Skill {
+            name: report.name.clone(),
+            root: report.root.clone(),
+            file: report.file.clone(),
+            outcome: outcome.to_string(),
+            sha256: report.sha256.clone(),
+            bytes: report.bytes,
+        };
+        self.audit(&record, &[]);
         record
     }
 
@@ -592,6 +659,27 @@ impl ToolRuntime {
                     exit_code: *exit_code,
                     duration_ms: *duration_ms,
                     env_names,
+                },
+            ),
+            ToolRecord::Skill {
+                name,
+                root,
+                file,
+                outcome,
+                sha256,
+                bytes,
+            } => crate::hooks::audit::append_skill(
+                &self.state_dir,
+                &crate::hooks::audit::SkillEvent {
+                    origin: caller.origin,
+                    run_id: caller.run_id.as_deref(),
+                    repo: self.workspace.root(),
+                    name,
+                    root,
+                    file: file.as_deref(),
+                    outcome,
+                    sha256,
+                    bytes: *bytes,
                 },
             ),
             ToolRecord::Delegate {

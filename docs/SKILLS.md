@@ -1,6 +1,6 @@
 # Skills in ahi: shape of a 0.17.0 target
 
-Status: the design, written 2026-11-12 as a study and kept as the reference. Built so far for 0.17.0: `action: skill` rules (`src/tool_policy.rs`), the loader and its refusals (`src/skills/`), `.ahi/skills` protected from the model's writes, and the `ahi doctor` lines. The `load_skill` tool and the `skill_load` record follow in their own PRs. Where the text below says "would" or "proposed", the code is the authority; the owner decisions at the end were taken (operator root kept; a tolerant session reader).
+Status: the design, written 2026-11-12 as a study and kept as the reference. Built so far for 0.17.0: `action: skill` rules (`src/tool_policy.rs`), the loader and its refusals (`src/skills/`), `.ahi/skills` protected from the model's writes, the `ahi doctor` lines, the `load_skill` builtin (`src/chat/backend/tools/mod.rs`), and the record: a `skill_load` session entry, a ledger record and `tools.skills` count, an `audit.log` line, the `$name` input prefix, and a session reader that keeps an unknown entry type in its place instead of refusing the file. Where the text below says "would" or "proposed", the code is the authority; the owner decisions at the end were taken (operator root kept; a tolerant session reader).
 
 ## What a skill is
 

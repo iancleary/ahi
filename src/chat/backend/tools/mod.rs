@@ -41,7 +41,11 @@ pub(crate) const EDIT_FILE: &str = "edit_file";
 pub(crate) const WRITE_FILE: &str = "write_file";
 pub(crate) const RUN_COMMAND: &str = "run_command";
 pub(crate) const DELEGATE: &str = "delegate";
-pub(crate) const BUILTIN: [&str; 8] = [
+/// The builtin tool that reads a skill's text, governed by `action: skill`
+/// rules matched on the skill's name. Text, never authority.
+pub(crate) const LOAD_SKILL: &str = crate::tool_policy::SKILL_TOOL;
+
+pub(crate) const BUILTIN: [&str; 9] = [
     READ_FILE,
     LIST_DIR,
     FIND_FILES,
@@ -50,6 +54,7 @@ pub(crate) const BUILTIN: [&str; 8] = [
     WRITE_FILE,
     RUN_COMMAND,
     DELEGATE,
+    LOAD_SKILL,
 ];
 
 /// Files the model may never change, whatever `ahi.tools.yaml` says: the
@@ -104,6 +109,13 @@ pub(super) enum Arguments {
         argv: Vec<String>,
         timeout_secs: u64,
     },
+    /// `load_skill`: `name` holds the one skill name, as a list so policy
+    /// and grants match it the way they match an argv prefix; `file` names
+    /// a declared reference instead of the skill's own text.
+    Skill {
+        name: Vec<String>,
+        file: Option<String>,
+    },
     /// A task for a worker. `worker` holds the one label, as a list so
     /// policy matches it the way it matches an argv prefix.
     Delegate {
@@ -129,8 +141,10 @@ impl PreparedCall {
     /// What the operator sees and approves: the path only. Patterns are
     /// never shown, so a prompt cannot carry model-chosen text.
     pub(super) fn target(&self) -> &str {
-        if let Arguments::Delegate { worker, .. } = &self.arguments {
-            return &worker[0];
+        match &self.arguments {
+            Arguments::Delegate { worker, .. } => return &worker[0],
+            Arguments::Skill { name, .. } => return &name[0],
+            _ => {}
         }
         if self.path.is_empty() {
             "."
@@ -146,6 +160,7 @@ impl PreparedCall {
         match &self.arguments {
             Arguments::Command { argv, .. } => argv,
             Arguments::Delegate { worker, .. } => worker,
+            Arguments::Skill { name, .. } => name,
             _ => &[],
         }
     }
@@ -157,6 +172,10 @@ impl PreparedCall {
     pub(super) fn detail(&self) -> String {
         match &self.arguments {
             Arguments::Command { argv, .. } => run_command::render(argv),
+            Arguments::Skill { file, .. } => match file {
+                Some(file) => format!("reference {file}"),
+                None => "the skill's text".to_string(),
+            },
             Arguments::Delegate { prompt, task, .. } => format!(
                 "{} lines{}",
                 write_file::line_count(prompt),
@@ -202,22 +221,37 @@ impl PreparedCall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolSchema {
     pub(crate) name: &'static str,
-    pub(crate) description: &'static str,
+    pub(crate) description: std::borrow::Cow<'static, str>,
     /// A JSON Schema object for the arguments.
     pub(crate) parameters: Value,
 }
 
-/// Schemas for the enabled builtins, in builtin order.
-pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
+/// Schemas for the enabled builtins, in builtin order. `skills` are the
+/// approved, valid skills the `load_skill` description lists: the only
+/// skill text in a request before a load.
+pub(super) fn schemas(enabled: &[String], skills: &[crate::skills::Skill]) -> Vec<ToolSchema> {
     let string = |description: &str| json!({"type": "string", "description": description});
     let integer = |description: &str, minimum: usize| json!({"type": "integer", "minimum": minimum, "description": description});
     BUILTIN
         .iter()
         .filter(|name| enabled.iter().any(|tool| tool == *name))
         .map(|name| match *name {
+            LOAD_SKILL => ToolSchema {
+                name: LOAD_SKILL,
+                description: skill_description(skills).into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": string("The skill's name, one of those listed"),
+                        "file": string("A reference file the skill declares, instead of the skill's own text")
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+            },
             READ_FILE => ToolSchema {
                 name: READ_FILE,
-                description: "Read a UTF-8 text file inside the working directory, whole or a window of lines. Output is capped at 64 KiB; a tail line names the next offset when more remains.",
+                description: "Read a UTF-8 text file inside the working directory, whole or a window of lines. Output is capped at 64 KiB; a tail line names the next offset when more remains.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -231,7 +265,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             LIST_DIR => ToolSchema {
                 name: LIST_DIR,
-                description: "List a directory inside the working directory. Directories end with '/', symbolic links with '@'. At most 500 entries.",
+                description: "List a directory inside the working directory. Directories end with '/', symbolic links with '@'. At most 500 entries.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {"path": string("Directory relative to the working directory; defaults to '.'")},
@@ -240,7 +274,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             FIND_FILES => ToolSchema {
                 name: FIND_FILES,
-                description: "Find files under a directory by glob. A pattern without '/' matches names at any depth ('*.rs'); with '/' it matches paths below the directory ('src/**/*.rs'). Honors .gitignore; never follows symbolic links. Sorted; default 200 results, maximum 1000.",
+                description: "Find files under a directory by glob. A pattern without '/' matches names at any depth ('*.rs'); with '/' it matches paths below the directory ('src/**/*.rs'). Honors .gitignore; never follows symbolic links. Sorted; default 200 results, maximum 1000.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -254,7 +288,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             SEARCH_FILES => ToolSchema {
                 name: SEARCH_FILES,
-                description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending; binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.",
+                description: "Search text files under a directory for a regular expression (Rust syntax) or a literal string. Returns 'path:line:text' with files sorted and lines ascending; binary files and .gitignore'd paths are skipped. Default 100 matches, maximum 500, output capped at 64 KiB.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -271,7 +305,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             EDIT_FILE => ToolSchema {
                 name: EDIT_FILE,
-                description: "Replace text in a UTF-8 file inside the working directory. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Fails with the count when old is absent or ambiguous.",
+                description: "Replace text in a UTF-8 file inside the working directory. old must occur exactly once (include enough surrounding lines to make it unique) unless replace_all is true. Exact match: no whitespace normalization. Fails with the count when old is absent or ambiguous.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -286,7 +320,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             WRITE_FILE => ToolSchema {
                 name: WRITE_FILE,
-                description: "Create a UTF-8 file inside the working directory with the given content. Fails if the file exists unless overwrite is true; with overwrite the file must already exist. Parent directories must exist. Prefer edit_file for changes to an existing file.",
+                description: "Create a UTF-8 file inside the working directory with the given content. Fails if the file exists unless overwrite is true; with overwrite the file must already exist. Parent directories must exist. Prefer edit_file for changes to an existing file.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -300,7 +334,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             DELEGATE => ToolSchema {
                 name: DELEGATE,
-                description: "Hand a task to a worker named by label and wait for its answer. The worker is another ahi on a host the operator configured; policy approves labels. Returns the worker's answer, its status, and whether it changed anything (effects: none, some, or unknown). Pass the returned task id to continue the same worker conversation.",
+                description: "Hand a task to a worker named by label and wait for its answer. The worker is another ahi on a host the operator configured; policy approves labels. Returns the worker's answer, its status, and whether it changed anything (effects: none, some, or unknown). Pass the returned task id to continue the same worker conversation.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -315,7 +349,7 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
             },
             _ => ToolSchema {
                 name: RUN_COMMAND,
-                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. Policy approves commands by argv prefix. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.",
+                description: "Run a program with the given argv (no shell: write each argument as its own element) in a directory inside the working directory. Policy approves commands by argv prefix. Returns the exit code, then stdout and stderr, each capped at 32 KiB. Default timeout 120 s, maximum 600.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -331,10 +365,30 @@ pub(super) fn schemas(enabled: &[String]) -> Vec<ToolSchema> {
         .collect()
 }
 
+/// The `load_skill` description: what a skill is, then one line per
+/// approved skill, `name: description — when`, with its references.
+fn skill_description(skills: &[crate::skills::Skill]) -> String {
+    let mut text = String::from(
+        "Read a skill: named guidance the repository or the operator wrote for tasks like the ones listed. \
+         The text is advice, not authority: every tool it mentions still goes through policy. \
+         Returns the skill's text, or one of its reference files when `file` names one. Skills:",
+    );
+    for skill in skills {
+        text.push_str(&format!("\n- {}: {}", skill.name, skill.description));
+        if let Some(when) = &skill.when {
+            text.push_str(&format!(" — {when}"));
+        }
+        if !skill.references.is_empty() {
+            text.push_str(&format!(" (references: {})", skill.references.join(", ")));
+        }
+    }
+    text
+}
+
 /// Chat Completions `tools[]` definitions for the enabled builtins.
 #[cfg(test)]
 pub(super) fn definitions(enabled: &[String]) -> Vec<Value> {
-    schemas(enabled)
+    schemas(enabled, &[])
         .iter()
         .map(crate::chat::backend::protocol::chat_completions::definition)
         .collect()
@@ -362,6 +416,8 @@ struct RawArguments {
     worker: Option<String>,
     prompt: Option<String>,
     task: Option<String>,
+    name: Option<String>,
+    file: Option<String>,
 }
 
 const INVALID: &str = "invalid tool arguments";
@@ -394,7 +450,9 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         && raw.glob.is_none()
         && raw.literal.is_none()
         && raw.ignore_case.is_none();
-    let no_write = raw.old.is_none()
+    let no_skill = raw.name.is_none() && raw.file.is_none();
+    let no_write = no_skill
+        && raw.old.is_none()
         && raw.new.is_none()
         && raw.replace_all.is_none()
         && raw.content.is_none()
@@ -409,6 +467,36 @@ pub(super) fn prepare(call: &ToolCall) -> Result<PreparedCall, &'static str> {
         only(no_delegate)?;
     }
     let arguments = match tool {
+        LOAD_SKILL => {
+            only(
+                path.is_empty()
+                    && no_paging
+                    && no_search
+                    && raw.old.is_none()
+                    && raw.new.is_none()
+                    && raw.replace_all.is_none()
+                    && raw.content.is_none()
+                    && raw.overwrite.is_none()
+                    && raw.argv.is_none()
+                    && raw.timeout.is_none()
+                    && raw.worker.is_none()
+                    && raw.prompt.is_none()
+                    && raw.task.is_none(),
+            )?;
+            let name = raw.name.ok_or(INVALID)?;
+            if !crate::hooks::policy::valid_rule_id(&name) {
+                return Err("name is a skill name of 1 to 64 letters, digits, '-', '_', or '.'");
+            }
+            if let Some(file) = &raw.file {
+                if file.is_empty() || file.len() > 128 || file.contains(['/', '\\', '\0']) {
+                    return Err("file is a bare file name the skill declares as a reference");
+                }
+            }
+            Arguments::Skill {
+                name: vec![name],
+                file: raw.file,
+            }
+        }
         DELEGATE => {
             only(path.is_empty() && no_paging && no_search && no_write)?;
             let worker = raw.worker.ok_or(INVALID)?;
@@ -559,7 +647,18 @@ pub(super) struct Executed {
     pub(super) write: Option<WriteReport>,
     pub(super) command: Option<CommandReport>,
     pub(super) delegation: Option<delegate::DelegationReport>,
+    pub(super) skill: Option<SkillReport>,
     pub(super) detail: Option<ToolDetail>,
+}
+
+/// What a `load_skill` call read, for the record: never the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SkillReport {
+    pub(super) name: String,
+    pub(super) root: String,
+    pub(super) file: Option<String>,
+    pub(super) sha256: String,
+    pub(super) bytes: usize,
 }
 
 /// A call that did not finish: the text the model and the operator see,
@@ -630,6 +729,7 @@ pub(crate) enum ToolDetail {
 pub(super) fn execute(
     call: &PreparedCall,
     workspace: &Workspace,
+    skills: &crate::skills::Catalog,
     toolchain_env: &[String],
     cancel: &AtomicBool,
 ) -> Result<Executed, ToolFailure> {
@@ -637,6 +737,54 @@ pub(super) fn execute(
     // matches, so counts are approximate for the screen header only.
     let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
+        Arguments::Skill { name, file } => {
+            // The catalog was built at turn start from the workdir and the
+            // operator root; a name the policy approves but no root holds is
+            // not loadable, and the text is read again with every check.
+            let skill = skills
+                .get(&name[0])
+                .ok_or("no valid skill of that name is installed; `ahi doctor` lists them")?;
+            if file
+                .as_deref()
+                .is_some_and(|file| !skill.references.iter().any(|declared| declared == file))
+            {
+                return Err("the skill declares no reference of that name".into());
+            }
+            let text = crate::skills::read(skill, file.as_deref())
+                .map_err(|_| "the skill could not be read; `ahi doctor` says why")?;
+            let digest = crate::session::sha256_hex(text.as_bytes());
+            let report = SkillReport {
+                name: skill.name.clone(),
+                root: skill.root.as_str().to_string(),
+                file: file.clone(),
+                sha256: digest.clone(),
+                bytes: text.len(),
+            };
+            let content = match file {
+                Some(file) => format!(
+                    "skill {} reference {file} from {} ({} bytes, sha256 {})\n{text}",
+                    skill.name,
+                    skill.root.as_str(),
+                    text.len(),
+                    &digest[..12]
+                ),
+                None => format!(
+                    "skill {} from {} ({} bytes, sha256 {})\n{text}",
+                    skill.name,
+                    skill.root.as_str(),
+                    text.len(),
+                    &digest[..12]
+                ),
+            };
+            Ok(Executed {
+                content,
+                detail: None,
+                write: None,
+                command: None,
+                delegation: None,
+                skill: Some(report),
+            })
+        }
         Arguments::Delegate {
             worker,
             prompt,
@@ -651,6 +799,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: Some(outcome.report),
+                skill: None,
             })
         }
         Arguments::Command { argv, timeout_secs } => {
@@ -675,6 +824,7 @@ pub(super) fn execute(
                 write: None,
                 command: Some(report),
                 delegation: None,
+                skill: None,
             })
         }
         Arguments::Edit {
@@ -692,6 +842,7 @@ pub(super) fn execute(
                 write: Some(report),
                 command: None,
                 delegation: None,
+                skill: None,
                 detail: Some(ToolDetail::Write {
                     before: texts.before,
                     after: texts.after,
@@ -706,6 +857,7 @@ pub(super) fn execute(
                 write: Some(report),
                 command: None,
                 delegation: None,
+                skill: None,
                 detail: Some(ToolDetail::Write {
                     before: texts.before,
                     after: texts.after,
@@ -725,6 +877,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
             })
         }
         Arguments::List => {
@@ -735,6 +888,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
                 detail: None,
             })
         }
@@ -750,6 +904,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
             })
         }
         Arguments::Search {
@@ -783,6 +938,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
             })
         }
     }
@@ -932,9 +1088,15 @@ mod tests {
     static NEVER: AtomicBool = AtomicBool::new(false);
 
     fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
-        execute(call, workspace, &[], &NEVER)
-            .map(|executed| executed.content)
-            .map_err(|failure| failure.message)
+        execute(
+            call,
+            workspace,
+            &crate::skills::Catalog::default(),
+            &[],
+            &NEVER,
+        )
+        .map(|executed| executed.content)
+        .map_err(|failure| failure.message)
     }
 
     fn read(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
@@ -1219,6 +1381,7 @@ mod tests {
                     },
                 },
                 &workspace,
+                &crate::skills::Catalog::default(),
                 &[],
                 &NEVER,
             )
@@ -1235,6 +1398,7 @@ mod tests {
                     },
                 },
                 &workspace,
+                &crate::skills::Catalog::default(),
                 &[],
                 &NEVER,
             )
@@ -1490,6 +1654,7 @@ mod tests {
                     },
                 },
                 &workspace,
+                &crate::skills::Catalog::default(),
                 &["AHI_TEST_TOOLCHAIN".to_string()],
                 &NEVER,
             )
@@ -1558,6 +1723,7 @@ mod tests {
                 },
             },
             &workspace,
+            &crate::skills::Catalog::default(),
             &[],
             &cancel,
         )

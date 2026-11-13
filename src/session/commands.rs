@@ -138,6 +138,32 @@ fn render(entry: &Entry) -> String {
         ),
         Kind::ModelChange { gateway, model } => format!("— model {gateway}/{model}\n"),
         Kind::ThinkingChange { level } => format!("— thinking {level}\n"),
+        Kind::SkillLoad {
+            name,
+            root,
+            file,
+            bytes,
+            ..
+        } => format!(
+            "— skill {name}{} ({root}, {})\n",
+            match file {
+                Some(file) => format!(" {file}"),
+                None => String::new(),
+            },
+            size(*bytes)
+        ),
+        Kind::Unknown(value) => format!(
+            "— {} (an entry this ahi does not know)\n",
+            value["type"].as_str().unwrap_or("?")
+        ),
+    }
+}
+
+fn size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
     }
 }
 

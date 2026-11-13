@@ -491,7 +491,7 @@ mod tests {
         fs::write(dir.join(FILE_NAME), example("skills").unwrap().text).unwrap();
         let got = summary(&dir).unwrap().unwrap();
         assert_eq!(got.skills, ["rust-review", "release"]);
-        assert!(got.advertised.iter().all(|tool| tool != "load_skill"));
+        assert!(got.advertised.iter().any(|tool| tool == "load_skill"));
         assert_eq!(
             doctor_lines(&dir)[3],
             "skills approved: rust-review, release"

@@ -903,6 +903,9 @@ impl Turn {
                 ledger.returned(exit_code, record.as_deref());
                 live.recorder
                     .tool_result(&call_id, &tool, &output, &content, exit_code);
+                if let Some(record) = record.as_deref() {
+                    live.recorder.skill_load(record);
+                }
                 live.fan_out_fresh(&self.session);
             }
             ResponseEvent::Usage {
