@@ -2437,3 +2437,268 @@ fn an_explicit_actions_file_replaces_the_workspace_policy() {
     drop(backend);
     assert!(server.join().unwrap().is_empty());
 }
+
+const SKILL_RULES: &str = "version: 1\nrules:\n\
+    - {id: reads, action: tool_call, match: {tool: read_file, path: src}, effect: approve}\n\
+    - {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n\
+    - {id: release, action: skill, match: {skill: release}, effect: approve, ask: true}\n\
+    - {id: ghost, action: skill, match: {skill: ghost}, effect: approve}\n\
+    - {id: no-deploy, action: skill, match: {skill: deploy}, effect: deny}\n";
+
+/// The fixture with three repo skills: `rust-review` with a reference,
+/// `release`, and `deploy`; `ghost` is approved but installed nowhere.
+fn skill_fixture(url: &str, actions: &str) -> ToolFixture {
+    let fixture = ToolFixture::new(url, actions, json!({"id": "vendor/model"}));
+    let skills = fixture.workspace.join(".ahi/skills");
+    for (name, front, body) in [
+        (
+            "rust-review",
+            "name: rust-review\ndescription: Review Rust changes\nwhen: before a PR\nreferences: [checklist.md]\n",
+            "# Review\nLook twice.\n",
+        ),
+        ("release", "name: release\ndescription: Cut a release\n", "tag it\n"),
+        ("deploy", "name: deploy\ndescription: Ship\n", "never\n"),
+    ] {
+        fs::create_dir_all(skills.join(name)).unwrap();
+        fs::write(
+            skills.join(name).join("SKILL.md"),
+            format!("---\n{front}---\n{body}"),
+        )
+        .unwrap();
+    }
+    fs::write(skills.join("rust-review/checklist.md"), "- clippy\n").unwrap();
+    fixture
+}
+
+fn advertised_tools(request: &serde_json::Value) -> Vec<String> {
+    request["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_approved_skill_is_advertised_by_description_and_loaded_as_a_tool_result() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[
+            ("c1", "load_skill", json!({"name": "rust-review"})),
+            (
+                "c2",
+                "load_skill",
+                json!({"name": "rust-review", "file": "checklist.md"}),
+            ),
+            (
+                "c3",
+                "load_skill",
+                json!({"name": "rust-review", "file": "notes.md"}),
+            ),
+            (
+                "c4",
+                "load_skill",
+                json!({"name": "rust-review", "file": "../secret"}),
+            ),
+            ("c5", "load_skill", json!({"name": "deploy"})),
+            ("c6", "load_skill", json!({"name": "ghost"})),
+            ("c7", "load_skill", json!({"name": "unknown"})),
+            (
+                "c8",
+                "load_skill",
+                json!({"name": "rust-review", "path": "src"}),
+            ),
+        ]),
+        text_stream("done"),
+    ]);
+    let fixture = skill_fixture(&url, SKILL_RULES);
+    let (events, approvals) = collect_answering(&mut fixture.backend(), request(), vec![]);
+    assert!(approvals.is_empty());
+    let got = results(&events);
+    assert_eq!(got[0].0, "c1");
+    assert_eq!(got[0].1, 0);
+    assert!(
+        got[0]
+            .2
+            .starts_with("skill rust-review from repo (21 bytes, sha256 "),
+        "{}",
+        got[0].2
+    );
+    assert!(
+        got[0].2.ends_with("\n# Review\nLook twice.\n"),
+        "{}",
+        got[0].2
+    );
+    assert!(
+        got[1]
+            .2
+            .starts_with("skill rust-review reference checklist.md from repo (9 bytes, sha256 "),
+        "{}",
+        got[1].2
+    );
+    assert!(got[1].2.ends_with("\n- clippy\n"));
+    assert_eq!(
+        got[2],
+        (
+            "c3".into(),
+            1,
+            "error: the skill declares no reference of that name".into()
+        )
+    );
+    assert_eq!(
+        got[3],
+        (
+            "c4".into(),
+            1,
+            "error: file is a bare file name the skill declares as a reference".into()
+        )
+    );
+    assert_eq!(
+        got[4],
+        ("c5".into(), 126, "denied: denied by rule no-deploy".into())
+    );
+    assert_eq!(
+        got[5],
+        (
+            "c6".into(),
+            1,
+            "error: no valid skill of that name is installed; `ahi doctor` lists them".into()
+        )
+    );
+    assert_eq!(
+        got[6],
+        (
+            "c7".into(),
+            126,
+            "denied: no ahi.tools.yaml rule allows this call".into()
+        )
+    );
+    assert_eq!(got[7].0, "c8");
+    assert_eq!(
+        got[7].1, 1,
+        "a path does not belong to load_skill: {}",
+        got[7].2
+    );
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    let requests = server.join().unwrap();
+    let first = request_body(&requests[0]);
+    assert_eq!(advertised_tools(&first), ["read_file", "load_skill"]);
+    let description = first["tools"][1]["function"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        description.contains(
+            "- rust-review: Review Rust changes — before a PR (references: checklist.md)"
+        ),
+        "{description}"
+    );
+    assert!(
+        description.contains("- release: Cut a release"),
+        "{description}"
+    );
+    assert!(
+        !description.contains("deploy"),
+        "a denied skill is not offered: {description}"
+    );
+    assert!(
+        !description.contains("ghost"),
+        "an absent skill is not offered: {description}"
+    );
+    assert!(
+        !description.contains("Look twice"),
+        "no body before a load: {description}"
+    );
+}
+
+#[test]
+fn a_skill_under_an_ask_rule_prompts_with_its_name_and_a_grant_holds_for_the_session() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[
+            ("c1", "load_skill", json!({"name": "release"})),
+            ("c2", "load_skill", json!({"name": "release"})),
+        ]),
+        // Granted for the session by c1's answer: no second prompt.
+        calls_stream(&[("c3", "load_skill", json!({"name": "release"}))]),
+        text_stream("done"),
+    ]);
+    let fixture = skill_fixture(&url, SKILL_RULES);
+    let (events, approvals) = collect_answering(
+        &mut fixture.backend(),
+        request(),
+        vec![Some(vec![
+            ToolDecision::ApproveForSession,
+            ToolDecision::Deny,
+        ])],
+    );
+    assert_eq!(
+        approvals,
+        vec![vec![
+            ProposedAction {
+                call_id: "c1".into(),
+                tool: "load_skill".into(),
+                target: "release".into(),
+                grant_prefix: "".into(),
+                detail: "the skill's text".into(),
+            },
+            ProposedAction {
+                call_id: "c2".into(),
+                tool: "load_skill".into(),
+                target: "release".into(),
+                grant_prefix: "".into(),
+                detail: "the skill's text".into(),
+            },
+        ]],
+        "the prompt carries the name and what is read, never the text"
+    );
+    let got = results(&events);
+    assert!(got[0].2.ends_with("\ntag it\n"), "{}", got[0].2);
+    assert_eq!(
+        got[1],
+        ("c2".into(), 126, "denied: denied by the operator".into())
+    );
+    assert_eq!(got[2].0, "c3");
+    assert_eq!(got[2].1, 0, "granted for the session: {}", got[2].2);
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    assert_eq!(server.join().unwrap().len(), 3);
+
+    // Unattended, the same ask is a denial the model is told about.
+    let (url, _server) = server_sequence(vec![
+        calls_stream(&[("c1", "load_skill", json!({"name": "release"}))]),
+        text_stream("done"),
+    ]);
+    let fixture = skill_fixture(&url, SKILL_RULES);
+    let (events, _) = collect_answering(
+        &mut fixture.backend(),
+        request(),
+        vec![Some(vec![ToolDecision::Unattended])],
+    );
+    assert_eq!(
+        results(&events)[0],
+        (
+            "c1".into(),
+            126,
+            "denied: this call needs operator approval and no operator is attending the turn"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn without_a_skill_rule_nothing_is_advertised_and_a_planted_skill_is_invisible() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[("c1", "load_skill", json!({"name": "rust-review"}))]),
+        text_stream("done"),
+    ]);
+    // The skills are on disk; the policy names none of them.
+    let fixture = skill_fixture(&url, APPROVE_READS);
+    let (events, _) = collect_answering(&mut fixture.backend(), request(), vec![]);
+    assert_eq!(
+        results(&events)[0],
+        (
+            "c1".into(),
+            126,
+            "denied: no ahi.tools.yaml rule allows this call".into()
+        )
+    );
+    let requests = server.join().unwrap();
+    assert_eq!(advertised_tools(&request_body(&requests[0])), ["read_file"]);
+}
