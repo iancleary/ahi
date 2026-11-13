@@ -115,7 +115,8 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi hooks install`, `ahi hooks uninstall`](#ahi-hooks) | Hook shim commands; not implemented, exit 1. |
 | [`ahi update`](#ahi-update) | Replace the binary with the latest attested release archive. |
 | [`ahi tools list`, `ahi tools examples [list\|show [<name>]]`, `ahi tools init [--example <name>] [--write]`](#ahi-tools) | Show the working directory's chat tool policy, show the shipped examples, or write one into the working directory. |
-| [`ahi tui [--refresh]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools. |
+| [`ahi tui [--refresh] [--resume <id>] [--no-history]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools; every chat is recorded as a session. |
+| [`ahi session list\|show\|export\|import`](#ahi-session) | List recorded sessions, print one, copy one out of the store, or bring one in. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 | [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
@@ -276,6 +277,17 @@ Gateway catalog refresh requests `GET <origin>/agent/models.json`, stripping the
 
 `ahi tui` never fetches on startup. `ahi tui --refresh` explicitly requests refreshes, preserves old catalogs on failure, and in a pipe exits 1 if any refresh failed while still printing the local load. Catalogs are atomically replaced objects containing provider, source URL, retrieval timestamp, ordered reported IDs, and typed metadata by model ID; old array-format and identifier-only object catalogs remain readable with unknown metadata. `retrieval time unknown (old catalog format)` means that the cached array lacks a timestamp, not that authentication is old. Refresh never edits the curated file.
 
+### ahi session
+
+Every chat is recorded as it happens into one file of JSON lines under the state directory, `sessions/<id>.jsonl`, created owner-only at the first turn: the operator's message before the request goes out, the model's reply and its tool calls before any tool runs, each tool result after, and one `turn` line per exchange saying how it ended (`ok`, `failed`, `cancelled`). `/model` and `/thinking` are recorded too. Nothing is rewritten: a failed or cancelled turn stays on disk as a branch, and the next turn hangs off the last turn that succeeded, so what the model sees again is the conversation that worked. `ahi tui --no-history` records nothing; `/clear` starts a new session at the next turn.
+
+- `ahi session list [--json]` prints one line per session, newest first: id, start time, gateway and model, working directory, turn count, and the last turn's status and run id. Files this ahi cannot read are named on stderr and skipped.
+- `ahi session show <id|path> [--json] [--branch <seq>]` prints the active path of a session in conversation order: operator lines, replies, the name and target of each tool call, the first line of each tool result, and the turn lines. `--branch` follows another branch (a failed attempt) back to the root; `--json` prints the header and those entries as lines. A path shows a session file that is not in the store.
+- `ahi tui --resume <id>` opens the chat over a stored session with its recorded model and thinking level and the active path's messages, and appends new turns to it.
+- `ahi session export <id> --to <file>` copies the session file; the destination must not exist. `ahi session import <file>` copies a session file into the store, or extends the stored copy when the file carries new entries after the ones already stored, and refuses a file whose history differs. Across machines that is the whole protocol: the file moves by any means (`scp`, `rsync`, a multiplexer's file transfer) and `import` reads it.
+
+Prompts, replies, tool arguments (including text written to files), tool output, and the provider's native replay items are all in the file, as they were all sent to the provider. One process writes a session at a time, the chat that holds it; readers skip a last line that is still being written.
+
 ### ahi login
 
 Sign in with ChatGPT using the current direct-token browser flow. Prints the URL and accepts a pasted full callback URL when the browser cannot reach ahi.
@@ -311,7 +323,7 @@ ahi keeps its own files in the XDG base directories, each with an `ahi` child:
 | --- | --- | --- |
 | `models.json` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
 | `credentials/openai.json`, `openai-device-id` | `$XDG_DATA_HOME/ahi` | `~/.local/share/ahi` |
-| `selection`, `thinking`, `audit.log` | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
+| `selection`, `thinking`, `audit.log`, `sessions/` | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
 | `catalogs/`, `objects/sha256/` | `$XDG_CACHE_HOME/ahi` | `~/.cache/ahi` |
 
 An XDG variable counts only when it is an absolute path, as the specification requires. On Windows without XDG variables the categories live under `%LOCALAPPDATA%\ahi\{config,data,state,cache}`. `--state-dir`, or `AHI_STATE_DIR`, puts every category under one directory for portable or sandboxed setups; `--cache-dir`, or `AHI_HOME`, moves the cache alone. Without a home directory, set the XDG variables or `--state-dir`. ahi never reads `~/.pi`, and it does not move files from older locations: `ahi doctor` prints the directories in use. Earlier versions kept everything in `~/.local/share/ahi`; move `models.json` from there to `~/.config/ahi/`, or pass `--state-dir ~/.local/share/ahi` to keep the old layout.
