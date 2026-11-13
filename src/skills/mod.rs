@@ -81,8 +81,7 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    /// The valid skill called `name`. `load_skill` is its caller once it exists.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The valid skill called `name`.
     pub(crate) fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.iter().find(|skill| skill.name == name)
     }
@@ -164,8 +163,7 @@ pub(crate) fn enumerate(workdir: &Path, config: Option<&Path>) -> Catalog {
 }
 
 /// Read a skill's body (`file` `None`) or one declared reference, with the
-/// same checks as at enumeration. `load_skill` is its caller once it exists.
-#[cfg_attr(not(test), allow(dead_code))]
+/// same checks as at enumeration.
 pub(crate) fn read(skill: &Skill, file: Option<&str>) -> Result<String, String> {
     let name = match file {
         None => SKILL_FILE,
