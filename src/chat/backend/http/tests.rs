@@ -1571,7 +1571,7 @@ fn file_write_rules_edit_and_create_with_line_counts_and_an_audit_line() {
             (
                 "c3".into(),
                 1,
-                "error: path is protected: ahi policy files, hook configuration, .gitignore, and .git are never written by tools".into()
+                "error: path is protected: ahi policy files, hook configuration, .gitignore, .git, and .ahi/skills are never written by tools".into()
             ),
             (
                 "c4".into(),

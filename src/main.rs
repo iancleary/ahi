@@ -1004,6 +1004,14 @@ fn doctor(
             for line in ahi::tools::doctor_lines(&cwd) {
                 println!("{line}");
             }
+            // Skills: the working directory's `.ahi/skills` and the
+            // operator's `<config>/skills`, valid and refused with reasons.
+            let config = Directories::resolve(state, cache)
+                .ok()
+                .map(|dirs| dirs.config);
+            for line in ahi::skills::doctor_lines(&cwd, config.as_deref()) {
+                println!("{line}");
+            }
         }
         Err(err) => println!("tools policy: {err}"),
     }

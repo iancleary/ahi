@@ -5,6 +5,7 @@
 ### Added
 
 - `ahi.tools.yaml` takes `action: skill` rules: `match.skill: <name>` names one skill the model may load (no wildcard, deny-by-default, a deny matches the name without regard to case and an approval exactly), with `effect` and `ask` as every other kind. `ahi tools list` and `ahi doctor` show the approved names (`skills approved: …`), and `examples/tools/skills.yaml` shows the rules. The `load_skill` tool that reads a skill follows; until then a skill rule parses and advertises nothing. Design in `docs/SKILLS.md`.
+- The skills loader (`src/skills/`): a skill is `.ahi/skills/<name>/SKILL.md` in the working directory or `<config>/skills/<name>/SKILL.md` on the operator's host, a YAML frontmatter (`name` equal to the directory, one-line `description`, optional `when`, up to 16 `.md`/`.txt` `references`, informational `version`, unknown keys refused) and a body. Caps of 32 KiB per file and 64 skills per root; a symbolic link anywhere from `.ahi` down, a name that collides with another's when case is ignored, or any other fault rejects the skill with a reason `ahi doctor` prints (`skills (repo): …`, `skill rejected (…): name: reason`). An operator skill shadows a repo skill of the same name. `.ahi` itself and everything under `.ahi/skills` join the paths tools never write.
 
 ## 0.16.1 (2026-11-13)
 
