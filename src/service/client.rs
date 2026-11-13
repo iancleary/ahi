@@ -4,6 +4,9 @@
 //! (`ssh host ahi connect`, `hc connect --worker label`). `ahi exec`,
 //! `ahi tui`, and the `delegate` tool all speak through it.
 
+// Without a Unix socket only the in-process transport exists on this platform.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};

@@ -9,6 +9,10 @@
 //! it survives a stdio bridge (`ahi connect`, `ssh host ahi connect`) because
 //! every message is a line.
 
+// Without a Unix socket nothing on this platform speaks the wire form yet;
+// the in-process client still goes through `dispatch`.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
