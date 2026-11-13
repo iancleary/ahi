@@ -245,10 +245,26 @@ mod unix {
             let _ = io::copy(&mut io::stdin().lock(), &mut to_socket);
             let _ = to_socket.shutdown(std::net::Shutdown::Write);
         });
+        // Not `io::copy`: its buffered-writer path fills stdout's buffer before
+        // flushing, so a one-line answer would wait for more bytes or EOF. A
+        // bridge forwards each read at once.
         let mut from_socket = stream;
         let mut stdout = io::stdout().lock();
-        let _ = io::copy(&mut from_socket, &mut stdout);
-        let _ = stdout.flush();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match from_socket.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdout
+                        .write_all(&buffer[..n])
+                        .and_then(|()| stdout.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
         // The server closed; a reader still blocked on stdin ends with the process.
         drop(inbound);
         Ok(0)
