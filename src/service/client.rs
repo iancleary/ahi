@@ -353,6 +353,7 @@ mod remote {
                         Some("policy") => "policy",
                         Some("conflict") => "conflict",
                         Some("not_found") => "not_found",
+                        Some("limit") => "limit",
                         _ => "session",
                     },
                     message: capped(error["message"].as_str().unwrap_or("refused")),

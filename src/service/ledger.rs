@@ -87,6 +87,11 @@ impl Ledger {
                 "ask_denied": self.ask_denied,
                 "errors": self.errors,
                 "rounds": self.rounds,
+                "skills": self
+                    .records
+                    .iter()
+                    .filter(|record| matches!(record, ToolRecord::Skill { outcome, .. } if outcome == "ok"))
+                    .count(),
             },
             "effects": self.effects(),
             "ledger": self.records.iter().map(record_json).collect::<Vec<_>>(),
@@ -119,6 +124,17 @@ fn record_json(record: &ToolRecord) -> Value {
         } => json!({
             "tool": "run_command", "argv": argv, "cwd": cwd, "outcome": outcome,
             "ran": ran, "exit_code": exit_code, "duration_ms": duration_ms,
+        }),
+        ToolRecord::Skill {
+            name,
+            root,
+            file,
+            outcome,
+            sha256,
+            bytes,
+        } => json!({
+            "tool": "load_skill", "name": name, "root": root, "file": file,
+            "outcome": outcome, "sha256": sha256, "bytes": bytes,
         }),
         ToolRecord::Delegate {
             via,
@@ -201,5 +217,43 @@ mod tests {
         unknown.returned(1, Some(&command(None)));
         unknown.close();
         assert_eq!(unknown.effects(), "unknown");
+    }
+
+    #[test]
+    fn skill_loads_are_counted_and_recorded_without_their_text() {
+        let mut ledger = Ledger::default();
+        ledger.requested(2);
+        let load = ToolRecord::Skill {
+            name: "rust-review".into(),
+            root: "repo".into(),
+            file: None,
+            outcome: "ok".into(),
+            sha256: "ab".repeat(32),
+            bytes: 21,
+        };
+        let failed = ToolRecord::Skill {
+            name: "ghost".into(),
+            root: String::new(),
+            file: None,
+            outcome: "no valid skill of that name is installed".into(),
+            sha256: String::new(),
+            bytes: 0,
+        };
+        ledger.returned(0, Some(&load));
+        ledger.returned(1, Some(&failed));
+        ledger.close();
+        let doc = ledger.to_json();
+        assert_eq!(doc["tools"]["skills"], 1);
+        assert_eq!(doc["tools"]["errors"], 1);
+        assert_eq!(doc["effects"], "none", "a read changes nothing");
+        assert_eq!(doc["ledger"][0]["tool"], "load_skill");
+        assert_eq!(doc["ledger"][0]["name"], "rust-review");
+        assert_eq!(doc["ledger"][0]["root"], "repo");
+        assert_eq!(doc["ledger"][0]["bytes"], 21);
+        assert!(doc["ledger"][0].get("text").is_none());
+        assert_eq!(
+            doc["ledger"][1]["outcome"],
+            "no valid skill of that name is installed"
+        );
     }
 }

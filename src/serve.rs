@@ -58,12 +58,26 @@ pub fn connect(_state: &Directories, _socket: Option<&Path>) -> Result<u8> {
     Err(Error::new("ahi connect is not available on this platform"))
 }
 
+/// The server's version must be this binary's: the wire is one process
+/// talking to itself across time, and an upgraded binary must not keep
+/// using the old server's protocol. `Ok` when they match.
+pub fn check_version(found: &str, socket: &Path) -> crate::error::Result<()> {
+    if found == crate::VERSION {
+        return Ok(());
+    }
+    Err(crate::error::Error::new(format!(
+        "the server on {} is ahi {found} and this is ahi {}; run `ahi serve stop` and start again",
+        socket.display(),
+        crate::VERSION
+    )))
+}
+
 #[cfg(unix)]
 mod unix {
     use std::io::{self, BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -81,6 +95,10 @@ mod unix {
     const KEEPALIVE: Duration = Duration::from_secs(15);
     /// How often idle sessions (no turn, no subscriber) are let go of.
     const RELEASE_EVERY: Duration = Duration::from_secs(15);
+    /// Connections the server holds at once; the next is refused and closed.
+    const MAX_CONNECTIONS: usize = 64;
+    /// Subscriptions one connection may hold.
+    const MAX_SUBSCRIPTIONS: usize = 16;
 
     /// A stream to a live server at `path`, or `None` when nothing answers.
     /// A socket file nothing listens on is left for the server to clean up.
@@ -88,31 +106,47 @@ mod unix {
         UnixStream::connect(path).ok()
     }
 
-    /// `ahi serve`: bind, accept until told to stop, drain, exit.
+    /// `ahi serve`: take the lock, bind, accept until told to stop, drain,
+    /// exit. The lock (`serve.lock` beside the socket) is held for the
+    /// server's life, so two starters cannot both bind, and the socket file
+    /// is only ever removed by the process that holds it: a loser never
+    /// unlinks the winner's socket.
     pub fn run(state: &Directories, socket: Option<&Path>, verbose: bool) -> Result<u8> {
         let path = socket_path(state, socket);
-        if try_connect(&path).is_some() {
-            return Err(Error::new(format!(
-                "a server already answers on {}; `ahi serve stop` ends it",
-                path.display()
-            )));
-        }
         if let Some(parent) = path.parent() {
             crate::directories::create_private_dir(parent)
                 .map_err(|err| Error::new(format!("cannot create {}: {err}", parent.display())))?;
         }
-        // A socket file nothing answers on is a crash's leftover.
-        if std::fs::symlink_metadata(&path).is_ok() {
-            std::fs::remove_file(&path).map_err(|err| {
-                Error::new(format!("cannot remove stale {}: {err}", path.display()))
-            })?;
+        let lock_path = lock_path(&path);
+        let lock = crate::directories::private_file()
+            .create(true)
+            .open(&lock_path)
+            .map_err(|err| Error::new(format!("cannot open {}: {err}", lock_path.display())))?;
+        if !ahi_unix::try_lock_exclusive(&lock)
+            .map_err(|err| Error::new(format!("cannot lock {}: {err}", lock_path.display())))?
+        {
+            return Err(Error::new(format!(
+                "a server already runs: {} is held; `ahi serve stop` ends it",
+                lock_path.display()
+            )));
         }
-        let listener = UnixListener::bind(&path)
-            .map_err(|err| Error::new(format!("cannot bind {}: {err}", path.display())))?;
+        // Bind under a private name and rename into place: the socket is
+        // never visible with umask permissions, and a stale file left by a
+        // crash is replaced in the same step.
+        // `.tmp` for `.sock`: no longer than the socket path, which is bounded.
+        let staging = path.with_extension("tmp");
+        let _ = std::fs::remove_file(&staging);
+        let listener = UnixListener::bind(&staging)
+            .map_err(|err| Error::new(format!("cannot bind {}: {err}", staging.display())))?;
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| Error::new(format!("cannot chmod {}: {err}", staging.display())))?;
         }
+        std::fs::rename(&staging, &path).map_err(|err| {
+            let _ = std::fs::remove_file(&staging);
+            Error::new(format!("cannot place {}: {err}", path.display()))
+        })?;
         let service = Service::open(state);
         eprintln!(
             "ahi serve {} listening on {}; sessions in {}",
@@ -125,15 +159,28 @@ mod unix {
             eprintln!("warning: signals are not watched; stop the server with `ahi serve stop`");
         }
         let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(AtomicUsize::new(0));
         let accept = {
             let service = service.clone();
             let stop = Arc::clone(&stop);
+            let connections = Arc::clone(&connections);
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };
+                    let Some(seat) = Seat::take(&connections) else {
+                        refuse(
+                            &stream,
+                            "limit",
+                            "the server holds its maximum of connections",
+                        );
+                        continue;
+                    };
                     let service = service.clone();
                     let stop = Arc::clone(&stop);
-                    thread::spawn(move || serve_connection(service, stream, stop, verbose));
+                    thread::spawn(move || {
+                        let _seat = seat;
+                        serve_connection(service, stream, stop, verbose)
+                    });
                 }
             })
         };
@@ -157,15 +204,68 @@ mod unix {
             service.open_turns()
         );
         service.shutdown(GRACE);
+        // Removed while the lock is still held, so only this server's
+        // socket ever goes; the lock itself is released by exit.
         let _ = std::fs::remove_file(&path);
         drop(accept);
+        drop(lock);
         Ok(0)
+    }
+
+    /// `serve.lock` beside the socket.
+    fn lock_path(socket: &Path) -> PathBuf {
+        socket.with_extension("lock")
+    }
+
+    /// One of `MAX_CONNECTIONS`; given back when the connection ends.
+    struct Seat(Arc<AtomicUsize>);
+
+    impl Seat {
+        fn take(connections: &Arc<AtomicUsize>) -> Option<Self> {
+            let mut held = connections.load(Ordering::Relaxed);
+            loop {
+                if held >= MAX_CONNECTIONS {
+                    return None;
+                }
+                match connections.compare_exchange_weak(
+                    held,
+                    held + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return Some(Self(Arc::clone(connections))),
+                    Err(now) => held = now,
+                }
+            }
+        }
+    }
+
+    impl Drop for Seat {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// One refusal line to a connection that gets nothing else.
+    fn refuse(stream: &UnixStream, kind: &'static str, message: &str) {
+        let mut stream = stream;
+        let mut text = wire::response(
+            &Value::Null,
+            Err(crate::service::ServiceError {
+                kind,
+                message: message.to_string(),
+            }),
+        )
+        .to_string();
+        text.push('\n');
+        let _ = stream.write_all(text.as_bytes());
     }
 
     /// The socket of a live server, starting one detached when none
     /// answers: stdio to `<state>/serve.log`, its own process group, so it
-    /// outlives the chat that started it. Two starters race on the bind; the
-    /// loser finds the winner answering and uses it.
+    /// outlives the chat that started it. Two starters race on the server's
+    /// lock; the loser's server exits at once and the loser finds the winner
+    /// answering within the wait.
     pub fn ensure_running(state: &Directories, socket: Option<&Path>) -> Result<PathBuf> {
         let path = socket_path(state, socket);
         if try_connect(&path).is_some() {
@@ -303,6 +403,21 @@ mod unix {
         stop: Arc<AtomicBool>,
         verbose: bool,
     ) {
+        // The socket's mode already limits who connects; the kernel's word
+        // on the peer is checked too, before a byte is read, so a socket
+        // reached through a looser directory or a copied descriptor is still
+        // one user talking to itself.
+        match ahi_unix::peer_uid(&stream) {
+            Ok(uid) if uid == ahi_unix::current_uid() => {}
+            Ok(_) => {
+                refuse(&stream, "auth", "the connecting user is not the server's");
+                return;
+            }
+            Err(_) => {
+                refuse(&stream, "auth", "the peer's credentials cannot be read");
+                return;
+            }
+        }
         let writer = Arc::new(Mutex::new(match stream.try_clone() {
             Ok(writer) => writer,
             Err(_) => return,
@@ -310,6 +425,7 @@ mod unix {
         let closed = Arc::new(AtomicBool::new(false));
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
+        let mut subscriptions = 0usize;
         loop {
             line.clear();
             match (&mut reader)
@@ -354,6 +470,39 @@ mod unix {
             };
             if verbose {
                 eprintln!("request {}", request.method);
+            }
+            // During the drain nothing new is taken; open turns finish or
+            // are cancelled, and this connection is told why and closed.
+            if stop.load(Ordering::Relaxed) {
+                let _ = write_line(
+                    &writer,
+                    &wire::response(
+                        &request.id,
+                        Err(crate::service::ServiceError {
+                            kind: "conflict",
+                            message: "the server is shutting down".into(),
+                        }),
+                    ),
+                );
+                break;
+            }
+            if request.method == "session.subscribe" {
+                if subscriptions >= MAX_SUBSCRIPTIONS {
+                    let _ = write_line(
+                        &writer,
+                        &wire::response(
+                            &request.id,
+                            Err(crate::service::ServiceError {
+                                kind: "limit",
+                                message: format!(
+                                    "this connection holds its maximum of {MAX_SUBSCRIPTIONS} subscriptions"
+                                ),
+                            }),
+                        ),
+                    );
+                    continue;
+                }
+                subscriptions += 1;
             }
             if request.method == "shutdown" {
                 let _ = write_line(&writer, &wire::response(&request.id, Ok(json!({}))));
@@ -423,5 +572,20 @@ mod unix {
             .lock()
             .map_err(|_| io::Error::other("writer poisoned"))?;
         stream.write_all(text.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_version_check_names_both_sides_and_the_remedy() {
+        let socket = std::path::Path::new("/run/ahi/serve.sock");
+        assert!(super::check_version(crate::VERSION, socket).is_ok());
+        let err = super::check_version("0.1.0", socket)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is ahi 0.1.0"), "{err}");
+        assert!(err.contains(crate::VERSION), "{err}");
+        assert!(err.contains("ahi serve stop"), "{err}");
     }
 }

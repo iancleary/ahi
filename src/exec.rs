@@ -238,8 +238,18 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
             let argv = crate::service::via::split(command).map_err(usage)?;
             Client::via(&argv).map_err(|err| (Exit::for_kind(err.kind), err.message))?
         }
-        None => Client::open(state, options.socket.as_deref(), options.standalone)
-            .map_err(|err| (Exit::for_kind(err.kind), err.message))?,
+        None => {
+            let mut client = Client::open(state, options.socket.as_deref(), options.standalone)
+                .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
+            if let Some(path) = client.socket().map(Path::to_path_buf) {
+                let health = client
+                    .call("health", json!({}))
+                    .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
+                crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)
+                    .map_err(|err| (Exit::Config, err.to_string()))?;
+            }
+            client
+        }
     };
     if options.verbose {
         if let Some(path) = client.socket() {
