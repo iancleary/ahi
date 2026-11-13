@@ -184,7 +184,7 @@ mod remote {
 
     use serde_json::Value;
 
-    use crate::service::wire::Request;
+    use crate::service::wire::{Request, MAX_ERROR_LEN, MAX_LINE};
     use crate::service::{Event, ServiceError};
 
     /// One byte stream each way, one request at a time, events on the side.
@@ -201,9 +201,24 @@ mod remote {
             let (answers, responses) = mpsc::channel();
             let (notify, events) = mpsc::channel();
             thread::spawn(move || {
-                for line in BufReader::new(reader).lines() {
-                    let Ok(line) = line else { break };
-                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                // The peer may be another host's worker; a line without end
+                // must not become memory here. Past the cap the connection is
+                // dropped, which every waiter sees as closed.
+                let mut reader = BufReader::new(reader);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match (&mut reader)
+                        .take(MAX_LINE as u64 + 1)
+                        .read_until(b'\n', &mut line)
+                    {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    if line.len() > MAX_LINE {
+                        break;
+                    }
+                    let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                         continue;
                     };
                     if value.get("event").is_some() {
@@ -258,10 +273,67 @@ mod remote {
                         Some("not_found") => "not_found",
                         _ => "session",
                     },
-                    message: error["message"].as_str().unwrap_or("refused").to_string(),
+                    message: capped(error["message"].as_str().unwrap_or("refused")),
                 });
             }
             Ok(answer.get("result").cloned().unwrap_or(Value::Null))
+        }
+    }
+
+    /// `text` cut to `MAX_ERROR_LEN` on a character boundary.
+    pub(super) fn capped(text: &str) -> String {
+        let mut cut = text.len().min(MAX_ERROR_LEN);
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let mut out = text[..cut].to_string();
+        if cut < text.len() {
+            out.push_str(" [truncated]");
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Cursor;
+
+        #[test]
+        fn a_line_past_the_cap_ends_the_connection_and_a_refusal_is_capped() {
+            let mut feed = Vec::new();
+            feed.extend_from_slice(b"{\"id\":1,\"result\":{\"ok\":true}}\n");
+            feed.extend_from_slice(
+                format!(
+                    "{{\"id\":2,\"error\":{{\"kind\":\"usage\",\"message\":\"{}\"}}}}\n",
+                    "m".repeat(MAX_ERROR_LEN + 10)
+                )
+                .as_bytes(),
+            );
+            feed.resize(feed.len() + MAX_LINE + 1, b'x');
+            feed.extend_from_slice(b"\n{\"id\":3,\"result\":{}}\n");
+            let (mut remote, events) =
+                Remote::new(Box::new(Cursor::new(feed)), Box::new(Vec::new()));
+            let request = |id: u64| Request {
+                id: serde_json::json!(id),
+                method: "health".into(),
+                params: Value::Null,
+            };
+            assert_eq!(remote.call(&request(1)).unwrap()["ok"], true);
+            let refused = remote.call(&request(2)).unwrap_err();
+            assert_eq!(refused.kind, "usage");
+            assert!(
+                refused.message.len() < MAX_ERROR_LEN + 20,
+                "{}",
+                refused.message.len()
+            );
+            assert!(refused.message.ends_with(" [truncated]"));
+            // The oversized line ends the reader; nothing after it is read.
+            let closed = remote.call(&request(3)).unwrap_err();
+            assert_eq!(closed.kind, "session");
+            assert!(matches!(
+                events.recv_timeout(Duration::from_secs(1)),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            ));
         }
     }
 }
