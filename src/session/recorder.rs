@@ -205,6 +205,14 @@ impl Recorder {
         }));
     }
 
+    /// Whether the session has reached its size budget, so the next turn is
+    /// refused before anything is sent.
+    pub(crate) fn over_budget(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.over_budget())
+    }
+
     /// The model read a skill; written after the tool result it accompanies.
     pub(crate) fn skill_load(&mut self, record: &crate::chat::backend::ToolRecord) {
         if self.turn.is_none() {

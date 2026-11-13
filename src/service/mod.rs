@@ -423,6 +423,15 @@ impl Service {
                 "a turn is running on this session",
             ));
         }
+        if live.session().over_budget() {
+            return Err(ServiceError::new(
+                "limit",
+                format!(
+                    "session {id} is {} MiB, its budget; start a new session",
+                    live.session().bytes() / (1024 * 1024)
+                ),
+            ));
+        }
         let requested = request
             .workdir
             .clone()
