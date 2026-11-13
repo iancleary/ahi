@@ -39,6 +39,8 @@ const MAX_ERROR_BYTES: usize = crate::service::wire::MAX_ERROR_LEN;
 /// prompt or the answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DelegationReport {
+    /// The connect command that was run, resolved for the label.
+    pub(crate) via: Vec<String>,
     pub(crate) worker: String,
     /// The worker session, which is the task id the model may continue.
     pub(crate) session: String,
@@ -55,17 +57,29 @@ pub(crate) struct Outcome {
     pub(crate) report: DelegationReport,
 }
 
-/// The connect command for `worker`: `AHI_DELEGATE_VIA` or the default,
-/// split on whitespace, `{worker}` replaced in every token.
-pub(crate) fn via_command(worker: &str) -> Vec<String> {
-    let template = std::env::var("AHI_DELEGATE_VIA")
+/// The active connect command template: `AHI_DELEGATE_VIA`, or the
+/// default when it is unset or blank. The flag says which.
+pub(crate) fn via_template() -> (String, bool) {
+    match std::env::var("AHI_DELEGATE_VIA")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_VIA.to_string());
-    template
-        .split_whitespace()
+    {
+        Some(set) => (set, true),
+        None => (DEFAULT_VIA.to_string(), false),
+    }
+}
+
+/// The connect command for `worker`: the template split like every other
+/// connect command, `{worker}` replaced in every token after the split so
+/// a label is always one token. A template that does not parse is a
+/// configuration error the operator sees, not something the model can
+/// work around, so it comes back as the refusal text.
+pub(crate) fn via_command(worker: &str) -> Result<Vec<String>, String> {
+    let (template, _) = via_template();
+    Ok(crate::service::via::split(&template)?
+        .into_iter()
         .map(|token| token.replace("{worker}", worker))
-        .collect()
+        .collect())
 }
 
 pub(super) fn run(
@@ -75,14 +89,24 @@ pub(super) fn run(
     timeout_secs: u64,
     cancel: &AtomicBool,
 ) -> Result<Outcome, &'static str> {
-    let argv = via_command(worker);
+    let argv = via_command(worker).map_err(|_| {
+        "the connect command AHI_DELEGATE_VIA names does not parse; see `ahi doctor`"
+    })?;
     let mut client = Client::via(&argv).map_err(|_| {
         "cannot reach the worker: the connect command did not start (is hc on PATH?)"
     })?;
     // Every failure below is a fixed sentence for the model. What the
     // connect command said on stderr is the operator's, so it goes to this
     // process's stderr only when that is not a screen.
-    let result = run_on(&mut client, worker, prompt, task, timeout_secs, cancel);
+    let result = run_on(
+        &mut client,
+        &argv,
+        worker,
+        prompt,
+        task,
+        timeout_secs,
+        cancel,
+    );
     if result.is_err() {
         let said = client.via_stderr();
         if !said.is_empty() && !std::io::stderr().is_terminal() {
@@ -94,6 +118,7 @@ pub(super) fn run(
 
 fn run_on(
     client: &mut Client,
+    via: &[String],
     worker: &str,
     prompt: &str,
     task: Option<&str>,
@@ -186,6 +211,7 @@ fn run_on(
         submitted
     };
     Ok(outcome(
+        via,
         worker,
         &session,
         &run_id,
@@ -194,7 +220,14 @@ fn run_on(
     ))
 }
 
-fn outcome(worker: &str, session: &str, run_id: &str, doc: &Value, duration_ms: u128) -> Outcome {
+fn outcome(
+    via: &[String],
+    worker: &str,
+    session: &str,
+    run_id: &str,
+    doc: &Value,
+    duration_ms: u128,
+) -> Outcome {
     let status = doc["status"].as_str().unwrap_or("failed").to_string();
     let effects = doc["effects"].as_str().unwrap_or("unknown").to_string();
     let mut content = format!("task {session} on {worker}: {status}\n");
@@ -231,6 +264,7 @@ fn outcome(worker: &str, session: &str, run_id: &str, doc: &Value, duration_ms: 
     Outcome {
         content,
         report: DelegationReport {
+            via: via.to_vec(),
             worker: worker.to_string(),
             session: session.to_string(),
             run_id: run_id.to_string(),
@@ -249,17 +283,27 @@ mod tests {
     fn the_connect_command_comes_from_the_environment_with_the_label_filled_in() {
         std::env::remove_var("AHI_DELEGATE_VIA");
         assert_eq!(
-            via_command("rust-ci"),
+            via_command("rust-ci").unwrap(),
             ["hc", "connect", "--worker", "rust-ci"]
         );
-        std::env::set_var("AHI_DELEGATE_VIA", "ssh {worker}.example ahi connect");
-        assert_eq!(via_command("box"), ["ssh", "box.example", "ahi", "connect"]);
+        std::env::set_var(
+            "AHI_DELEGATE_VIA",
+            "ssh {worker}.example '/opt/my tools/ahi' connect",
+        );
+        assert_eq!(
+            via_command("box").unwrap(),
+            ["ssh", "box.example", "/opt/my tools/ahi", "connect"]
+        );
+        std::env::set_var("AHI_DELEGATE_VIA", "ssh 'unclosed");
+        assert!(via_command("box").is_err());
         std::env::remove_var("AHI_DELEGATE_VIA");
     }
 
     #[test]
     fn the_result_names_the_task_the_status_and_the_effects() {
+        let via: Vec<String> = vec!["hc".into(), "connect".into()];
         let ok = outcome(
+            &via,
             "docs",
             "s1",
             "r1",
@@ -268,7 +312,9 @@ mod tests {
         );
         assert_eq!(ok.content, "task s1 on docs: ok\ndone\neffects: some");
         assert_eq!(ok.report.effects, "some");
+        assert_eq!(ok.report.via, via);
         let failed = outcome(
+            &via,
             "docs",
             "s1",
             "r1",
@@ -280,6 +326,7 @@ mod tests {
             "task s1 on docs: failed\ntransport: down\neffects: unknown"
         );
         let unconfirmed = outcome(
+            &via,
             "docs",
             "s1",
             "r1",
@@ -295,6 +342,7 @@ mod tests {
         );
         assert_eq!(unconfirmed.report.status, "cancelled");
         let long = outcome(
+            &via,
             "docs",
             "s1",
             "r1",

@@ -122,6 +122,8 @@ pub struct DelegateEvent<'a> {
     pub origin: &'a str,
     pub run_id: Option<&'a str>,
     pub repo: &'a Path,
+    /// The connect command that was run, resolved for the label.
+    pub via: &'a [String],
     pub worker: &'a str,
     pub session: &'a str,
     pub worker_run_id: &'a str,
@@ -141,6 +143,7 @@ pub fn append_delegate(state_dir: &Path, event: &DelegateEvent<'_>) -> Result<()
             "run_id": event.run_id,
             "tool": "delegate",
             "repo": event.repo.display().to_string(),
+            "via": event.via,
             "worker": event.worker,
             "session": event.session,
             "worker_run_id": event.worker_run_id,

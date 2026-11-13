@@ -186,6 +186,8 @@ pub(crate) enum ToolRecord {
     /// A task handed to a worker: which one, the worker's session and run,
     /// how it ended, and what the worker says it changed.
     Delegate {
+        /// The connect command that was run, resolved for the label.
+        via: Vec<String>,
         worker: String,
         session: String,
         run_id: String,

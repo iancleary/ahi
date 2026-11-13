@@ -235,7 +235,7 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
             if options.standalone || options.socket.is_some() {
                 return Err(usage("--via contradicts --standalone and --socket"));
             }
-            let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+            let argv = crate::service::via::split(command).map_err(usage)?;
             Client::via(&argv).map_err(|err| (Exit::for_kind(err.kind), err.message))?
         }
         None => Client::open(state, options.socket.as_deref(), options.standalone)

@@ -118,7 +118,7 @@ pub fn run(
         let engine = if standalone {
             chat::Engine::Standalone { record }
         } else if let Some(command) = via {
-            let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+            let argv = crate::service::via::split(command).map_err(Error::new)?;
             let client = crate::service::client::Client::via(&argv)
                 .map_err(|err| Error::new(err.message))?;
             chat::Engine::Service(client)
