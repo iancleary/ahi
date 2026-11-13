@@ -74,15 +74,13 @@ mod unix {
     use super::socket_path;
     use crate::directories::Directories;
     use crate::error::{Error, Result};
-    use crate::service::wire::{self, Request};
+    use crate::service::wire::{self, Request, MAX_LINE};
     use crate::service::{Event, Service, GRACE};
 
     /// A subscribed connection hears from the server at least this often.
     const KEEPALIVE: Duration = Duration::from_secs(15);
     /// How often idle sessions (no turn, no subscriber) are let go of.
     const RELEASE_EVERY: Duration = Duration::from_secs(15);
-    /// The longest request line accepted.
-    const MAX_LINE: usize = 2 * 1024 * 1024;
 
     /// A stream to a live server at `path`, or `None` when nothing answers.
     /// A socket file nothing listens on is left for the server to clean up.

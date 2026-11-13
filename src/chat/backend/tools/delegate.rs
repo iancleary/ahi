@@ -31,6 +31,8 @@ pub(crate) const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub(crate) const DEFAULT_VIA: &str = "hc connect --worker {worker}";
 /// How much of the worker's answer reaches the model.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
+/// A worker's error message kept for the model.
+const MAX_ERROR_BYTES: usize = crate::service::wire::MAX_ERROR_LEN;
 
 /// What a delegation did, for the audit log and the ledger. Never the
 /// prompt or the answer.
@@ -88,7 +90,8 @@ pub(super) fn run(
             .call("session.create", json!({}))
             .map_err(|_| "the worker refused to open a session")?["id"]
             .as_str()
-            .ok_or("the worker returned no session id")?
+            .filter(|id| crate::session::valid_id(id))
+            .ok_or("the worker returned no usable session id")?
             .to_string(),
     };
     let tip = client
@@ -115,7 +118,13 @@ pub(super) fn run(
             }),
         )
         .map_err(|_| "the worker refused the task")?;
-    let run_id = submitted["run_id"].as_str().unwrap_or_default().to_string();
+    // Both ids go into the ledger and the audit log; a worker's word for
+    // them is checked like a client's.
+    let run_id = submitted["run_id"]
+        .as_str()
+        .filter(|id| crate::session::valid_run_id(id))
+        .ok_or("the worker returned no usable run id")?
+        .to_string();
     let doc = if submitted["status"] == "running" {
         let deadline = started + Duration::from_secs(timeout_secs) + Duration::from_secs(5);
         let mut cancelled = false;
@@ -167,9 +176,19 @@ fn outcome(worker: &str, session: &str, run_id: &str, doc: &Value, duration_ms: 
             content.push_str("\n[answer truncated]");
         }
     } else if let Some(message) = doc["error"]["message"].as_str() {
+        let mut cut = message.len().min(MAX_ERROR_BYTES);
+        while !message.is_char_boundary(cut) {
+            cut -= 1;
+        }
         content.push_str(&format!(
-            "{}: {message}",
-            doc["error"]["kind"].as_str().unwrap_or("error")
+            "{}: {}{}",
+            doc["error"]["kind"].as_str().unwrap_or("error"),
+            &message[..cut],
+            if cut < message.len() {
+                " [truncated]"
+            } else {
+                ""
+            }
         ));
     }
     if !content.ends_with('\n') {

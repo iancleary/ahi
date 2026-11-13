@@ -27,6 +27,12 @@ use crate::session::Status;
 pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
 /// The longest `client` name written into a result document.
 pub(crate) const MAX_CLIENT_LEN: usize = 64;
+/// The longest line either side accepts. A peer that sends more is cut off:
+/// the server answers `usage` and closes, the client drops the connection.
+pub(crate) const MAX_LINE: usize = 2 * 1024 * 1024;
+/// The longest error message a client keeps from a peer's refusal or a
+/// worker's result document.
+pub(crate) const MAX_ERROR_LEN: usize = 4 * 1024;
 
 /// A client's message.
 #[derive(Debug, Clone, PartialEq, Eq)]
