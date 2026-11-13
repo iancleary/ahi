@@ -236,10 +236,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("ahi-unix-lock-{}", std::process::id()));
         let first = std::fs::File::create(&path).unwrap();
         let second = std::fs::File::options().write(true).open(&path).unwrap();
-        assert_eq!(try_lock_exclusive(&first).unwrap(), true);
-        assert_eq!(try_lock_exclusive(&second).unwrap(), false);
+        assert!(try_lock_exclusive(&first).unwrap());
+        assert!(!try_lock_exclusive(&second).unwrap());
         drop(first);
-        assert_eq!(try_lock_exclusive(&second).unwrap(), true);
+        assert!(try_lock_exclusive(&second).unwrap());
         drop(second);
         std::fs::remove_file(&path).unwrap();
     }
