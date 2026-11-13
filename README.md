@@ -117,6 +117,8 @@ Every subcommand also accepts global flags: `-c/--config <path>` selects the con
 | [`ahi tools list`, `ahi tools examples [list\|show [<name>]]`, `ahi tools init [--example <name>] [--write]`](#ahi-tools) | Show the working directory's chat tool policy, show the shipped examples, or write one into the working directory. |
 | [`ahi tui [--refresh] [--resume <id>] [--no-history]`](#ahi-tui) | Pick curated models, register gateways, and chat, with policy-gated read, search, edit, write, and command tools; every chat is recorded as a session. |
 | [`ahi session list\|show\|export\|import`](#ahi-session) | List recorded sessions, print one, copy one out of the store, or bring one in. |
+| [`ahi exec --model <gateway/model> (-p <text> \| --prompt-file <path> \| stdin)`](#ahi-exec) | One model turn from the command line, with tools under policy, a result document, and exit codes; the worker a coordinator runs over ssh. |
+| [`ahi serve [stop]`, `ahi connect`](#ahi-serve) | Serve sessions on a Unix socket for every front end and for herdr-core; bridge stdio to that socket for `ssh host ahi connect`. |
 | [`ahi login`](#ahi-login) | Sign in with ChatGPT in the browser. |
 | [`ahi dev [build\|run\|shell\|status\|clean]`](#ahi-dev) | Open a shell, or run a command, in the published development image with the working directory mounted. |
 | [`ahi sandbox check`](#ahi-sandbox) | Report the containment backend this host offers and whether an outer sandbox is already active. |
@@ -288,6 +290,20 @@ Every chat is recorded as it happens into one file of JSON lines under the state
 
 Prompts, replies, tool arguments (including text written to files), tool output, and the provider's native replay items are all in the file, as they were all sent to the provider. One process writes a session at a time, the chat that holds it; readers skip a last line that is still being written.
 
+### ahi exec
+
+One model turn and exit. `ahi exec --model local/vendor/model -p "summarize the diff"` prints the answer; `git diff | ahi exec --model … ` reads the prompt from stdin; `--prompt-file <path>` reads it from a file (UTF-8, at most 1 MiB). Tools are confined to `--workdir` (default: the current directory) and governed by its `ahi.tools.yaml`, or by `--tools <file>`, which must lie outside the working directory. An `ask` rule prompts on the terminal when a person is attending; `--headless` means no person: the prompt comes only from `--prompt-file`, every `ask` is denied with a reason the model sees, and `--result-file <path>` is required. The result file must not exist beforehand; it receives one JSON document (`status`, `text`, `error`, `usage`, `tools` counts, `effects` of `none`, `some`, or `unknown`, and a `ledger` of every write and command with the same facts as `audit.log`), written owner-only. `--prompt-file`, `--result-file`, and `--tools` are operator files and are refused inside the working directory, where the model's tools could read or overwrite them.
+
+stdout carries the answer, or the whole document with `--format json`; stderr carries diagnostics and, with `--headless` or `-v`, one progress line per tool call (name, target, exit code; never arguments or output). Exit codes: 0 ok, 1 the turn failed, 2 usage, 3 configuration (`models.json`, gateway, model), 4 credential, 5 policy file, 6 cancelled or timed out, 7 session (unknown id, a `--run-id` reused for another prompt), 8 the result file could not be written. `--timeout <secs>` (default 600) bounds the whole turn, including a running command; SIGINT, SIGTERM, and SIGHUP cancel it and the document says `cancelled` with the ledger so far. `--run-id <id>` makes the turn idempotent per session: a repeat with the same prompt is answered from the record without a model call, and `--prompt-sha256 <hex>` refuses a prompt file that arrived changed. `--session <id>` continues a recorded session (see `ahi session`); every turn is recorded. `--check` validates the arguments, files, model, and credential and exits without a turn. `--thinking <level>` sets the reasoning effort for the turn.
+
+On a host where `ahi serve` is running, the turn goes through it (`--socket <path>` names another socket and fails if nothing answers); otherwise the same service runs inside the command (`--standalone` insists on that). `ahi exec` never starts a server. See [ahi as an addressable service](docs/SERVE.md) for the result document and the protocol.
+
+### ahi serve
+
+`ahi serve` is the session service: one process per user per host that owns the session store and runs every turn, listening on a Unix socket (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`, mode 600 in a directory of mode 700). It speaks one JSON object per line in each direction, the shape herdr-core uses for its own cores: requests (`session.create`, `turn.submit`, `session.subscribe`, `ask.answer`, `turn.cancel`, …) get one answer each, and a subscribed connection receives the session's entries, streamed text, approval requests, and turn results as events. There is no network listener, no token, and no TLS: whoever can open the socket is its owner, and across machines ssh carries the bytes. The server never idles out; `ahi serve stop` ends it (open turns are cancelled and given 5 s to close), as do SIGTERM and SIGINT. `-v` logs each request's method on stderr. A second `ahi serve` on a live socket is refused; a socket file nothing answers on is removed as a crash's leftover.
+
+`ahi connect` copies stdin to the socket and the socket to stdout until either side closes. `ssh host ahi connect` is therefore a remote connection to that host's service with ssh's authentication and nothing else, which is how a coordinator such as herdr-core reaches a worker host it has a shell on, and `curl` is replaced by `printf '{"id":1,"method":"health","params":{}}\n' | ahi connect`. Not available on Windows, where `ahi exec` runs in its own process.
+
 ### ahi login
 
 Sign in with ChatGPT using the current direct-token browser flow. Prints the URL and accepts a pasted full callback URL when the browser cannot reach ahi.
@@ -323,7 +339,7 @@ ahi keeps its own files in the XDG base directories, each with an `ahi` child:
 | --- | --- | --- |
 | `models.json` | `$XDG_CONFIG_HOME/ahi` | `~/.config/ahi` |
 | `credentials/openai.json`, `openai-device-id` | `$XDG_DATA_HOME/ahi` | `~/.local/share/ahi` |
-| `selection`, `thinking`, `audit.log`, `sessions/` | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
+| `selection`, `thinking`, `audit.log`, `sessions/`, `run/serve.sock` (without `$XDG_RUNTIME_DIR`) | `$XDG_STATE_HOME/ahi` | `~/.local/state/ahi` |
 | `catalogs/`, `objects/sha256/` | `$XDG_CACHE_HOME/ahi` | `~/.cache/ahi` |
 
 An XDG variable counts only when it is an absolute path, as the specification requires. On Windows without XDG variables the categories live under `%LOCALAPPDATA%\ahi\{config,data,state,cache}`. `--state-dir`, or `AHI_STATE_DIR`, puts every category under one directory for portable or sandboxed setups; `--cache-dir`, or `AHI_HOME`, moves the cache alone. Without a home directory, set the XDG variables or `--state-dir`. ahi never reads `~/.pi`, and it does not move files from older locations: `ahi doctor` prints the directories in use. Earlier versions kept everything in `~/.local/share/ahi`; move `models.json` from there to `~/.config/ahi/`, or pass `--state-dir ~/.local/share/ahi` to keep the old layout.

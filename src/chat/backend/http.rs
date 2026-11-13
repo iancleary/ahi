@@ -80,25 +80,32 @@ impl HttpBackend {
     /// Confine tools to `directory` and read its `ahi.tools.yaml` (unless
     /// `with_actions` named a file) instead of the process's working
     /// directory.
-    #[allow(dead_code)] // `ahi exec --workdir`
     pub(crate) fn in_workspace(mut self, directory: PathBuf) -> Self {
         self.workspace = Some(directory);
         self
     }
 
     /// Who the audit log says ran each tool.
-    #[allow(dead_code)] // `ahi exec` and `ahi serve`
     pub(crate) fn with_caller(mut self, caller: Caller) -> Self {
         self.caller = caller;
         self
     }
 
-    /// Bound every tool call of the turn: none starts past `deadline` and a
-    /// command's own timeout is clamped to what remains. The caller still
-    /// cancels at the deadline; this keeps a call from outliving it.
-    #[allow(dead_code)] // `ahi exec --timeout`
+    /// Bound the turn: no tool call starts past `deadline`, a command's own
+    /// timeout is clamped to what remains, and a request that has not
+    /// answered by then fails soon after instead of waiting out the usual
+    /// request timeout. The caller still cancels at the deadline; this keeps
+    /// a call, or a blocked request, from outliving it by much.
     pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        self.agent = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .timeout_global(Some(
+                (remaining + Duration::from_secs(1)).min(Duration::from_secs(120)),
+            ))
+            .build()
+            .new_agent();
         self
     }
 }

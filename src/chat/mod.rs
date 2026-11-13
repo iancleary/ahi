@@ -17,7 +17,7 @@ mod preferences;
 mod scroll_navigation;
 mod selection;
 mod status;
-mod thinking;
+pub(crate) mod thinking;
 pub(crate) mod transcript;
 mod usage;
 
@@ -2103,7 +2103,12 @@ mod tests {
         screen.receiver = None;
         let (rows, _) = store.list().unwrap();
         assert_eq!(rows.len(), 2);
-        let newest = store.open(&rows[0].header.id).unwrap();
+        // Both sessions started within the same second, so pick by id.
+        let newest = rows
+            .iter()
+            .find(|row| row.header.id != stored.id())
+            .map(|row| store.open(&row.header.id).unwrap())
+            .unwrap();
         assert_eq!(
             newest.header().model,
             "gpt-5",

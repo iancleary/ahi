@@ -125,6 +125,43 @@ enum Command {
         #[arg(long)]
         no_history: bool,
     },
+    /// Run one model turn from the command line and exit; the worker side of a coordinator.
+    ///
+    /// The prompt comes from -p, --prompt-file, or stdin. Tools are confined to
+    /// --workdir (default: the current directory) and governed by its
+    /// ahi.tools.yaml or an explicit --tools file; --headless answers every
+    /// `ask` as denied, takes the prompt only from a file, and writes a
+    /// result document to --result-file. On a host where `ahi serve` is
+    /// running the turn goes through it; otherwise it runs in this process.
+    /// The answer is on stdout, progress on stderr, and the exit code says
+    /// how the turn ended: 0 ok, 1 turn failed, 2 usage, 3 configuration,
+    /// 4 credential, 5 policy file, 6 cancelled or timed out, 7 session, 8
+    /// result file not written.
+    Exec(ExecArgs),
+    /// Serve sessions on a Unix socket for `ahi exec`, `ahi tui`, and herdr-core; `stop` ends it.
+    ///
+    /// One process per user per host owns the session store and runs every
+    /// turn. The socket is $XDG_RUNTIME_DIR/ahi/serve.sock (or
+    /// <state>/run/serve.sock), mode 600. There is no network listener and no
+    /// token: the filesystem authenticates locally and ssh does across
+    /// machines (`ssh host ahi connect`). The server never idles out; it
+    /// stops on `ahi serve stop`, SIGTERM, or SIGINT.
+    Serve {
+        /// Socket path instead of the default.
+        #[arg(long, global = true, value_name = "PATH")]
+        socket: Option<PathBuf>,
+        /// Log each request's method on stderr.
+        #[arg(short, long)]
+        verbose: bool,
+        #[command(subcommand)]
+        command: Option<ServeCommand>,
+    },
+    /// Bridge stdin and stdout to the local `ahi serve` socket; what `ssh host ahi connect` runs.
+    Connect {
+        /// Socket path instead of the default.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
     /// List, show, export, and import recorded chat sessions.
     ///
     /// Every chat is recorded as one file of JSON lines under the state
@@ -176,6 +213,67 @@ enum Command {
         #[command(subcommand)]
         command: SandboxCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum ServeCommand {
+    /// Ask the running server to cancel open turns and exit.
+    Stop,
+}
+
+#[derive(clap::Args)]
+struct ExecArgs {
+    /// Gateway and model as gateway/model-id, curated in models.json.
+    #[arg(long, value_name = "GATEWAY/MODEL")]
+    model: String,
+    /// The prompt text.
+    #[arg(short = 'p', long = "prompt", value_name = "TEXT")]
+    prompt: Option<String>,
+    /// Read the prompt from this file (UTF-8, at most 1 MiB).
+    #[arg(long, value_name = "PATH")]
+    prompt_file: Option<PathBuf>,
+    /// No human: the prompt from --prompt-file only, every `ask` denied, a result file required.
+    #[arg(long)]
+    headless: bool,
+    /// Working directory for the tools [default: the current directory].
+    #[arg(long, value_name = "DIR")]
+    workdir: Option<PathBuf>,
+    /// Tool policy file instead of the working directory's ahi.tools.yaml; must lie outside it.
+    #[arg(long, value_name = "FILE")]
+    tools: Option<PathBuf>,
+    /// Seconds for the whole turn; a running command is clamped to what remains [default: 600].
+    #[arg(long, value_name = "SECS")]
+    timeout: Option<u64>,
+    /// Caller-chosen id; a repeat with the same prompt is answered from the record.
+    #[arg(long, value_name = "ID")]
+    run_id: Option<String>,
+    /// Refuse the run unless the prompt's SHA-256 is this hex digest.
+    #[arg(long, value_name = "HEX")]
+    prompt_sha256: Option<String>,
+    /// Continue this recorded session instead of starting one.
+    #[arg(long, value_name = "SESSION")]
+    session: Option<String>,
+    /// Write the result document here; the file must not exist.
+    #[arg(long, value_name = "PATH")]
+    result_file: Option<PathBuf>,
+    /// What stdout carries: the answer, or the whole result document.
+    #[arg(long, default_value = "text", value_name = "FORMAT", value_parser = ["text", "json"])]
+    format: String,
+    /// Reasoning effort for this turn.
+    #[arg(long, value_name = "LEVEL", value_parser = ["off", "minimal", "low", "medium", "high"])]
+    thinking: Option<String>,
+    /// Validate the arguments, files, model, and credential, then exit without a turn.
+    #[arg(long)]
+    check: bool,
+    /// Use the server on this socket; fail if none answers.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+    /// Run in this process even when a server is live.
+    #[arg(long)]
+    standalone: bool,
+    /// Progress lines on stderr (always on with --headless).
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -417,6 +515,18 @@ fn main() -> ExitCode {
             !no_history,
         ),
         Command::Session { command } => session(&cli, command),
+        Command::Exec(args) => exec(&cli, args),
+        Command::Serve {
+            socket,
+            verbose,
+            command,
+        } => with_directories(&cli, |state| match command {
+            Some(ServeCommand::Stop) => ahi::serve::stop(&state, socket.as_deref()),
+            None => ahi::serve::run(&state, socket.as_deref(), *verbose),
+        }),
+        Command::Connect { socket } => {
+            with_directories(&cli, |state| ahi::serve::connect(&state, socket.as_deref()))
+        }
         Command::Tools { command } => match command {
             ToolsCommand::Init {
                 example,
@@ -905,6 +1015,58 @@ fn tui(
             ExitCode::from(1)
         }
     }
+}
+
+/// Resolve the directories, run `body`, and turn its result into an exit code.
+fn with_directories(cli: &Cli, body: impl FnOnce(Directories) -> ahi::Result<u8>) -> ExitCode {
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match body(state) {
+        Ok(code) => ExitCode::from(code),
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn exec(cli: &Cli, args: &ExecArgs) -> ExitCode {
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(ahi::exec::Exit::Config.code());
+        }
+    };
+    let options = ahi::exec::Options {
+        model: args.model.clone(),
+        prompt: args.prompt.clone(),
+        prompt_file: args.prompt_file.clone(),
+        headless: args.headless,
+        workdir: args.workdir.clone(),
+        tools: args.tools.clone(),
+        timeout_secs: args.timeout,
+        run_id: args.run_id.clone(),
+        prompt_sha256: args.prompt_sha256.clone(),
+        session: args.session.clone(),
+        result_file: args.result_file.clone(),
+        format: if args.format == "json" {
+            ahi::exec::Format::Json
+        } else {
+            ahi::exec::Format::Text
+        },
+        thinking: args.thinking.clone(),
+        check: args.check,
+        socket: args.socket.clone(),
+        standalone: args.standalone,
+        verbose: args.verbose,
+    };
+    ExitCode::from(ahi::exec::run(&state, &options))
 }
 
 fn session(cli: &Cli, command: &SessionCommand) -> ExitCode {
