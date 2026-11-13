@@ -121,9 +121,15 @@ enum Command {
         /// Continue a recorded session by id (see `ahi session list`) instead of opening the picker.
         #[arg(long, value_name = "SESSION")]
         resume: Option<String>,
-        /// Do not record this chat as a session.
+        /// Do not record this chat as a session (standalone only; the server always records).
         #[arg(long)]
         no_history: bool,
+        /// Run turns in this process instead of through `ahi serve`.
+        #[arg(long)]
+        standalone: bool,
+        /// The server's socket instead of the default; started there when none answers.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
     },
     /// Run one model turn from the command line and exit; the worker side of a coordinator.
     ///
@@ -217,6 +223,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ServeCommand {
+    /// Start the server detached when none answers, then print the socket path.
+    Start,
     /// Ask the running server to cancel open turns and exit.
     Stop,
 }
@@ -507,12 +515,16 @@ fn main() -> ExitCode {
             tools,
             resume,
             no_history,
+            standalone,
+            socket,
         } => tui(
             &cli,
             *refresh,
             tools.as_deref(),
             resume.as_deref(),
             !no_history,
+            *standalone,
+            socket.as_deref(),
         ),
         Command::Session { command } => session(&cli, command),
         Command::Exec(args) => exec(&cli, args),
@@ -522,6 +534,11 @@ fn main() -> ExitCode {
             command,
         } => with_directories(&cli, |state| match command {
             Some(ServeCommand::Stop) => ahi::serve::stop(&state, socket.as_deref()),
+            Some(ServeCommand::Start) => {
+                let path = ahi::serve::ensure_running(&state, socket.as_deref())?;
+                println!("{}", path.display());
+                Ok(0)
+            }
             None => ahi::serve::run(&state, socket.as_deref(), *verbose),
         }),
         Command::Connect { socket } => {
@@ -995,6 +1012,8 @@ fn tui(
     actions: Option<&std::path::Path>,
     resume: Option<&str>,
     record: bool,
+    standalone: bool,
+    socket: Option<&std::path::Path>,
 ) -> ExitCode {
     let state = match directories(cli) {
         Ok(dirs) => dirs,
@@ -1003,7 +1022,7 @@ fn tui(
             return ExitCode::from(1);
         }
     };
-    match ahi::tui::run(&state, refresh, actions, resume, record) {
+    match ahi::tui::run(&state, refresh, actions, resume, record, standalone, socket) {
         Ok(output) => {
             if !output.text.is_empty() {
                 println!("{}", output.text);

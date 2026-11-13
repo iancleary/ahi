@@ -17,7 +17,7 @@ Two front ends reach the service the same way:
 | `ahi serve` | wraps a `Service` in a listener on a Unix socket; one process per user per host; never idles out |
 | `ahi exec` | a client: over the socket when a server answers, else a `Service` built in its own process, same calls |
 | `ahi connect` | copies stdin and stdout to the socket, so `ssh host ahi connect` is a remote connection |
-| `ahi tui` | records through the same `Recorder` today; becomes a client in the next PR |
+| `ahi tui` | a client: starts the server when none answers (`ensure_running`), attaches, renders the same events; `--standalone` keeps the engine in the chat |
 
 There is no network listener, no token, and no TLS. The socket is mode 600 in a directory of mode 700 (`$XDG_RUNTIME_DIR/ahi/serve.sock`, else `<state>/run/serve.sock`); whoever can open it is the user who owns it. Across machines, ssh carries the bytes and authenticates, exactly as it does for hc's own cores. hc still decides which host does what; ahi never holds a host registry and never resolves a worker label.
 
@@ -57,8 +57,12 @@ Error kinds: `usage`, `config`, `auth`, `policy`, `session`, `conflict`, `not_fo
 
 The command a person types and the worker a coordinator runs over ssh. The prompt comes from `-p`, `--prompt-file`, or stdin; `--headless` takes it only from a file, answers every `ask` as denied, and requires `--result-file`. Operator files (`--prompt-file`, `--result-file`, `--tools`) must lie outside `--workdir`, where the model's tools cannot read or overwrite them. The result file must not exist beforehand and is written owner-only through a rename. stdout carries the answer (or the whole document with `--format json`), stderr the progress lines (`run <id> tool <name> <target> exit <code>`; never arguments or output), and the exit code says how it ended: 0 ok, 1 turn failed, 2 usage, 3 configuration, 4 credential, 5 policy file, 6 cancelled or timed out, 7 session, 8 result file not written. SIGINT, SIGTERM, and SIGHUP cancel the turn, which closes as `cancelled` with its ledger. `--check` validates everything and makes no turn. `--session <id>` continues a recorded session; `--socket` insists on a server; `--standalone` insists on the in-process path. `ahi exec` never starts a server.
 
+## The chat as a client
+
+`ServiceBackend` (`src/chat/backend/service.rs`) implements the screen's `CompletionBackend`: `submit` creates the session at the first turn (in the screen's working directory, with its model and thinking level), sends changed settings as `session.settings`, subscribes from the tip, submits the last operator message as the prompt, and turns the session's events back into the screen's `ResponseEvent`s: `text` deltas, the assistant's calls and each tool result from `entry` events, `ask` events as approval requests whose decisions go back as `ask.answer`, and the `turn` event as `Completed` or `Failed`. `cancel` is `turn.cancel`; `/clear` is `reset`, a new session at the next turn. The server records, so the screen's own recorder is off; `--resume` reads the session file for its settings and messages and continues it on the server.
+
 ## Later
 
-- `ahi tui` as a client: start the server when none is live, attach locally or over `--attach "ssh host ahi connect"`, render from events, answer asks, cancel. Then the chat and an hc space can share a live session.
+- Attaching to a remote session over `--attach "ssh host ahi connect"`, so the chat and an hc space can share a live session across machines.
 - Delegation from a chat session over the socket (`docs/DELEGATION.md` to be rewritten against this protocol).
 - Import and export over the wire; a Windows named-pipe listener; per-tool OSC 7501 child records.

@@ -38,12 +38,19 @@ pub struct RunOutput {
 ///
 /// `resume` names a stored session to continue instead of opening the
 /// picker; `record` is false for `--no-history`.
+///
+/// Unless `standalone`, the chat runs its turns through the session
+/// service: the server on `socket` (or the default socket), started when
+/// none answers. `record` is false for `--no-history` and applies to the
+/// standalone engine only; the service always records.
 pub fn run(
     state: &Directories,
     refresh: bool,
     actions: Option<&Path>,
     resume: Option<&str>,
     record: bool,
+    standalone: bool,
+    socket: Option<&Path>,
 ) -> Result<RunOutput> {
     let actions =
         match actions {
@@ -106,12 +113,20 @@ pub fn run(
             }
             pick(state, &mut picker, false)
         };
+        let engine = if standalone {
+            chat::Engine::Standalone { record }
+        } else {
+            let path = crate::serve::ensure_running(state, socket)?;
+            let client = crate::service::client::Client::open(state, Some(&path), false)
+                .map_err(|err| Error::new(err.message))?;
+            chat::Engine::Service(client)
+        };
         match selected {
             Selected::Picked(selection) => {
-                chat::interact(state, &selection, actions.as_deref(), record, reopen)?
+                chat::interact(state, &selection, actions.as_deref(), engine, reopen)?
             }
             Selected::Resumed(id) => {
-                chat::interact_resumed(state, &id, actions.as_deref(), reopen)?
+                chat::interact_resumed(state, &id, actions.as_deref(), engine, reopen)?
             }
         }
     }
