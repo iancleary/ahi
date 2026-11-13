@@ -846,3 +846,201 @@ fn a_coordinator_delegates_a_task_to_a_worker_server() {
     fs::remove_dir_all(coordinator).unwrap();
     fs::remove_dir_all(worker).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn an_ask_nobody_hears_is_answered_unattended_and_the_turn_closes() {
+    use std::os::unix::net::UnixStream;
+    let (url, gateway) = loopback(tool_round(
+        &[(
+            "c1",
+            "write_file",
+            serde_json::json!({"path": "src/new.rs", "content": "// new\n"}),
+        )],
+        "done",
+    ));
+    let dir = fixture(&url);
+    let policy = dir.join("ops/ask.tools.yaml");
+    fs::write(
+        &policy,
+        "version: 1\nrules:\n\
+         - {id: writes, action: file_write, match: {tool: write_file, path: src}, effect: approve, ask: true}\n",
+    )
+    .unwrap();
+    let socket = std::env::temp_dir().join(format!("ahi-ask-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&socket);
+    let mut server = ahi(&dir)
+        .args(["serve", "--socket", socket.to_str().unwrap()])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while UnixStream::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline, "the server did not come up");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let call = |stream: &mut UnixStream,
+                lines: &mut std::io::Lines<BufReader<UnixStream>>,
+                method: &str,
+                params: serde_json::Value|
+     -> serde_json::Value {
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"id": 1, "method": method, "params": params})
+        )
+        .unwrap();
+        loop {
+            let line: serde_json::Value =
+                serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            if line.get("event").is_none() {
+                assert!(line["error"].is_null(), "{line}");
+                return line["result"].clone();
+            }
+        }
+    };
+
+    // An attended client subscribes, submits a turn that asks, hears the ask,
+    // and goes away without answering.
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let mut lines = BufReader::new(stream.try_clone().unwrap()).lines();
+    let work = dir.join("work").display().to_string();
+    let header = call(
+        &mut stream,
+        &mut lines,
+        "session.create",
+        serde_json::json!({"cwd": work, "gateway": "local", "model": "vendor/model", "thinking": "off"}),
+    );
+    let session = header["id"].as_str().unwrap().to_string();
+    call(
+        &mut stream,
+        &mut lines,
+        "session.subscribe",
+        serde_json::json!({"session": session, "after": 0}),
+    );
+    let submitted = call(
+        &mut stream,
+        &mut lines,
+        "turn.submit",
+        serde_json::json!({
+            "session": session, "prompt": "write it", "run_id": "ask-1", "workdir": work,
+            "tools": policy.to_str().unwrap(), "timeout": 30, "unattended": false,
+            "origin": "exec", "client": "test",
+        }),
+    );
+    assert_eq!(submitted["status"], "running");
+    loop {
+        let line: serde_json::Value =
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        if line["event"] == "ask" {
+            assert_eq!(line["run_id"], "ask-1");
+            assert_eq!(line["calls"][0]["tool"], "write_file");
+            break;
+        }
+    }
+    drop(lines);
+    drop(stream);
+
+    // Another client sees the turn close on its own, denied as unattended.
+    let mut other = UnixStream::connect(&socket).unwrap();
+    let mut other_lines = BufReader::new(other.try_clone().unwrap()).lines();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let doc = loop {
+        let found = call(
+            &mut other,
+            &mut other_lines,
+            "turn.get",
+            serde_json::json!({"session": session, "run_id": "ask-1"}),
+        );
+        if found["status"] != "running" {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the turn stayed open with nobody to ask"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(doc["status"], "ok", "{doc}");
+    assert_eq!(doc["tools"]["ask_denied"], 1, "{doc}");
+    assert!(!dir.join("work/src/new.rs").exists(), "the ask was denied");
+    gateway.join().unwrap();
+    let info = call(
+        &mut other,
+        &mut other_lines,
+        "session.get",
+        serde_json::json!({"session": session}),
+    );
+    assert!(info["open_run_id"].is_null(), "{info}");
+
+    let stop = ahi(&dir)
+        .args(["serve", "stop", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(code(&stop), 0, "{}", err(&stop));
+    assert!(server.wait().unwrap().success());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_exits_6_when_the_service_never_reports_the_turn() {
+    use std::os::unix::net::UnixListener;
+    let dir = fixture("http://127.0.0.1:1/");
+    let socket = std::env::temp_dir().join(format!("ahi-silent-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).unwrap();
+    // A server that accepts the turn and then says nothing more.
+    let fake = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut methods = Vec::new();
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let method = request["method"].as_str().unwrap_or_default().to_string();
+            let result = match method.as_str() {
+                "session.create" => serde_json::json!({"id": "fake-session"}),
+                "session.get" => serde_json::json!({"id": "fake-session", "tip": 0}),
+                "turn.submit" => serde_json::json!({"status": "running", "run_id": "silent-1"}),
+                _ => serde_json::json!({}),
+            };
+            methods.push(method);
+            writeln!(
+                writer,
+                "{}",
+                serde_json::json!({"id": request["id"], "result": result})
+            )
+            .unwrap();
+        }
+        methods
+    });
+    let started = Instant::now();
+    let output = ahi(&dir)
+        .args([
+            "exec",
+            "--model",
+            "local/vendor/model",
+            "--timeout",
+            "1",
+            "-p",
+            "anyone there",
+            "--socket",
+        ])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 6, "{}", err(&output));
+    assert!(
+        err(&output).contains("run silent-1 did not close in time"),
+        "{}",
+        err(&output)
+    );
+    // The turn's timeout plus the service's two graces, and not much more.
+    assert!(started.elapsed() >= Duration::from_secs(9));
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let methods = fake.join().unwrap();
+    assert!(methods.contains(&"turn.submit".to_string()), "{methods:?}");
+    let _ = fs::remove_file(&socket);
+    fs::remove_dir_all(dir).unwrap();
+}

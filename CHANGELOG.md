@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- `ahi serve`: an `ask` emitted after its last subscriber had gone, or one no client ever answered, left the turn open and the session `conflict` until the server restarted. The ask is now sent first and tested after: one nobody heard is answered `Unattended` at once; while one waits, the subscribers are probed every second with a `keepalive`, and the asks are settled `Unattended` when the last subscriber leaves or after ten minutes.
+- `ahi serve`: a panic on a turn thread left the turn open for good. The turn now closes `failed` with `error.kind: turn` ("the turn thread panicked"), waiting asks are answered `Unattended`, the `turn` event is emitted, and the next `turn.submit` is accepted.
+- `ahi exec` waits for the `turn` event no longer than the turn's timeout plus the service's two graces, and exits 6 naming the run when the service never reports it.
+
 ## 0.16.0 (2026-11-13)
 
 ### Added

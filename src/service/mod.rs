@@ -46,7 +46,12 @@ const SUBSCRIBER_CAPACITY: usize = 256;
 pub(crate) const GRACE: Duration = Duration::from_secs(5);
 /// After a cancel, how long a turn waits for the engine's last word before
 /// closing on its own.
-const CANCEL_GRACE: Duration = Duration::from_secs(3);
+pub(crate) const CANCEL_GRACE: Duration = Duration::from_secs(3);
+/// The longest an `ask` waits for a client before it is answered `Unattended`.
+const ASK_CEILING: Duration = Duration::from_secs(600);
+/// While an `ask` waits, how often the subscribers are probed with a
+/// keepalive: only a send finds one whose connection has ended.
+const ASK_PROBE: Duration = Duration::from_secs(1);
 /// The answer text kept in a result document.
 const TEXT_CAP: usize = 64 * 1024;
 
@@ -169,7 +174,7 @@ struct Live {
     open: Option<OpenTurn>,
     subscribers: Vec<SyncSender<Event>>,
     /// Approvals waiting on a client, by ask id.
-    asks: HashMap<String, ApprovalReply>,
+    asks: HashMap<String, PendingAsk>,
     /// Result documents of turns this process closed, by run id.
     results: HashMap<String, Value>,
 }
@@ -178,6 +183,13 @@ struct OpenTurn {
     run_id: String,
     backend: Arc<Mutex<HttpBackend>>,
     cancelled: bool,
+}
+
+/// An `ask` a client has not answered yet.
+struct PendingAsk {
+    reply: ApprovalReply,
+    calls: usize,
+    since: Instant,
 }
 
 impl Service {
@@ -532,13 +544,13 @@ impl Service {
     pub(crate) fn answer(&self, id: &str, ask_id: &str, allow: &[bool]) -> ServiceResult<()> {
         let live = self.live(id)?;
         let mut live = lock(&live);
-        let Some(reply) = live.asks.remove(ask_id) else {
+        let Some(ask) = live.asks.remove(ask_id) else {
             return Err(ServiceError::new(
                 "not_found",
                 format!("no ask {ask_id} is waiting on session {id}"),
             ));
         };
-        reply.send(
+        ask.reply.send(
             allow
                 .iter()
                 .map(|&yes| {
@@ -647,7 +659,20 @@ struct Turn {
 }
 
 impl Turn {
+    /// Runs the turn to its close. A panic on the way is a bug, and the
+    /// session must not stay `conflict` for it: the turn is closed `failed`
+    /// and the next `turn.submit` is accepted.
     fn run(self) {
+        let live = Arc::clone(&self.live);
+        let session = self.session.clone();
+        let run_id = self.run_id.clone();
+        let drove = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.drive()));
+        if drove.is_err() {
+            close_panicked(&live, &session, &run_id);
+        }
+    }
+
+    fn drive(self) {
         let _ = &self.service;
         let receiver = {
             let mut live = lock(&self.live);
@@ -673,6 +698,7 @@ impl Turn {
         // `CANCEL_GRACE` to report, then the turn closes without it, since a
         // request blocked on a silent server ends only at its own timeout.
         let mut closing_at: Option<Instant> = None;
+        let mut probe_at = Instant::now() + ASK_PROBE;
         let mut outcome: Option<Result<(), (ErrorKind, String)>> = None;
         while outcome.is_none() {
             let now = Instant::now();
@@ -695,6 +721,7 @@ impl Turn {
                     )))
                 }
             }
+            self.settle_asks(&mut ledger, &mut probe_at);
             if closing_at.is_none() {
                 let cancelled = lock(&self.live)
                     .open
@@ -793,13 +820,14 @@ impl Turn {
                 live.fan_out_fresh(&self.session);
             }
             ResponseEvent::ToolApprovalRequested(request) => {
-                if self.request.unattended || live.subscribers.is_empty() {
+                if self.request.unattended {
                     ledger.unattended(request.calls.len());
                     request
                         .reply
                         .send(vec![ToolDecision::Unattended; request.calls.len()]);
                 } else {
                     let ask_id = format!("{}-{}", self.run_id, request.batch);
+                    let count = request.calls.len();
                     let calls = request
                         .calls
                         .iter()
@@ -812,13 +840,26 @@ impl Turn {
                             })
                         })
                         .collect();
-                    live.asks.insert(ask_id.clone(), request.reply);
+                    live.asks.insert(
+                        ask_id.clone(),
+                        PendingAsk {
+                            reply: request.reply,
+                            calls: count,
+                            since: Instant::now(),
+                        },
+                    );
+                    // The send is the test: a subscriber whose connection
+                    // ended is pruned by it, and an ask nobody heard is
+                    // answered at once instead of waiting on nobody.
                     live.emit(Event::Ask {
                         session: self.session.clone(),
                         run_id: self.run_id.clone(),
-                        ask_id,
+                        ask_id: ask_id.clone(),
                         calls,
                     });
+                    if live.subscribers.is_empty() {
+                        live.settle_ask(&ask_id, ledger);
+                    }
                 }
             }
             ResponseEvent::ToolResult {
@@ -857,6 +898,80 @@ impl Turn {
     }
 }
 
+impl Turn {
+    /// Answer `Unattended` for every ask no client will answer: all of them
+    /// once the last subscriber has left, and any older than `ASK_CEILING`.
+    fn settle_asks(&self, ledger: &mut Ledger, probe_at: &mut Instant) {
+        let mut live = lock(&self.live);
+        if live.asks.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        if now >= *probe_at {
+            live.emit(Event::Keepalive);
+            *probe_at = now + ASK_PROBE;
+        }
+        let orphaned = live.subscribers.is_empty();
+        let settled: Vec<String> = live
+            .asks
+            .iter()
+            .filter(|(_, ask)| orphaned || now.duration_since(ask.since) >= ASK_CEILING)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for ask_id in settled {
+            live.settle_ask(&ask_id, ledger);
+        }
+    }
+}
+
+impl Live {
+    /// Answer one waiting ask `Unattended`, counting it in the ledger.
+    fn settle_ask(&mut self, ask_id: &str, ledger: &mut Ledger) {
+        if let Some(ask) = self.asks.remove(ask_id) {
+            ledger.unattended(ask.calls);
+            ask.reply.send(vec![ToolDecision::Unattended; ask.calls]);
+        }
+    }
+}
+
+/// Close the open turn `run_id` as `failed` after its thread panicked, so the
+/// session takes the next turn. Waiting asks are answered `Unattended`.
+fn close_panicked(live: &Arc<Mutex<Live>>, session: &str, run_id: &str) {
+    let mut live = lock(live);
+    if !live.open.as_ref().is_some_and(|open| open.run_id == run_id) {
+        return;
+    }
+    for (_, ask) in live.asks.drain() {
+        ask.reply.send(vec![ToolDecision::Unattended; ask.calls]);
+    }
+    let mut doc = json!({
+        "schema": 1,
+        "ahi_version": crate::VERSION,
+        "run_id": run_id,
+        "session": session,
+        "status": Status::Failed.as_str(),
+        "error": {
+            "kind": "turn",
+            "message": "the turn thread panicked",
+        },
+    });
+    live.recorder.finish_turn(Status::Failed, doc.clone());
+    live.fan_out_fresh(session);
+    if let Some(found) = live.session().find_turn(run_id) {
+        if let crate::session::Kind::Turn(turn) = &found.kind {
+            doc["prompt_sha256"] = json!(turn.prompt_sha256);
+        }
+    }
+    live.results.insert(run_id.to_string(), doc.clone());
+    live.open = None;
+    live.emit(Event::Turn {
+        session: session.to_string(),
+        run_id: run_id.to_string(),
+        status: Status::Failed,
+        result: doc,
+    });
+}
+
 /// The result document's name for an engine failure.
 pub(crate) fn error_kind_name(kind: ErrorKind) -> &'static str {
     match kind {
@@ -888,4 +1003,73 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicked_turn_is_closed_failed_and_the_session_takes_the_next() {
+        let root = std::env::temp_dir().join(format!("ahi-service-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Directories::single_root(&root);
+        let service = Service::open(&state);
+        let header = service
+            .create_session(Some(&root), Some("local"), Some("vendor/model"), "off")
+            .unwrap();
+        let live = service.live(&header.id).unwrap();
+        let events = service.subscribe(&header.id, 0).unwrap();
+        let (reply, decisions) = mpsc::channel();
+        {
+            let mut live = lock(&live);
+            live.recorder.begin_turn_as("r1".into(), "hello");
+            live.asks.insert(
+                "r1-0".into(),
+                PendingAsk {
+                    reply: ApprovalReply::new(0, reply),
+                    calls: 2,
+                    since: Instant::now(),
+                },
+            );
+            live.open = Some(OpenTurn {
+                run_id: "r1".into(),
+                backend: Arc::new(Mutex::new(HttpBackend::new(state.clone()))),
+                cancelled: false,
+            });
+        }
+        assert_eq!(service.open_turns(), 1);
+
+        close_panicked(&live, &header.id, "r1");
+
+        assert_eq!(
+            decisions.recv().unwrap(),
+            vec![ToolDecision::Unattended; 2],
+            "the waiting ask is answered"
+        );
+        assert_eq!(service.open_turns(), 0);
+        assert!(lock(&live).asks.is_empty());
+        let doc = service.turn(&header.id, "r1").unwrap().unwrap();
+        assert_eq!(doc["status"], "failed");
+        assert_eq!(doc["error"]["kind"], "turn");
+        assert_eq!(doc["error"]["message"], "the turn thread panicked");
+        let info = service.session_info(&header.id).unwrap();
+        assert!(info["open_run_id"].is_null());
+        let mut closed = None;
+        while let Ok(event) = events.try_recv() {
+            if let Event::Turn { status, run_id, .. } = event {
+                closed = Some((status, run_id));
+            }
+        }
+        assert_eq!(closed, Some((Status::Failed, "r1".to_string())));
+        // The record says the same to a fresh reader.
+        let session = Store::new(&state).open(&header.id).unwrap();
+        let entry = session.find_turn("r1").unwrap();
+        let crate::session::Kind::Turn(turn) = &entry.kind else {
+            panic!("a turn entry");
+        };
+        assert_eq!(turn.status, Status::Failed);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
