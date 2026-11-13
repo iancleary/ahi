@@ -1,0 +1,34 @@
+# Reads anywhere; the repository's skills named rust-review and release may be
+# loaded by the model, the second after a prompt; the skill named deploy is
+# denied. A skill is text under .ahi/skills/<name>/SKILL.md (or the operator's
+# <config>/skills), read through the load_skill tool as a tool result: advice
+# to the model, never authority. Nothing is advertised until a rule here
+# names the skill.
+version: 1
+default: deny
+rules:
+  - id: read-tree
+    action: tool_call
+    match: {tool: read_file}
+    effect: approve
+  - id: list-tree
+    action: tool_call
+    match: {tool: list_dir}
+    effect: approve
+  - id: search-tree
+    action: tool_call
+    match: {tool: search_files}
+    effect: approve
+  - id: review-skill
+    action: skill
+    match: {skill: rust-review}
+    effect: approve
+  - id: release-skill
+    action: skill
+    match: {skill: release}
+    effect: approve
+    ask: true
+  - id: no-deploy-skill
+    action: skill
+    match: {skill: deploy}
+    effect: deny

@@ -35,7 +35,15 @@ pub(crate) enum ActionKind {
     FileWrite,
     Command,
     Delegate,
+    /// `action: skill`: the model may read the named skill's text through
+    /// `load_skill`. Matched on the name alone.
+    Skill,
 }
+
+/// The builtin tool `action: skill` rules govern. Until the tool exists,
+/// a skill rule governs no tool and advertises nothing; the names it
+/// approves are still visible to `ahi tools list` and `ahi doctor`.
+pub(crate) const SKILL_TOOL: &str = "load_skill";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRule {
@@ -49,7 +57,8 @@ pub(crate) struct ToolRule {
     pub(crate) path: Option<String>,
     /// `command` only: the argv prefix the command must start with, compared
     /// token by token, exactly. For `delegate`, the one worker label the rule
-    /// names, matched the same way against the call's label.
+    /// names, matched the same way against the call's label; for `skill`,
+    /// the one skill name.
     pub(crate) argv: Option<Vec<String>>,
     /// `command` only: toolchain variable names passed through to the
     /// process in addition to the base set, as in `ahi.hooks.yaml`.
@@ -109,6 +118,56 @@ impl ActionPolicy {
 
     pub(crate) fn rule(&self, id: &str) -> Option<&ToolRule> {
         self.rules.iter().find(|rule| rule.id == id)
+    }
+
+    /// Skill names at least one rule could approve, in rule order.
+    pub(crate) fn approved_skills(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            if rule.action == ActionKind::Skill && rule.effect == Effect::Approve {
+                if let Some(name) = rule.argv.as_ref().and_then(|argv| argv.first()) {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// The verdict for loading the skill called `name`: a deny rule matches
+    /// without regard to case (`Deploy` is `deploy` to a deny), an approval
+    /// only exactly, and a name no rule approves is denied. The `load_skill`
+    /// tool is its caller once it exists.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn evaluate_skill(&self, name: &str) -> Verdict {
+        let skill_rules = || {
+            self.rules
+                .iter()
+                .filter(|rule| rule.action == ActionKind::Skill)
+        };
+        let named = |rule: &ToolRule| rule.argv.as_ref().and_then(|argv| argv.first().cloned());
+        if let Some(rule) = skill_rules().find(|rule| {
+            rule.effect == Effect::Deny && named(rule).is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }) {
+            return Verdict::Deny {
+                rule_id: Some(rule.id.clone()),
+            };
+        }
+        let approving = |rule: &&ToolRule| {
+            rule.effect == Effect::Approve && named(rule).is_some_and(|n| n == name)
+        };
+        if let Some(rule) = skill_rules().find(|rule| approving(rule) && !rule.ask) {
+            return Verdict::Approve {
+                rule_id: rule.id.clone(),
+            };
+        }
+        if let Some(rule) = skill_rules().find(approving) {
+            return Verdict::Ask {
+                rule_id: rule.id.clone(),
+            };
+        }
+        Verdict::Deny { rule_id: None }
     }
 
     /// `path` is the file, directory, or working directory the call names;
@@ -275,6 +334,9 @@ struct RawMatch {
     /// `delegate` only: the worker label, required.
     #[serde(default)]
     worker: Option<String>,
+    /// `skill` only: the skill name, required.
+    #[serde(default)]
+    skill: Option<String>,
 }
 
 const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
@@ -315,6 +377,9 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
         }
         if rule.action != "delegate" && rule.matcher.worker.is_some() {
             return Err(fail("match.worker applies only to action: delegate".into()));
+        }
+        if rule.action != "skill" && rule.matcher.skill.is_some() {
+            return Err(fail("match.skill applies only to action: skill".into()));
         }
         let mut argv = None;
         let mut toolchain_env = Vec::new();
@@ -380,6 +445,43 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 argv = Some(vec![worker]);
                 (ActionKind::Delegate, vec![DELEGATE_TOOL.to_string()])
             }
+            "skill" => {
+                if rule
+                    .matcher
+                    .tool
+                    .as_deref()
+                    .is_some_and(|tool| tool != SKILL_TOOL)
+                {
+                    return Err(fail(format!(
+                        "action: skill governs `{SKILL_TOOL}` only; omit match.tool"
+                    )));
+                }
+                if rule.matcher.path.is_some() {
+                    return Err(fail(
+                        "match.path does not apply to action: skill; a skill is named".into(),
+                    ));
+                }
+                let Some(skill) = rule.matcher.skill.take() else {
+                    return Err(fail(
+                        "match.skill is required for action: skill (the skill's name)".into(),
+                    ));
+                };
+                if !crate::hooks::policy::valid_rule_id(&skill) {
+                    return Err(fail(
+                        "match.skill is a name of 1-64 ASCII letters, digits, '-', '_', or '.'"
+                            .into(),
+                    ));
+                }
+                if skill == "*" {
+                    return Err(fail(
+                        "match.skill names one skill; there is no wildcard".into(),
+                    ));
+                }
+                argv = Some(vec![skill]);
+                // No tool behind the rule yet: the names are visible, nothing
+                // is advertised to the model.
+                (ActionKind::Skill, Vec::new())
+            }
             "tool_call" => {
                 let Some(tool) = rule.matcher.tool else {
                     return Err(fail("match.tool is required for action: tool_call".into()));
@@ -397,6 +499,11 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 if tool == DELEGATE_TOOL {
                     return Err(fail(format!(
                         "`{tool}` hands a task to a worker; govern it with action: delegate"
+                    )));
+                }
+                if tool == SKILL_TOOL {
+                    return Err(fail(format!(
+                        "`{tool}` reads a skill; govern it with action: skill"
                     )));
                 }
                 if !builtin_tools.contains(&tool.as_str()) {
@@ -828,7 +935,7 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 9,
+            seen, 10,
             "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".
@@ -888,6 +995,78 @@ mod delegate_tests {
             ("- {id: x, action: delegate, match: {worker: w, path: src}, effect: approve}\n", "match.path does not apply"),
             ("- {id: x, action: tool_call, match: {tool: read_file, worker: w}, effect: approve}\n", "match.worker applies only"),
             ("- {id: x, action: tool_call, match: {tool: delegate}, effect: approve}\n", "govern it with action: delegate"),
+        ] {
+            let error = parse_rules(bad).unwrap_err().to_string();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn skill_rules_name_a_skill_and_advertise_no_tool_yet() {
+        let policy = parse_rules(
+            "- {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n\
+             - {id: release, action: skill, match: {skill: release}, effect: approve, ask: true}\n\
+             - {id: no-deploy, action: skill, match: {skill: deploy}, effect: deny}\n\
+             - {id: twice, action: skill, match: {skill: rust-review}, effect: approve}\n",
+        )
+        .unwrap();
+        assert!(
+            policy.advertised_tools().is_empty(),
+            "no tool behind the rule yet"
+        );
+        assert_eq!(policy.approved_skills(), ["rust-review", "release"]);
+        assert_eq!(policy.rules[0].action, ActionKind::Skill);
+        assert_eq!(policy.rules[0].argv, Some(vec!["rust-review".to_string()]));
+        assert!(matches!(
+            policy.evaluate_skill("rust-review"),
+            Verdict::Approve { rule_id } if rule_id == "review"
+        ));
+        assert!(matches!(
+            policy.evaluate_skill("release"),
+            Verdict::Ask { rule_id } if rule_id == "release"
+        ));
+        assert!(matches!(
+            policy.evaluate_skill("deploy"),
+            Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no-deploy"
+        ));
+        assert!(
+            matches!(
+                policy.evaluate_skill("Deploy"),
+                Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no-deploy"
+            ),
+            "deny ignores case"
+        );
+        assert!(
+            matches!(
+                policy.evaluate_skill("Rust-Review"),
+                Verdict::Deny { rule_id: None }
+            ),
+            "approve is exact"
+        );
+        assert!(matches!(
+            policy.evaluate_skill("other"),
+            Verdict::Deny { rule_id: None }
+        ));
+        // Deny beats approve for the same name.
+        let both = parse_rules(
+            "- {id: yes, action: skill, match: {skill: x}, effect: approve}\n\
+             - {id: no, action: skill, match: {skill: X}, effect: deny}\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            both.evaluate_skill("x"),
+            Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no"
+        ));
+        for (bad, message) in [
+            ("- {id: x, action: skill, match: {}, effect: approve}\n", "match.skill is required"),
+            ("- {id: x, action: skill, match: {skill: 'a b'}, effect: approve}\n", "name of 1-64"),
+            ("- {id: x, action: skill, match: {skill: '*'}, effect: approve}\n", "name of 1-64"),
+            ("- {id: x, action: skill, match: {skill: s, path: src}, effect: approve}\n", "match.path does not apply"),
+            ("- {id: x, action: skill, match: {skill: s, tool: read_file}, effect: approve}\n", "omit match.tool"),
+            ("- {id: x, action: skill, match: {skill: s, worker: w}, effect: approve}\n", "match.worker applies only"),
+            ("- {id: x, action: tool_call, match: {tool: read_file, skill: s}, effect: approve}\n", "match.skill applies only"),
+            ("- {id: x, action: delegate, match: {worker: w, skill: s}, effect: approve}\n", "match.skill applies only"),
+            ("- {id: x, action: tool_call, match: {tool: load_skill}, effect: approve}\n", "govern it with action: skill"),
         ] {
             let error = parse_rules(bad).unwrap_err().to_string();
             assert!(error.contains(message), "{bad}: {error}");

@@ -31,7 +31,7 @@ pub const DEFAULT_EXAMPLE: &str = "read-all";
 /// Shipped policies, in the order `ahi tools examples` prints them. The
 /// deliberately invalid `invalid-version.yaml` stays in `examples/tools` for
 /// the fail-closed walkthrough and is not offered here.
-pub const EXAMPLES: [Example; 8] = [
+pub const EXAMPLES: [Example; 9] = [
     Example {
         name: "read-all",
         text: include_str!("../examples/tools/read-all.yaml"),
@@ -66,6 +66,11 @@ pub const EXAMPLES: [Example; 8] = [
         name: "delegate",
         text: include_str!("../examples/tools/delegate.yaml"),
         summary: "read the whole working directory; hand tasks to the workers labeled rust-ci (after a prompt) and docs; prod denied",
+    },
+    Example {
+        name: "skills",
+        text: include_str!("../examples/tools/skills.yaml"),
+        summary: "read the whole working directory; the skills rust-review and release (after a prompt) may be loaded; deploy denied",
     },
     Example {
         name: "deny-all",
@@ -273,6 +278,8 @@ pub struct Summary {
     pub deny: usize,
     /// Builtin tools at least one rule could approve, in rule order.
     pub advertised: Vec<String>,
+    /// Skill names at least one rule could approve, in rule order.
+    pub skills: Vec<String>,
 }
 
 /// Read `root/ahi.tools.yaml`. `Ok(None)` when it is absent; an error when
@@ -286,6 +293,7 @@ pub fn summary(root: &Path) -> Result<Option<Summary>> {
         ask: 0,
         deny: 0,
         advertised: policy.advertised_tools(),
+        skills: policy.approved_skills(),
     };
     for rule in &policy.rules {
         match (rule.effect, rule.ask) {
@@ -326,6 +334,11 @@ fn policy_lines(root: &Path) -> Vec<String> {
             } else {
                 summary.advertised.join(", ")
             };
+            let skills = if summary.skills.is_empty() {
+                "none (no skill rule)".to_string()
+            } else {
+                summary.skills.join(", ")
+            };
             vec![
                 format!("tools policy: {}", path.display()),
                 format!(
@@ -333,6 +346,7 @@ fn policy_lines(root: &Path) -> Vec<String> {
                     summary.approve, summary.ask, summary.deny
                 ),
                 format!("tools advertised: {advertised}"),
+                format!("skills approved: {skills}"),
             ]
         }
         Ok(None) => vec![
@@ -473,6 +487,15 @@ mod tests {
         );
         let lines = doctor_lines(&dir);
         assert_eq!(lines[1], "tool rules: 6 approve, 2 ask, 3 deny");
+        assert_eq!(lines[3], "skills approved: none (no skill rule)");
+        fs::write(dir.join(FILE_NAME), example("skills").unwrap().text).unwrap();
+        let got = summary(&dir).unwrap().unwrap();
+        assert_eq!(got.skills, ["rust-review", "release"]);
+        assert!(got.advertised.iter().all(|tool| tool != "load_skill"));
+        assert_eq!(
+            doctor_lines(&dir)[3],
+            "skills approved: rust-review, release"
+        );
         fs::write(dir.join(FILE_NAME), example("deny-all").unwrap().text).unwrap();
         assert!(doctor_lines(&dir)[2].ends_with("none (no approve rule)"));
         fs::write(dir.join(FILE_NAME), "version: 2\n").unwrap();
