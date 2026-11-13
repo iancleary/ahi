@@ -19,6 +19,10 @@ use crate::harness::Protocol;
 
 /// How long `hold` keeps trying a lock another description still has.
 const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_millis(250);
+/// A session file at or past this size takes no new turn: the next
+/// `turn.submit` is refused with `limit` and a new session is the answer.
+/// A turn in flight finishes; the budget bounds growth, not a write.
+pub(crate) const SESSION_BUDGET: u64 = 64 * 1024 * 1024;
 
 pub(crate) struct Store {
     dir: PathBuf,
@@ -32,6 +36,66 @@ pub struct Summary {
     pub turns: usize,
     /// The last `turn` entry's run id and status, if any turn closed.
     pub last_turn: Option<(String, Status)>,
+    /// Bytes of whole lines in the file.
+    pub bytes: u64,
+}
+
+impl Summary {
+    /// The summary of a session file, read line by line: the header is
+    /// parsed, each entry line is parsed only for its type and, for a turn,
+    /// its run id and status, and nothing is kept. A torn last line is
+    /// skipped as `Session::read` skips it; a bad line is the file's problem.
+    pub(crate) fn scan(path: &Path) -> Result<Self, StoreError> {
+        use std::io::{BufRead, BufReader};
+        let file = File::open(path).map_err(|err| io(path, "cannot read", err))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        let mut header = None;
+        let mut entries = 0usize;
+        let mut turns = 0usize;
+        let mut last_turn = None;
+        let mut bytes = 0u64;
+        loop {
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|err| io(path, "cannot read", err))?;
+            if read == 0 || !line.ends_with('\n') {
+                break;
+            }
+            bytes += read as u64;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value = parse_line(path, &line)?;
+            if header.is_none() {
+                header = Some(Header::from_json(&value)?);
+                continue;
+            }
+            entries += 1;
+            if value["type"] == "turn" {
+                turns += 1;
+                let run_id = value["run_id"].as_str().unwrap_or_default().to_string();
+                let status = value["status"]
+                    .as_str()
+                    .and_then(Status::parse)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(format!("{}: a turn without a status", path.display()))
+                    })?;
+                last_turn = Some((run_id, status));
+            }
+        }
+        let header = header.ok_or_else(|| {
+            StoreError::Corrupt(format!("{}: no complete header line", path.display()))
+        })?;
+        Ok(Self {
+            header,
+            entries,
+            turns,
+            last_turn,
+            bytes,
+        })
+    }
 }
 
 impl Store {
@@ -123,8 +187,8 @@ impl Store {
             if path.extension().is_none_or(|ext| ext != "jsonl") {
                 continue;
             }
-            match Session::read(&path) {
-                Ok(session) => rows.push(session.summary()),
+            match Summary::scan(&path) {
+                Ok(summary) => rows.push(summary),
                 Err(err) => skipped.push(format!("{}: {err}", path.display())),
             }
         }
@@ -446,6 +510,7 @@ impl Session {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn summary(&self) -> Summary {
         let turns: Vec<&super::Turn> = self
             .entries
@@ -460,7 +525,18 @@ impl Session {
             entries: self.entries.len(),
             turns: turns.len(),
             last_turn: turns.last().map(|turn| (turn.run_id.clone(), turn.status)),
+            bytes: self.complete,
         }
+    }
+
+    /// Bytes of whole lines in the file.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.complete
+    }
+
+    /// Whether the file has reached `SESSION_BUDGET`.
+    pub(crate) fn over_budget(&self) -> bool {
+        self.complete >= SESSION_BUDGET
     }
 }
 
@@ -585,6 +661,13 @@ mod tests {
         let summary = reopened.summary();
         assert_eq!((summary.entries, summary.turns), (10, 3));
         assert_eq!(summary.last_turn, Some(("r3".into(), Status::Ok)));
+        assert_eq!(
+            Summary::scan(&store.dir().join(format!("{id}.jsonl"))).unwrap(),
+            summary,
+            "the line scan agrees with the whole read"
+        );
+        assert!(summary.bytes > 0);
+        assert!(!reopened.over_budget());
 
         // A torn last line is skipped, not an error; the lines before it hold.
         let path = store.dir().join(format!("{id}.jsonl"));
@@ -708,6 +791,56 @@ mod tests {
         let fork = dir.join("fork.jsonl");
         fs::write(&fork, forked).unwrap();
         assert!(matches!(other.import(&fork), Err(StoreError::Conflict(_))));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_at_its_budget_is_listed_but_takes_no_new_turn() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("session-budget");
+        let state = Directories::single_root(dir.join("state"));
+        let store = Store::new(&state);
+        let mut session = store
+            .create(Header::new("/w", "local", "m", "off"))
+            .unwrap();
+        // One message carrying the budget's worth of text.
+        let filler = "x".repeat(SESSION_BUDGET as usize);
+        session
+            .append(
+                None,
+                vec![message(Role::Operator, &filler), turn("r1", Status::Ok)],
+            )
+            .unwrap();
+        assert!(session.over_budget());
+        let id = session.id().to_string();
+        drop(session);
+        let (rows, skipped) = store.list().unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(rows[0].turns, 1);
+        assert!(rows[0].bytes >= SESSION_BUDGET);
+        let service = crate::service::Service::open(&state);
+        let err = service
+            .submit(
+                &id,
+                crate::service::TurnRequest {
+                    prompt: "more".into(),
+                    run_id: None,
+                    prompt_sha256: None,
+                    workdir: None,
+                    tools: None,
+                    timeout: None,
+                    thinking: None,
+                    unattended: true,
+                    origin: "exec",
+                    client: "test".into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, "limit");
+        assert!(
+            err.message.contains("start a new session"),
+            "{}",
+            err.message
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

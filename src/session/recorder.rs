@@ -205,6 +205,14 @@ impl Recorder {
         }));
     }
 
+    /// Whether the session has reached its size budget, so the next turn is
+    /// refused before anything is sent.
+    pub(crate) fn over_budget(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.over_budget())
+    }
+
     /// The turn completed.
     pub(crate) fn end_turn(&mut self) {
         self.close(Status::Ok, json!({"status": "ok", "origin": self.origin}));

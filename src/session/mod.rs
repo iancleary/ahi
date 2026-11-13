@@ -175,7 +175,7 @@ impl Status {
         }
     }
 
-    fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         match text {
             "ok" => Some(Self::Ok),
             "failed" => Some(Self::Failed),

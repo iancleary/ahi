@@ -25,6 +25,7 @@ pub fn list(state: &Directories, json: bool) -> Result<(String, Vec<String>)> {
             let mut object = row.header.to_json();
             object["entries"] = json!(row.entries);
             object["turns"] = json!(row.turns);
+            object["bytes"] = json!(row.bytes);
             if let Some((run_id, status)) = &row.last_turn {
                 object["last_status"] = json!(status.as_str());
                 object["last_run_id"] = json!(run_id);
