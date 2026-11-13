@@ -20,6 +20,7 @@ pub mod serve;
 pub mod service;
 pub mod session;
 mod shlex;
+pub mod skills;
 pub mod term;
 mod tool_policy;
 pub mod tools;
