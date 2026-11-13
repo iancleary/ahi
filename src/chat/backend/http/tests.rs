@@ -1,6 +1,8 @@
 use super::*;
 use crate::chat::backend::parse_selection;
 use crate::chat::backend::sse::FRAME_CAP;
+// `Caller` and `ToolRecord` are used by the Unix-only cancel and record tests.
+#[cfg_attr(not(unix), allow(unused_imports))]
 use crate::chat::backend::{Caller, ProposedAction, ToolCall, ToolDecision, ToolRecord};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
