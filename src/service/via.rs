@@ -1,8 +1,8 @@
 //! The one parser for a connect command: `ahi exec --via`, `ahi tui --via`,
-//! and `AHI_DELEGATE_VIA`. Shell-like words without a shell: single quotes
-//! keep everything, double quotes keep everything but `\"` and `\\`, a
-//! backslash outside quotes keeps the next character. No variables, no
-//! globs, no operators; a path with a space is quoted and stays one token.
+//! and `AHI_DELEGATE_VIA`. The words come from the hook runner's `shlex`,
+//! POSIX `shlex.split` without a shell: quotes and backslashes, no
+//! variables, no globs, no operators; a path with a space is quoted and
+//! stays one token. This module adds the bounds a connect command has.
 
 /// Most tokens a connect command may have, the same bound as `run_command`.
 pub(crate) const MAX_TOKENS: usize = 64;
@@ -16,70 +16,12 @@ pub(crate) fn split(command: &str) -> Result<Vec<String>, String> {
             "the connect command is longer than {MAX_BYTES} bytes"
         ));
     }
-    if command.contains('\0') {
-        return Err("the connect command contains NUL".to_string());
-    }
-    let mut argv = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut chars = command.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            ' ' | '\t' | '\n' | '\r' => {
-                if in_word {
-                    argv.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => word.push(c),
-                        None => return Err("the connect command has an unclosed '".to_string()),
-                    }
-                }
-            }
-            '"' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(c @ ('"' | '\\')) => word.push(c),
-                            Some(c) => {
-                                word.push('\\');
-                                word.push(c);
-                            }
-                            None => {
-                                return Err("the connect command has an unclosed \"".to_string())
-                            }
-                        },
-                        Some(c) => word.push(c),
-                        None => return Err("the connect command has an unclosed \"".to_string()),
-                    }
-                }
-            }
-            '\\' => {
-                in_word = true;
-                match chars.next() {
-                    Some(c) => word.push(c),
-                    None => return Err("the connect command ends with a backslash".to_string()),
-                }
-            }
-            c => {
-                in_word = true;
-                word.push(c);
-            }
-        }
-    }
-    if in_word {
-        argv.push(word);
-    }
-    if argv.is_empty() {
-        return Err("the connect command is empty".to_string());
-    }
+    let argv = crate::shlex::split(command).map_err(|err| {
+        format!(
+            "the connect command: {}",
+            err.to_string().replace("entry ", "")
+        )
+    })?;
     if argv.len() > MAX_TOKENS {
         return Err(format!(
             "the connect command has more than {MAX_TOKENS} tokens"
@@ -114,9 +56,11 @@ mod tests {
         assert_eq!(split("\"$HOME\"").unwrap(), ["$HOME"], "no expansion");
         assert!(split("").unwrap_err().contains("empty"));
         assert!(split("   ").unwrap_err().contains("empty"));
-        assert!(split("a 'b").unwrap_err().contains("unclosed '"));
-        assert!(split("a \"b").unwrap_err().contains("unclosed \""));
-        assert!(split("a \\").unwrap_err().contains("backslash"));
+        assert!(split("a 'b").unwrap_err().contains("unclosed single quote"));
+        assert!(split("a \"b")
+            .unwrap_err()
+            .contains("unclosed double quote"));
+        assert!(split("a \\").unwrap_err().contains("trailing backslash"));
         assert!(split("a\0b").unwrap_err().contains("NUL"));
         assert!(split(&"x ".repeat(MAX_TOKENS + 1))
             .unwrap_err()
