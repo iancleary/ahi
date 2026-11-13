@@ -22,6 +22,12 @@ use serde_json::{json, Value};
 use super::{Event, Service, ServiceError, ServiceResult, Submitted, TurnRequest};
 use crate::session::Status;
 
+/// The longest turn the wire accepts, the same bound `delegate` puts on a
+/// worker. Longer is a client that should split its work.
+pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
+/// The longest `client` name written into a result document.
+pub(crate) const MAX_CLIENT_LEN: usize = 64;
+
 /// A client's message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Request {
@@ -136,17 +142,55 @@ pub(crate) fn turn_request(params: &Value) -> ServiceResult<TurnRequest> {
     if prompt.trim().is_empty() {
         return Err(usage("the prompt is empty"));
     }
+    // Everything else is bounded here, once, for every caller: a run id
+    // names a thread and an ask id and is written into the record; a timeout
+    // is added to an `Instant`, which panics past the horizon; the client
+    // name is written into every result document.
+    let run_id = text("run_id");
+    if run_id
+        .as_deref()
+        .is_some_and(|id| !crate::session::valid_run_id(id))
+    {
+        return Err(usage("run_id is 1 to 64 letters, digits, `-`, or `_`"));
+    }
+    let prompt_sha256 = text("prompt_sha256");
+    if prompt_sha256
+        .as_deref()
+        .is_some_and(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(usage("prompt_sha256 is 64 hex digits"));
+    }
+    let timeout = match params.get("timeout") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let seconds = value
+                .as_u64()
+                .filter(|&seconds| (1..=MAX_TIMEOUT_SECS).contains(&seconds))
+                .ok_or_else(|| {
+                    usage(&format!(
+                        "timeout is whole seconds, 1 to {MAX_TIMEOUT_SECS}"
+                    ))
+                })?;
+            Some(Duration::from_secs(seconds))
+        }
+    };
+    let client = text("client").unwrap_or_default();
+    if client.len() > MAX_CLIENT_LEN || client.chars().any(char::is_control) {
+        return Err(usage(&format!(
+            "client is at most {MAX_CLIENT_LEN} bytes of printable text"
+        )));
+    }
     Ok(TurnRequest {
         prompt,
-        run_id: text("run_id"),
-        prompt_sha256: text("prompt_sha256"),
+        run_id,
+        prompt_sha256,
         workdir: text("workdir").map(PathBuf::from),
         tools: text("tools").map(PathBuf::from),
-        timeout: params["timeout"].as_u64().map(Duration::from_secs),
+        timeout,
         thinking: text("thinking"),
         unattended: params["unattended"].as_bool().unwrap_or(false),
         origin,
-        client: text("client").unwrap_or_default(),
+        client,
     })
 }
 
@@ -274,5 +318,65 @@ pub(crate) fn dispatch(
             kind: "not_found",
             message: format!("unknown method `{other}`"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(extra: Value) -> ServiceResult<TurnRequest> {
+        let mut params = json!({"session": "s", "prompt": "hello"});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            params[key] = value.clone();
+        }
+        turn_request(&params)
+    }
+
+    #[test]
+    fn turn_params_are_bounded_once_for_every_caller() {
+        let plain = request(json!({})).unwrap();
+        assert_eq!(plain.timeout, None);
+        assert_eq!(plain.client, "");
+        assert_eq!(
+            request(json!({"timeout": 3600})).unwrap().timeout,
+            Some(Duration::from_secs(3600))
+        );
+        for bad in [
+            json!(0),
+            json!(3601),
+            json!(u64::MAX),
+            json!(-1),
+            json!("5"),
+            json!(1.5),
+        ] {
+            let err = request(json!({"timeout": bad})).unwrap_err();
+            assert_eq!(err.kind, "usage", "{bad}");
+            assert!(err.message.contains("timeout"), "{bad}: {}", err.message);
+        }
+        assert!(request(json!({"run_id": "run-1_a"})).is_ok());
+        for bad in ["", "a b", "x/y", &"r".repeat(65), "ünïcode"] {
+            assert_eq!(
+                request(json!({"run_id": bad})).unwrap_err().kind,
+                "usage",
+                "{bad}"
+            );
+        }
+        assert!(request(json!({"prompt_sha256": "a".repeat(64)})).is_ok());
+        assert_eq!(
+            request(json!({"prompt_sha256": "abc"})).unwrap_err().kind,
+            "usage"
+        );
+        assert!(request(json!({"client": "ahi exec"})).is_ok());
+        assert_eq!(
+            request(json!({"client": "x".repeat(65)})).unwrap_err().kind,
+            "usage"
+        );
+        assert_eq!(
+            request(json!({"client": "line\nbreak"})).unwrap_err().kind,
+            "usage"
+        );
+        assert_eq!(request(json!({"prompt": "  "})).unwrap_err().kind, "usage");
     }
 }
