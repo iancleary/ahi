@@ -6,6 +6,12 @@
 
 - `ahi.tools.yaml` takes `action: skill` rules: `match.skill: <name>` names one skill the model may load (no wildcard, deny-by-default, a deny matches the name without regard to case and an approval exactly), with `effect` and `ask` as every other kind. `ahi tools list` and `ahi doctor` show the approved names (`skills approved: …`), and `examples/tools/skills.yaml` shows the rules. The `load_skill` tool that reads a skill follows; until then a skill rule parses and advertises nothing. Design in `docs/SKILLS.md`.
 
+### Fixed
+
+- `ahi serve` holds `serve.lock` beside the socket for its life (`flock`, `ahi-unix` 0.3.0), so two chats starting at once can no longer produce two servers with one listening on an unlinked socket forever; only the lock holder removes the socket file, and a second `ahi serve` exits at once saying a server already runs. The socket is bound under a private name, set to mode 600, and renamed into place, so it is never visible with umask permissions.
+- `ahi serve` checks every connection's peer credentials (`SO_PEERCRED` / `getpeereid`) before reading a byte and refuses another user with `auth`; holds at most 64 connections and 16 subscriptions per connection, refusing the next with `limit`; and refuses new requests with `conflict` while it drains after `stop`.
+- `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.
+
 ## 0.16.1 (2026-11-13)
 
 ### Fixed

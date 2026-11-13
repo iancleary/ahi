@@ -124,8 +124,12 @@ pub fn run(
             chat::Engine::Service(client)
         } else {
             let path = crate::serve::ensure_running(state, socket)?;
-            let client = crate::service::client::Client::open(state, Some(&path), false)
+            let mut client = crate::service::client::Client::open(state, Some(&path), false)
                 .map_err(|err| Error::new(err.message))?;
+            let health = client
+                .call("health", serde_json::json!({}))
+                .map_err(|err| Error::new(err.message))?;
+            crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)?;
             chat::Engine::Service(client)
         };
         match selected {
