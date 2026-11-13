@@ -7,14 +7,15 @@
 //! text, tool arguments, and tool output cannot add a rule or a grant.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::tools::{self, PreparedCall, ToolDetail, Workspace};
+use super::tools::{self, Arguments, PreparedCall, ToolDetail, Workspace};
 use super::{
     ApprovalReply, ApprovalRequest, ProposedAction, ResponseEvent, ToolCall, ToolDecision,
+    ToolRecord,
 };
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::error::{Error, Result};
@@ -53,11 +54,42 @@ pub(super) struct SessionGrant {
 /// Held by the backend for the life of the chat process.
 pub(super) type SessionGrants = Arc<Mutex<Vec<SessionGrant>>>;
 
+/// Who is running the turn, for the audit log: the screen, a one-shot
+/// command, or the server, and the turn's run id so a ledger and
+/// `audit.log` can be joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Caller {
+    pub(crate) origin: &'static str,
+    pub(crate) run_id: Option<String>,
+}
+
+impl Default for Caller {
+    fn default() -> Self {
+        Self {
+            origin: "tui",
+            run_id: None,
+        }
+    }
+}
+
+/// What one turn brings to the runtime besides policy: who is asking, how
+/// long the turn may take, and the flag that stops it.
+pub(super) struct TurnContext {
+    pub(super) caller: Caller,
+    /// The turn's deadline: no call starts past it and a command's own
+    /// timeout is clamped to what remains. `None` is unbounded.
+    pub(super) deadline: Option<Instant>,
+    /// The turn's cancel flag, shared with the stream reader. No call starts
+    /// once it is set, and a running command is killed.
+    pub(super) cancel: Arc<AtomicBool>,
+}
+
 pub(super) struct ToolRuntime {
     policy: ActionPolicy,
     workspace: Workspace,
     /// Where `audit.log` lives; every write appends a line there.
     state_dir: PathBuf,
+    turn: TurnContext,
     advertised: Vec<String>,
     gateway: String,
     destination: String,
@@ -72,6 +104,7 @@ struct Outcome {
     output: String,
     detail: Option<ToolDetail>,
     elapsed: Duration,
+    record: Option<ToolRecord>,
 }
 
 /// `Run` and `Ask` carry the id of the rule that approved or asked, so the
@@ -96,6 +129,7 @@ impl ToolRuntime {
         destination: &str,
         grants: SessionGrants,
         policy_file: Option<&Path>,
+        turn: TurnContext,
     ) -> Result<Option<Self>> {
         let policy = match policy_file {
             Some(path) => Some(tool_policy::load_file(path, &tools::BUILTIN)?),
@@ -111,6 +145,7 @@ impl ToolRuntime {
         Ok(Some(Self {
             workspace: Workspace::open(directory, state)?,
             state_dir: state.state.clone(),
+            turn,
             policy,
             advertised,
             gateway: gateway.to_string(),
@@ -185,6 +220,7 @@ impl ToolRuntime {
                     exit_code: outcome.exit_code,
                     detail: outcome.detail,
                     elapsed: outcome.elapsed,
+                    record: outcome.record.map(Box::new),
                 },
             )?;
             emit(sender, ResponseEvent::ToolCallReturned)?;
@@ -321,12 +357,22 @@ impl ToolRuntime {
                     Plan::Run(prepared, rule)
                 }
                 ToolDecision::Deny => Plan::Done(denied(&prepared, "denied by the operator")),
+                ToolDecision::Unattended => Plan::Done(denied(
+                    &prepared,
+                    "this call needs operator approval and no operator is attending the turn",
+                )),
             };
         }
         Ok(false)
     }
 
     fn run(&mut self, prepared: &PreparedCall, rule_id: &str) -> Outcome {
+        // A cancelled turn runs nothing more. The stream reader and the
+        // round loop check the same flag, but a batch is several calls, and
+        // the flag can be set between two of them.
+        if self.turn.cancel.load(Ordering::Relaxed) {
+            return denied(prepared, "turn cancelled before this call started");
+        }
         if self.output_bytes >= MAX_TURN_OUTPUT_BYTES {
             return error(
                 prepared.tool,
@@ -336,7 +382,24 @@ impl ToolRuntime {
         }
         let toolchain_env = self.toolchain_env(rule_id);
         let started = Instant::now();
-        let executed = tools::execute(prepared, &self.workspace, &toolchain_env);
+        // The turn's deadline bounds every call: nothing starts past it, and a
+        // program gets at most the time that remains, so a timeout means what
+        // it says even for a command that asked for ten minutes.
+        let mut bounded = prepared.clone();
+        if let Some(deadline) = self.turn.deadline {
+            let remaining = deadline.saturating_duration_since(started);
+            if remaining.is_zero() {
+                return error(
+                    prepared.tool,
+                    Some(prepared.target()),
+                    "deadline reached: the turn's time ran out before this call started",
+                );
+            }
+            if let Arguments::Command { timeout_secs, .. } = &mut bounded.arguments {
+                *timeout_secs = (*timeout_secs).min(remaining.as_secs().max(1));
+            }
+        }
+        let executed = tools::execute(&bounded, &self.workspace, &toolchain_env, &self.turn.cancel);
         let elapsed = started.elapsed();
         match executed {
             Ok(tools::Executed {
@@ -345,11 +408,12 @@ impl ToolRuntime {
                 command,
                 detail,
             }) => {
+                let mut record = None;
                 if let Some(report) = write {
-                    self.audit_write(prepared, &report, "ok");
+                    record = Some(self.record_write(prepared, &report, "ok"));
                 }
                 if let Some(report) = command {
-                    self.audit_command(prepared, &report, "ok");
+                    record = Some(self.record_command(prepared, &report, "ok", Some(true)));
                 }
                 Outcome {
                     exit_code: EXIT_OK,
@@ -362,9 +426,11 @@ impl ToolRuntime {
                     content,
                     detail,
                     elapsed,
+                    record,
                 }
             }
-            Err(message) => {
+            Err(failure) => {
+                let mut record = None;
                 if matches!(prepared.tool, tools::EDIT_FILE | tools::WRITE_FILE) {
                     let none = tools::WriteReport {
                         before: None,
@@ -372,7 +438,7 @@ impl ToolRuntime {
                         lines_added: 0,
                         lines_removed: 0,
                     };
-                    self.audit_write(prepared, &none, message);
+                    record = Some(self.record_write(prepared, &none, failure.message));
                 }
                 if prepared.tool == tools::RUN_COMMAND {
                     let none = tools::CommandReport {
@@ -380,44 +446,109 @@ impl ToolRuntime {
                         duration_ms: 0,
                         env_names: Vec::new(),
                     };
-                    self.audit_command(prepared, &none, message);
+                    record =
+                        Some(self.record_command(prepared, &none, failure.message, failure.ran));
                 }
-                let mut outcome = error(prepared.tool, Some(prepared.target()), message);
+                let mut outcome = error(prepared.tool, Some(prepared.target()), failure.message);
                 outcome.elapsed = elapsed;
+                outcome.record = record;
                 outcome
             }
         }
     }
 
-    /// One audit line per attempted write: path and hashes, never contents.
-    /// A failure to log does not undo a write that already happened.
-    fn audit_write(&self, prepared: &PreparedCall, report: &tools::WriteReport, outcome: &str) {
-        let event = crate::hooks::audit::WriteEvent {
-            tool: prepared.tool,
-            repo: self.workspace.root(),
-            path: prepared.target(),
-            outcome,
-            before: report.before.as_deref(),
-            after: (!report.after.is_empty()).then_some(report.after.as_str()),
+    /// The record of one attempted write: path and hashes, never contents.
+    /// Its audit line is appended on the way; a failure to log does not undo
+    /// a write that already happened.
+    fn record_write(
+        &self,
+        prepared: &PreparedCall,
+        report: &tools::WriteReport,
+        outcome: &str,
+    ) -> ToolRecord {
+        let record = ToolRecord::Write {
+            tool: prepared.tool.to_string(),
+            path: prepared.target().to_string(),
+            outcome: outcome.to_string(),
+            before: report.before.clone(),
+            after: (!report.after.is_empty()).then(|| report.after.clone()),
             lines_added: report.lines_added,
             lines_removed: report.lines_removed,
         };
-        let _ = crate::hooks::audit::append_write(&self.state_dir, &event);
+        self.audit(&record, &[]);
+        record
     }
 
-    /// One audit line per attempted command: argv, cwd, exit code, duration,
-    /// and environment names. Output is not logged.
-    fn audit_command(&self, prepared: &PreparedCall, report: &tools::CommandReport, outcome: &str) {
-        let event = crate::hooks::audit::CommandEvent {
-            repo: self.workspace.root(),
-            argv: prepared.argv(),
-            cwd: &prepared.path,
-            outcome,
+    /// The record of one attempted command: argv, cwd, exit code, duration.
+    /// Its audit line adds the environment names; output is never logged.
+    fn record_command(
+        &self,
+        prepared: &PreparedCall,
+        report: &tools::CommandReport,
+        outcome: &str,
+        ran: Option<bool>,
+    ) -> ToolRecord {
+        let record = ToolRecord::Command {
+            argv: prepared.argv().to_vec(),
+            cwd: prepared.path.clone(),
+            outcome: outcome.to_string(),
+            ran,
             exit_code: report.exit_code,
             duration_ms: report.duration_ms,
-            env_names: &report.env_names,
         };
-        let _ = crate::hooks::audit::append_command(&self.state_dir, &event);
+        self.audit(&record, &report.env_names);
+        record
+    }
+
+    /// One audit line derived from a record, so the two cannot drift.
+    fn audit(&self, record: &ToolRecord, env_names: &[String]) {
+        let caller = &self.turn.caller;
+        let _ = match record {
+            ToolRecord::Write {
+                tool,
+                path,
+                outcome,
+                before,
+                after,
+                lines_added,
+                lines_removed,
+            } => crate::hooks::audit::append_write(
+                &self.state_dir,
+                &crate::hooks::audit::WriteEvent {
+                    origin: caller.origin,
+                    run_id: caller.run_id.as_deref(),
+                    tool,
+                    repo: self.workspace.root(),
+                    path,
+                    outcome,
+                    before: before.as_deref(),
+                    after: after.as_deref(),
+                    lines_added: *lines_added,
+                    lines_removed: *lines_removed,
+                },
+            ),
+            ToolRecord::Command {
+                argv,
+                cwd,
+                outcome,
+                exit_code,
+                duration_ms,
+                ran: _,
+            } => crate::hooks::audit::append_command(
+                &self.state_dir,
+                &crate::hooks::audit::CommandEvent {
+                    origin: caller.origin,
+                    run_id: caller.run_id.as_deref(),
+                    repo: self.workspace.root(),
+                    argv,
+                    cwd,
+                    outcome,
+                    exit_code: *exit_code,
+                    duration_ms: *duration_ms,
+                    env_names,
+                },
+            ),
+        };
     }
 
     /// Charge every result's model-facing content, including denials and
@@ -446,6 +577,7 @@ fn empty() -> Outcome {
         output: String::new(),
         detail: None,
         elapsed: Duration::ZERO,
+        record: None,
     }
 }
 
@@ -458,6 +590,7 @@ fn error(tool: &str, target: Option<&str>, message: &str) -> Outcome {
         output: format!("{label}: {message}"),
         detail: None,
         elapsed: Duration::ZERO,
+        record: None,
     }
 }
 
@@ -468,6 +601,7 @@ fn denied(prepared: &PreparedCall, reason: &str) -> Outcome {
         output: format!("{} {}: {reason}", prepared.tool, prepared.target()),
         detail: None,
         elapsed: Duration::ZERO,
+        record: None,
     }
 }
 

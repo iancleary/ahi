@@ -29,7 +29,7 @@ test:
 doc-check:
     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 
-# verify package contents without publishing (ahi-win32 is packaged with ahi)
+# verify package contents without publishing (the member crates are packaged with ahi)
 package:
     cargo package --workspace
 

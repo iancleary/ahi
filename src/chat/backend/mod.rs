@@ -15,6 +15,8 @@ pub(crate) use tool_call::ToolCall;
 use std::sync::mpsc::{Receiver, Sender};
 
 pub(crate) use http::HttpBackend;
+#[allow(unused_imports)]
+pub(crate) use tool_loop::Caller;
 
 use super::thinking::ThinkingLevel;
 use super::transcript::ChatMessage;
@@ -89,6 +91,10 @@ pub(crate) enum ResponseEvent {
         detail: Option<tools::ToolDetail>,
         /// Wall time of the call itself, approval excluded.
         elapsed: std::time::Duration,
+        /// What the call did to the world, for a caller's ledger. `None` for
+        /// reads, denials, and calls that never reached a tool. Boxed to keep
+        /// the common text events small.
+        record: Option<Box<ToolRecord>>,
     },
     Completed,
     /// A completion that could not be produced. `kind` is what the screen
@@ -137,6 +143,55 @@ pub(crate) enum ToolDecision {
     /// Approve, and grant this tool under `grant_prefix` for the session.
     ApproveForSession,
     Deny,
+    /// Denied because nobody can answer: a headless run, or no operator
+    /// attached. The model is told so, which is more useful than "denied by
+    /// the operator" when there is none. Sent by `ahi exec` and `ahi serve`.
+    #[allow(dead_code)]
+    Unattended,
+}
+
+/// The audit-log facts of one effectful call, as a caller's ledger records
+/// them: paths and hashes, argv and exit codes. Never contents or output.
+/// The audit line is derived from this record, so a ledger and `audit.log`
+/// agree line for line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolRecord {
+    Write {
+        tool: String,
+        /// Workspace-relative path.
+        path: String,
+        /// `ok`, or the tool's error message.
+        outcome: String,
+        /// SHA-256 hex of the file before and after; `None` when absent.
+        before: Option<String>,
+        after: Option<String>,
+        lines_added: usize,
+        lines_removed: usize,
+    },
+    Command {
+        argv: Vec<String>,
+        /// Workspace-relative working directory; empty is the root.
+        cwd: String,
+        outcome: String,
+        /// Whether a process ran: `Some(true)` it did (even if killed),
+        /// `Some(false)` it never started, `None` unknown.
+        ran: Option<bool>,
+        exit_code: Option<i32>,
+        duration_ms: u128,
+    },
+}
+
+impl ToolRecord {
+    /// Whether this call changed the working directory or ran a program.
+    /// `None` when that cannot be known from the outcome. Read by the
+    /// ledger `ahi exec` and `ahi serve` build.
+    #[allow(dead_code)]
+    pub(crate) fn effect(&self) -> Option<bool> {
+        match self {
+            Self::Write { outcome, .. } => Some(outcome == "ok"),
+            Self::Command { ran, .. } => *ran,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

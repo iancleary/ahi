@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub(crate) use run_command::{render as render_argv, CommandReport};
+use std::sync::atomic::AtomicBool;
 pub(super) use workspace::Workspace;
 pub(crate) use write_file::WriteReport;
 
@@ -481,6 +482,31 @@ pub(super) struct Executed {
     pub(super) detail: Option<ToolDetail>,
 }
 
+/// A call that did not finish: the text the model and the operator see,
+/// and for a command whether a process ran first. `None` is "not known from
+/// here": a read or a write that failed in the workspace, where nothing
+/// about a process applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ToolFailure {
+    pub(super) message: &'static str,
+    pub(super) ran: Option<bool>,
+}
+
+impl From<&'static str> for ToolFailure {
+    fn from(message: &'static str) -> Self {
+        Self { message, ran: None }
+    }
+}
+
+impl From<run_command::RunError> for ToolFailure {
+    fn from(error: run_command::RunError) -> Self {
+        Self {
+            message: error.message,
+            ran: Some(error.ran),
+        }
+    }
+}
+
 /// What the screen draws for a finished call beyond its text: the exact
 /// texts a write replaced, the separated streams of a command, or the
 /// query a search ran. Never sent to a model; `content` already carries
@@ -518,21 +544,28 @@ pub(crate) enum ToolDetail {
 }
 
 /// Run an approved call. `toolchain_env` is the approving command rule's
-/// pass-through list; other tools ignore it. `Err` text is safe to show and
+/// pass-through list; other tools ignore it. `cancel` is the turn's flag: a
+/// running command is killed when it is set. `Err` text is safe to show and
 /// to send to the model.
 pub(super) fn execute(
     call: &PreparedCall,
     workspace: &Workspace,
     toolchain_env: &[String],
-) -> Result<Executed, &'static str> {
+    cancel: &AtomicBool,
+) -> Result<Executed, ToolFailure> {
     // Result rows are one per line; headers and continuation notes are not
     // matches, so counts are approximate for the screen header only.
     let matches = |content: &str| content.lines().filter(|l| !l.is_empty()).count();
     match &call.arguments {
         Arguments::Command { argv, timeout_secs } => {
-            let cwd = workspace.resolve(&call.path)?;
+            let cwd = workspace
+                .resolve(&call.path)
+                .map_err(|message| ToolFailure {
+                    message,
+                    ran: Some(false),
+                })?;
             let (content, report, output) =
-                run_command::run(argv, &cwd, *timeout_secs, toolchain_env)?;
+                run_command::run(argv, &cwd, *timeout_secs, toolchain_env, cancel)?;
             Ok(Executed {
                 content,
                 detail: Some(ToolDetail::Command {
@@ -554,7 +587,7 @@ pub(super) fn execute(
         } => {
             let (path, exists) = workspace.resolve_for_write(&call.path)?;
             if !exists {
-                return Err("path does not exist or cannot be read");
+                return Err("path does not exist or cannot be read".into());
             }
             let (content, report, texts) = edit_file::run(&path, old, new, *replace_all)?;
             Ok(Executed {
@@ -792,8 +825,13 @@ mod tests {
         (root, workspace)
     }
 
+    /// Tests never cancel a call unless they say so.
+    static NEVER: AtomicBool = AtomicBool::new(false);
+
     fn run_text(call: &PreparedCall, workspace: &Workspace) -> Result<String, &'static str> {
-        execute(call, workspace, &[]).map(|executed| executed.content)
+        execute(call, workspace, &[], &NEVER)
+            .map(|executed| executed.content)
+            .map_err(|failure| failure.message)
     }
 
     fn read(workspace: &Workspace, path: &str) -> Result<String, &'static str> {
@@ -1079,7 +1117,9 @@ mod tests {
                 },
                 &workspace,
                 &[],
+                &NEVER,
             )
+            .map_err(|failure| failure.message)
         };
         let write = |path: &str, content: &str, overwrite| {
             execute(
@@ -1093,7 +1133,9 @@ mod tests {
                 },
                 &workspace,
                 &[],
+                &NEVER,
             )
+            .map_err(|failure| failure.message)
         };
         // Ambiguous, then unique, then replace_all.
         assert_eq!(
@@ -1291,7 +1333,9 @@ mod tests {
                 },
                 &workspace,
                 &["AHI_TEST_TOOLCHAIN".to_string()],
+                &NEVER,
             )
+            .map_err(|failure| failure.message)
         };
         std::env::set_var("AHI_TEST_SECRET_TOKEN", "leak");
         std::env::set_var("AHI_TEST_TOOLCHAIN", "kept");
@@ -1336,6 +1380,34 @@ mod tests {
             run(&["sh", "-c", "sleep 5"], "", 1).err(),
             Some("command timed out and was killed")
         );
+        // A cancel kills the program and everything it started: the
+        // grandchild holds stdout open, so a kill of the shell alone would
+        // leave this call waiting for its 30 s.
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let cancelled = execute(
+            &PreparedCall {
+                tool: RUN_COMMAND,
+                path: String::new(),
+                arguments: Arguments::Command {
+                    argv: vec!["sh".into(), "-c".into(), "sleep 30 & sleep 30".into()],
+                    timeout_secs: 60,
+                },
+            },
+            &workspace,
+            &[],
+            &cancel,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(cancelled.message, run_command::CANCELLED);
+        assert_eq!(cancelled.ran, Some(true));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         let big = run(&["sh", "-c", "yes | head -c 100000"], "", 30).unwrap();
         assert!(
             big.content.contains("[stdout truncated at 32768 bytes]"),

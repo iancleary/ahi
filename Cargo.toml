@@ -12,7 +12,7 @@ authors = ["Ian Cleary"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/ahi-widgets", "crates/ahi-win32"]
+members = [".", "crates/ahi-widgets", "crates/ahi-win32", "crates/ahi-unix"]
 
 [lib]
 name = "ahi"
@@ -36,6 +36,8 @@ quick-xml = "=0.42.0"
 ratatui-core = { version = "=0.1.2", default-features = false, features = ["std", "underline-color"] }
 ratatui-crossterm = { version = "=0.1.2", default-features = false, features = ["crossterm_0_29", "underline-color"] }
 ahi-widgets = { path = "crates/ahi-widgets", version = "=0.1.1" }
+# In-repo POSIX signal and process-group calls; stubs on other platforms.
+ahi-unix = { path = "crates/ahi-unix", version = "=0.1.0" }
 regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
@@ -47,7 +49,7 @@ unicode-width = "=0.2.3"
 ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
 yaml-rust2 = "=0.13.0"
 
-# In-repo Win32 clipboard; the only crate in the workspace with unsafe code.
+# In-repo Win32 clipboard; with ahi-unix, the only unsafe code in the workspace.
 [target.'cfg(windows)'.dependencies]
 ahi-win32 = { path = "crates/ahi-win32", version = "=0.1.1" }
 

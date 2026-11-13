@@ -1,0 +1,20 @@
+[package]
+name = "ahi-unix"
+description = "The POSIX calls ahi needs and std does not expose: signal handlers and process-group kill. In-repo so ahi can forbid unsafe code."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/iancleary/ahi"
+# Published under the same account as ahi, before each ahi release that bumps it.
+
+# No dependencies, by design: this crate and ahi-win32 hold the workspace's
+# only unsafe code, one extern "C" declaration per call.
+[dependencies]
+
+[lints.rust]
+# The whole purpose of this crate; every unsafe block carries a SAFETY comment.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

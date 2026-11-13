@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- A new in-repo workspace crate, `ahi-unix`, holds the two POSIX calls ahi needs and `std` does not expose: a signal handler that records SIGINT, SIGTERM, or SIGHUP for a loop to poll (first arrival wins, default disposition restored so a second copy ends the process), and `kill` aimed at a process group. It has no dependencies, compiles to stubs elsewhere, and like `ahi-win32` is published before `ahi`; `ahi` itself keeps forbidding unsafe code.
+- Every tool result event carries a record of what the call did (path and hashes for a write; argv, working directory, exit code, and whether a process ran for a command), and the audit line is derived from that record, so a ledger built from the events and `audit.log` cannot disagree. Audit lines name the front end that ran the turn (`origin`, `tui` today) and the turn's `run_id` when it has one.
+- The turn engine takes a deadline: no tool call starts past it and a command's own timeout is clamped to the time that remains. An approval may be answered `Unattended`, a denial whose reason tells the model that no operator is attending. Both are used by the headless and served turns that follow.
+
+### Fixed
+
+- Cancelling a turn (`Esc`) in the middle of a tool batch now stops the batch: the running command is killed together with every process it started, since the program leads its own process group on Unix, and the calls after it are denied as `turn cancelled` instead of running. Before, a kill reached only the program itself, so a helper it had spawned kept the output pipes open and the call waited for it, and the rest of the batch, including writes, still ran after the cancel.
+
 ## 0.15.0 (2026-11-12)
 
 ### Added

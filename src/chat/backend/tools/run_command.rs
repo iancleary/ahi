@@ -9,7 +9,8 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,15 +40,47 @@ pub(crate) struct CommandReport {
     pub(crate) env_names: Vec<String>,
 }
 
+/// The turn was cancelled (`Esc`, a timeout, a signal) while the program ran.
+pub(super) const CANCELLED: &str = "command cancelled and killed";
+
+/// Why `run` failed, and whether a process ran first. Every failure before
+/// `spawn` returns means nothing ran; a kill or a lost wait means something
+/// did, and a caller's ledger must say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunError {
+    pub(crate) message: &'static str,
+    pub(crate) ran: bool,
+}
+
+impl RunError {
+    fn before(message: &'static str) -> Self {
+        Self {
+            message,
+            ran: false,
+        }
+    }
+
+    fn after(message: &'static str) -> Self {
+        Self { message, ran: true }
+    }
+}
+
+/// Run `argv` until it exits, its timeout passes, or `cancel` is set. The
+/// child leads its own process group on Unix, and a kill takes the whole
+/// group, so a program that spawned helpers cannot leave them holding the
+/// output pipes open.
 pub(super) fn run(
     argv: &[String],
     cwd: &Path,
     timeout_secs: u64,
     toolchain_env: &[String],
-) -> Result<(String, CommandReport, CommandOutput), &'static str> {
-    let (program, args) = argv.split_first().ok_or("argv must not be empty")?;
+    cancel: &AtomicBool,
+) -> Result<(String, CommandReport, CommandOutput), RunError> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or(RunError::before("argv must not be empty"))?;
     if !cwd.is_dir() {
-        return Err("not a directory");
+        return Err(RunError::before("not a directory"));
     }
     let mut env = crate::hooks::local_hook::scrub_env(std::env::vars_os(), toolchain_env);
     // The hook runner's marker is not this; name the caller honestly.
@@ -60,16 +93,26 @@ pub(super) fn run(
     env_names.sort();
 
     let started = Instant::now();
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // A new group whose leader is the child, so `kill_tree` reaches
+        // everything it starts. The child never reads the terminal (stdin is
+        // null), so leaving the foreground group costs it nothing.
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
-        .map_err(|_| "cannot start the program (not found or not executable)")?;
+        .map_err(|_| RunError::before("cannot start the program (not found or not executable)"))?;
     let stdout = child
         .stdout
         .take()
@@ -79,19 +122,23 @@ pub(super) fn run(
         .take()
         .map(|pipe| thread::spawn(move || drain(pipe)));
     let deadline = started + Duration::from_secs(timeout_secs);
+    let mut cancelled = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
+            Ok(None) if cancel.load(Ordering::Relaxed) => {
+                kill_tree(&mut child);
+                cancelled = true;
+                break None;
+            }
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 break None;
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("cannot wait for the program");
+                kill_tree(&mut child);
+                return Err(RunError::after("cannot wait for the program"));
             }
         }
     };
@@ -104,7 +151,11 @@ pub(super) fn run(
     let (err, err_cut) = join(stderr);
     let duration_ms = started.elapsed().as_millis();
     let Some(status) = status else {
-        return Err("command timed out and was killed");
+        return Err(RunError::after(if cancelled {
+            CANCELLED
+        } else {
+            "command timed out and was killed"
+        }));
     };
     let exit_code = status.code();
     let mut content = match exit_code {
@@ -134,6 +185,15 @@ pub(super) fn run(
             stderr_cut: err_cut,
         },
     ))
+}
+
+/// End the child and, on Unix, every process in its group, then reap it.
+/// The group goes first so a helper cannot outlive the kill and keep the
+/// pipes open; the direct kill is the fallback where groups do not exist.
+fn kill_tree(child: &mut Child) {
+    ahi_unix::kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Read a pipe to its end, keeping the first `MAX_STREAM_BYTES` and noting
