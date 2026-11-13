@@ -118,6 +118,24 @@ enum Command {
         /// Tool policy file to use instead of ahi.tools.yaml in the working directory (see examples/tools).
         #[arg(long, value_name = "FILE")]
         tools: Option<PathBuf>,
+        /// Continue a recorded session by id (see `ahi session list`) instead of opening the picker.
+        #[arg(long, value_name = "SESSION")]
+        resume: Option<String>,
+        /// Do not record this chat as a session.
+        #[arg(long)]
+        no_history: bool,
+    },
+    /// List, show, export, and import recorded chat sessions.
+    ///
+    /// Every chat is recorded as one file of JSON lines under the state
+    /// directory (`sessions/<id>.jsonl`, owner-only): the operator's
+    /// messages, the model's replies and tool calls, each tool's result, and
+    /// one `turn` line per exchange. `ahi tui --resume <id>` continues one.
+    /// `export` copies a session file out and `import` brings one in, so a
+    /// session written on another machine can be listed and resumed here.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
     },
     /// Show or write the chat tool policy (ahi.tools.yaml) for the working directory; show the shipped examples.
     ///
@@ -157,6 +175,40 @@ enum Command {
     Sandbox {
         #[command(subcommand)]
         command: SandboxCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// One line per session, newest first.
+    List {
+        /// One JSON object per line instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a session's conversation: by id from the store, or a session file by path.
+    Show {
+        /// Session id, or a path to a session file.
+        target: String,
+        /// The header and entries as JSON lines instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Show the branch ending at this entry instead of the active path.
+        #[arg(long, value_name = "SEQ")]
+        branch: Option<u64>,
+    },
+    /// Copy a session file out of the store. The destination must not exist.
+    Export {
+        /// Session id.
+        id: String,
+        /// Destination file.
+        #[arg(long, value_name = "FILE")]
+        to: PathBuf,
+    },
+    /// Bring a session file into the store, or extend the stored copy with the file's new entries.
+    Import {
+        /// A session file written by ahi.
+        path: PathBuf,
     },
 }
 
@@ -352,7 +404,19 @@ fn main() -> ExitCode {
             }
         },
         Command::Migrate { write, force } => migrate_config(cli.config.as_deref(), *write, *force),
-        Command::Tui { refresh, tools } => tui(&cli, *refresh, tools.as_deref()),
+        Command::Tui {
+            refresh,
+            tools,
+            resume,
+            no_history,
+        } => tui(
+            &cli,
+            *refresh,
+            tools.as_deref(),
+            resume.as_deref(),
+            !no_history,
+        ),
+        Command::Session { command } => session(&cli, command),
         Command::Tools { command } => match command {
             ToolsCommand::Init {
                 example,
@@ -815,7 +879,13 @@ fn directories(cli: &Cli) -> ahi::Result<Directories> {
     Directories::resolve(cli.state_dir.as_deref(), cli.cache_dir.as_deref())
 }
 
-fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode {
+fn tui(
+    cli: &Cli,
+    refresh: bool,
+    actions: Option<&std::path::Path>,
+    resume: Option<&str>,
+    record: bool,
+) -> ExitCode {
     let state = match directories(cli) {
         Ok(dirs) => dirs,
         Err(err) => {
@@ -823,12 +893,48 @@ fn tui(cli: &Cli, refresh: bool, actions: Option<&std::path::Path>) -> ExitCode 
             return ExitCode::from(1);
         }
     };
-    match ahi::tui::run(&state, refresh, actions) {
+    match ahi::tui::run(&state, refresh, actions, resume, record) {
         Ok(output) => {
             if !output.text.is_empty() {
                 println!("{}", output.text);
             }
             ExitCode::from(u8::from(output.refresh_failed))
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn session(cli: &Cli, command: &SessionCommand) -> ExitCode {
+    use ahi::session::commands;
+    let state = match directories(cli) {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let result = match command {
+        SessionCommand::List { json } => commands::list(&state, *json).map(|(text, skipped)| {
+            for problem in skipped {
+                eprintln!("skipped: {problem}");
+            }
+            text
+        }),
+        SessionCommand::Show {
+            target,
+            json,
+            branch,
+        } => commands::show(&state, target, *json, *branch),
+        SessionCommand::Export { id, to } => commands::export(&state, id, to),
+        SessionCommand::Import { path } => commands::import(&state, path),
+    };
+    match result {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::from(0)
         }
         Err(err) => {
             eprintln!("error: {err}");

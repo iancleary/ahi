@@ -86,6 +86,14 @@ Levels: `off`, `minimal`, `low`, `medium`, `high`. Default is `medium`. The leve
 
 The stored preference becomes a request parameter only when effective metadata explicitly enables both reasoning and reasoning-effort support. Gateways use `reasoning_effort`; OpenAI Responses uses nested `reasoning.effort`. Off omits the parameter, and unsupported/unknown capabilities send no effort. This does not disable reasoning a provider might perform by default. Per-model effort maps are not implemented, so a provider may reject an unsupported level. The screen does not infer capabilities or synthesize usage.
 
+## Sessions
+
+Every chat is recorded as it happens into `<state>/sessions/<id>.jsonl`, one JSON object per line, owner-only, created at the first turn (`src/session`). The header line names the working directory, gateway, model, and thinking level; each later line is an entry with a `seq` (its position, from 1), a `parent`, a time, and a type: `message` (operator, assistant with its tool calls, or a tool result with its exit code and the content the model saw), `turn` (one per exchange: `run_id`, `status` of `ok`, `failed`, or `cancelled`, the prompt's SHA-256, and a small result object), `model_change`, or `thinking_change`.
+
+The recorder (`src/session/recorder.rs`) is the one writer and the screen calls it at each step: the operator's message in `send_transcript` before the request, the assistant message with its calls on `ToolCallsRequested` before any tool runs, each result on `ToolResult`, and the closing `turn` on `Completed`, `Failed`, `Esc`, and `/clear` during a turn. Streamed text is held until the message it belongs to is known (a tool round or the end of the turn). A failed or cancelled turn stays on disk as a branch; the next turn hangs off the last `turn` whose status is `ok`, so `--resume` replays the conversation that worked. Settings follow every `model_change` and `thinking_change` in file order, whichever branch they were made on. The first write failure is shown once as an alert and recording stops for that session; the conversation continues. `--no-history` records nothing; `/clear` starts a new session at the next turn.
+
+`ahi tui --resume <id>` builds the screen from a stored session: its settings, the messages on the active path (native replay items are kept only when the protocol matches), and new turns appended under the last success. `ahi session list|show|export|import` are readers and file movers over the same format (`src/session/commands.rs`); nothing locks, and a reader skips a torn last line.
+
 ## Backend interface
 
 `src/chat/` talks to a model through one trait. A `CompletionConnection` carries the wire protocol, the destination and authentication (`CompletionTransport`), and the model metadata separately; each protocol adapter normalizes streaming data into the same screen events. See [Gateway model configuration](GATEWAY_MODEL_CONFIGURATION.md) for metadata resolution and request limits.

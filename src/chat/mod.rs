@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use crate::directories::Directories;
 use crate::error::{Error, Result};
+use crate::session;
 use crate::tui::commands::{CommandContext, CommandMenu, PickerOutcome};
 
 use ahi_widgets::Paragraph;
@@ -132,12 +133,53 @@ struct ChatScreen {
     copy_label: &'static str,
     /// OSC 7501 reports for the multiplexer that holds this terminal.
     status: crate::program_status::Reporter,
+    /// The session this chat is recorded into.
+    recorder: session::recorder::Recorder,
 }
 
 impl ChatScreen {
+    #[cfg(test)]
     fn load(state_dir: &Directories, selection: &str) -> Self {
+        Self::load_recording(
+            state_dir,
+            selection,
+            session::recorder::Recorder::new(true, "tui"),
+        )
+    }
+
+    /// A screen over an existing session: its model and thinking level, its
+    /// conversation on the active path, and new turns appended under its
+    /// last success.
+    fn load_resumed(state_dir: &Directories, stored: session::Session) -> Self {
+        let settings = stored.settings();
+        let messages = stored.active_messages(None);
+        let id = stored.id().to_string();
+        let mut screen = Self::load_recording(
+            state_dir,
+            &format!("{}/{}", settings.gateway, settings.model),
+            session::recorder::Recorder::resumed(stored, "tui"),
+        );
+        if let Some(level) = thinking::ThinkingLevel::parse(&settings.thinking) {
+            screen.thinking = level;
+        }
+        let count = messages.len();
+        screen.messages.extend(messages);
+        screen.dirty = transcript::render::Dirty::From(0);
+        screen.push_notice(format!(
+            "resumed session {id}: {count} message{} on its active path",
+            if count == 1 { "" } else { "s" }
+        ));
+        screen
+    }
+
+    fn load_recording(
+        state_dir: &Directories,
+        selection: &str,
+        recorder: session::recorder::Recorder,
+    ) -> Self {
         let (thinking, notice) = thinking::read(state_dir);
         let mut screen = Self {
+            recorder,
             preferences: preferences::read(state_dir),
             turn_started: None,
             workspace_root: std::env::current_dir().unwrap_or_default(),
@@ -269,6 +311,9 @@ impl ChatScreen {
             self.meters.context_tokens = None;
             self.meters.context_window = None;
         }
+        if selection != self.selection {
+            self.recorder.model_changed(&selection);
+        }
         if selection.gateway != self.selection.gateway {
             // The transcript follows the operator to the new provider; say so
             // before the next message carries it there.
@@ -287,6 +332,13 @@ impl ChatScreen {
             }
         }
         self.selection = selection;
+    }
+
+    /// Show the recorder's first failure, once, where the operator sees it.
+    fn surface_recording_failure(&mut self) {
+        if let Some(problem) = self.recorder.take_failure() {
+            self.push_alert(format!("session not recorded from here on: {problem}"));
+        }
     }
 
     #[cfg(test)]
@@ -525,6 +577,7 @@ impl ChatScreen {
             KeyAction::CycleThinkingLevel => {
                 self.thinking = self.thinking.next();
                 thinking::write(&self.state_dir, self.thinking)?;
+                self.recorder.thinking_changed(self.thinking.as_str());
                 Ok(ScreenAction::Continue)
             }
             KeyAction::JumpToTop => {
@@ -1018,6 +1071,25 @@ impl ChatScreen {
     fn send_transcript(&mut self, backend: &mut dyn CompletionBackend) {
         self.resend_available = false;
         self.refresh_location();
+        // The operator's line is on disk before the request goes out. A
+        // resend after a transport failure is the same turn again.
+        if let Some(prompt) = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !message.role.is_notice())
+            .filter(|message| message.role == TranscriptRole::Operator)
+            .map(|message| message.text.clone())
+        {
+            self.recorder.begin_turn(
+                &session::Store::new(&self.state_dir),
+                &self.workspace_root,
+                &self.selection,
+                self.thinking.as_str(),
+                &prompt,
+            );
+            self.surface_recording_failure();
+        }
         let request = ChatRequest {
             selection: self.selection.clone(),
             thinking: self.thinking,
@@ -1090,7 +1162,9 @@ impl ChatScreen {
                 // transcript must never leave a worker streaming into it.
                 if self.response_in_progress {
                     backend.cancel();
+                    self.recorder.cancel_turn();
                 }
+                self.recorder.reset();
                 self.messages.clear();
                 self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
@@ -1179,6 +1253,7 @@ impl ChatScreen {
             ParsedCommand::SetThinking(level) => {
                 self.thinking = level;
                 thinking::write(&self.state_dir, level)?;
+                self.recorder.thinking_changed(level.as_str());
                 Ok(ScreenAction::Continue)
             }
             ParsedCommand::UnknownThinkingLevel { level } => {
@@ -1206,6 +1281,7 @@ impl ChatScreen {
                 false
             }
             ResponseEvent::TextDelta(text) => {
+                self.recorder.text(&text);
                 if !self.assistant_open {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                     self.assistant_open = true;
@@ -1218,7 +1294,9 @@ impl ChatScreen {
             }
             ResponseEvent::ToolCallsRequested { calls, native } => {
                 // The calls end the assistant message that requested them and
-                // are replayed with their results on later requests.
+                // are replayed with their results on later requests. They are
+                // on disk before any of them runs.
+                self.recorder.calls(&calls, native.as_ref());
                 if !self.assistant_open {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                 }
@@ -1286,6 +1364,8 @@ impl ChatScreen {
                 elapsed,
                 record: _,
             } => {
+                self.recorder
+                    .tool_result(&call_id, &tool, &output, &content, exit_code);
                 let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
                 message.tool = Some(ToolPayload::Result {
                     call_id,
@@ -1300,6 +1380,7 @@ impl ChatScreen {
             }
             ResponseEvent::Completed => {
                 self.approval = None;
+                self.recorder.end_turn();
                 let answer = self
                     .messages
                     .iter()
@@ -1313,6 +1394,8 @@ impl ChatScreen {
             }
             ResponseEvent::Failed { message, kind } => {
                 self.approval = None;
+                self.recorder
+                    .fail_turn(&format!("{kind:?}").to_ascii_lowercase(), &message);
                 // A connection failure left the transcript as the operator
                 // sent it (or ending in tool results): the same request can
                 // go again. A partial reply at the tail cannot.
@@ -1343,6 +1426,7 @@ impl ChatScreen {
                 .scroll_from_bottom
                 .saturating_add(current_rows.saturating_sub(previous_rows));
         }
+        self.surface_recording_failure();
         finished
     }
 
@@ -1369,6 +1453,7 @@ impl ChatScreen {
     /// next read, request, or tool round and closes the connection.
     fn cancel_response(&mut self, backend: &mut dyn CompletionBackend) {
         backend.cancel();
+        self.recorder.cancel_turn();
         self.receiver = None;
         self.response_in_progress = false;
         self.approval = None;
@@ -1475,9 +1560,48 @@ pub(crate) fn check_actions_file(path: &Path) -> Result<()> {
 /// Run the chat screen until the operator exits or asks for the model picker.
 /// `actions` is the operator's explicit policy file, used for every turn in
 /// place of the working directory's `ahi.tools.yaml`.
+/// `record` is false for `ahi tui --no-history`.
 pub(crate) fn interact(
     state_dir: &Directories,
     selection: &str,
+    actions: Option<&Path>,
+    record: bool,
+    reopen_picker: impl FnMut(
+        PickerView,
+        &str,
+        Option<crate::harness::GatewayRegistration>,
+    ) -> Result<PickerOutcome>,
+) -> Result<()> {
+    let screen = ChatScreen::load_recording(
+        state_dir,
+        selection,
+        session::recorder::Recorder::new(record, "tui"),
+    );
+    interact_screen(state_dir, screen, actions, reopen_picker)
+}
+
+/// `ahi tui --resume <id>`: the chat over a stored session, continuing it
+/// with its own model and thinking level.
+pub(crate) fn interact_resumed(
+    state_dir: &Directories,
+    session_id: &str,
+    actions: Option<&Path>,
+    reopen_picker: impl FnMut(
+        PickerView,
+        &str,
+        Option<crate::harness::GatewayRegistration>,
+    ) -> Result<PickerOutcome>,
+) -> Result<()> {
+    let stored = session::Store::new(state_dir)
+        .open(session_id)
+        .map_err(|err| Error::new(err.to_string()))?;
+    let screen = ChatScreen::load_resumed(state_dir, stored);
+    interact_screen(state_dir, screen, actions, reopen_picker)
+}
+
+fn interact_screen(
+    state_dir: &Directories,
+    mut screen: ChatScreen,
     actions: Option<&Path>,
     mut reopen_picker: impl FnMut(
         PickerView,
@@ -1485,7 +1609,6 @@ pub(crate) fn interact(
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
-    let mut screen = ChatScreen::load(state_dir, selection);
     screen.push_header();
     screen.report_status(crate::program_status::State::Idle, "");
     let mut backend =
@@ -1895,6 +2018,202 @@ mod tests {
 
     fn screen_in(state: &Path) -> ChatScreen {
         ChatScreen::load(&Directories::single_root(state), "openai/gpt-4.1")
+    }
+
+    #[test]
+    fn the_screen_records_each_turn_and_a_cancel_closes_its_branch() {
+        use crate::session::{Kind, Role, Status, StoredMessage};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-record");
+        let dirs = Directories::single_root(&state);
+        let store = session::Store::new(&dirs);
+        let mut screen = screen_in(&state);
+        assert!(
+            store.list().unwrap().0.is_empty(),
+            "nothing before the first turn"
+        );
+
+        // A completed turn: operator line, answer, turn ok.
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("hello");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        screen.apply_event(ResponseEvent::TextDelta("hi ".into()));
+        screen.apply_event(ResponseEvent::TextDelta("there".into()));
+        screen.apply_event(ResponseEvent::Completed);
+        // The poll loop clears these when it sees the final event.
+        screen.response_in_progress = false;
+        screen.receiver = None;
+
+        // A cancelled turn keeps its partial reply on a closed branch.
+        screen.set_input_text("again");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        screen.apply_event(ResponseEvent::TextDelta("half".into()));
+        screen.cancel_response(&mut backend);
+
+        let (rows, _) = store.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        let stored = store.open(&rows[0].header.id).unwrap();
+        assert_eq!(
+            stored.header().cwd,
+            screen.workspace_root.display().to_string()
+        );
+        assert_eq!(stored.header().model, "gpt-4.1");
+        let kinds: Vec<String> = stored
+            .entries()
+            .iter()
+            .map(|entry| match &entry.kind {
+                Kind::Message(StoredMessage { role, text, .. }) => format!("{role:?} {text}"),
+                Kind::Turn(turn) => format!("turn:{}", turn.status.as_str()),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "Operator hello",
+                "Assistant hi there",
+                "turn:ok",
+                "Operator again",
+                "Assistant half",
+                "turn:cancelled",
+            ]
+        );
+        assert_eq!(stored.active_parent(), Some(3));
+        assert!(matches!(
+            &stored.entries()[5].kind,
+            Kind::Turn(turn) if turn.status == Status::Cancelled && turn.result["origin"] == "tui"
+        ));
+        assert!(matches!(
+            &stored.entries()[0].kind,
+            Kind::Message(StoredMessage {
+                role: Role::Operator,
+                ..
+            })
+        ));
+
+        // /clear starts another session at the next turn; /model is recorded.
+        screen.set_input_text("/clear");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        screen.set_selection("openai/gpt-5");
+        screen.set_input_text("third");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        screen.apply_event(ResponseEvent::Completed);
+        screen.response_in_progress = false;
+        screen.receiver = None;
+        let (rows, _) = store.list().unwrap();
+        assert_eq!(rows.len(), 2);
+        let newest = store.open(&rows[0].header.id).unwrap();
+        assert_eq!(
+            newest.header().model,
+            "gpt-5",
+            "the header carries the model at the first turn"
+        );
+        assert_eq!(newest.entries().len(), 2);
+
+        // Without recording nothing is written.
+        let mut quiet = ChatScreen::load_recording(
+            &dirs,
+            "openai/gpt-4.1",
+            session::recorder::Recorder::new(false, "tui"),
+        );
+        quiet.set_input_text("silent");
+        press(&mut quiet, &mut backend, crossterm::event::KeyCode::Enter);
+        quiet.apply_event(ResponseEvent::Completed);
+        assert_eq!(store.list().unwrap().0.len(), 2);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_screen_takes_the_recorded_settings_and_conversation() {
+        use crate::session::{Header, Kind, Role, Status, StoredMessage, Turn};
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-resume");
+        let dirs = Directories::single_root(&state);
+        let store = session::Store::new(&dirs);
+        let mut stored = store
+            .create(Header::new("/w", "openai", "gpt-4.1", "low"))
+            .unwrap();
+        let message = |role, text: &str| {
+            Kind::Message(StoredMessage {
+                role,
+                text: text.into(),
+                tool: None,
+            })
+        };
+        let turn = |run_id: &str, status| {
+            Kind::Turn(Turn {
+                run_id: run_id.into(),
+                status,
+                prompt_sha256: String::new(),
+                result: serde_json::json!({}),
+            })
+        };
+        stored
+            .append(
+                None,
+                vec![
+                    message(Role::Operator, "q1"),
+                    message(Role::Assistant, "a1"),
+                    turn("r1", Status::Ok),
+                ],
+            )
+            .unwrap();
+        stored
+            .append(
+                Some(3),
+                vec![
+                    Kind::ModelChange {
+                        gateway: "openai".into(),
+                        model: "gpt-5".into(),
+                    },
+                    Kind::ThinkingChange {
+                        level: "high".into(),
+                    },
+                    message(Role::Operator, "q2"),
+                    message(Role::Assistant, "partial"),
+                    turn("r2", Status::Cancelled),
+                ],
+            )
+            .unwrap();
+        let id = stored.id().to_string();
+        drop(stored);
+
+        let mut screen = ChatScreen::load_resumed(&dirs, store.open(&id).unwrap());
+        assert_eq!(
+            screen.selection,
+            parse_selection("openai/gpt-5"),
+            "settings follow the changes"
+        );
+        assert_eq!(screen.thinking, ThinkingLevel::High);
+        let texts: Vec<&str> = screen
+            .messages()
+            .iter()
+            .filter(|m| !m.role.is_notice())
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(texts, ["q1", "a1"], "the cancelled branch is not replayed");
+        assert!(screen
+            .messages()
+            .iter()
+            .any(|m| m.role == TranscriptRole::Notice && m.text.contains("resumed session")));
+
+        // The next turn hangs off the last success and sends the active path.
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("q3");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        screen.apply_event(ResponseEvent::Completed);
+        let sent: Vec<&str> = backend.requests[0]
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(sent, ["q1", "a1", "q3"]);
+        let after = store.open(&id).unwrap();
+        assert_eq!(after.entries().len(), 10);
+        assert_eq!(after.entries()[8].parent, Some(3));
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
