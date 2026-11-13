@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publish the workspace to crates.io in dependency order.
 #
-# ahi depends on the in-repo ahi-win32 and ahi-widgets crates, so each must
+# ahi depends on the in-repo ahi-win32, ahi-widgets, and ahi-unix crates, so each must
 # exist on the registry at its pinned version before ahi can be published.
 # They rarely change, so their versions are usually already published; that
 # is detected via the sparse index and skipped, because a re-publish of an
@@ -57,6 +57,7 @@ publish_member() {
 
 publish_member ahi-win32 crates/ahi-win32/Cargo.toml
 publish_member ahi-widgets crates/ahi-widgets/Cargo.toml
+publish_member ahi-unix crates/ahi-unix/Cargo.toml
 
 # shellcheck disable=SC2086
 cargo publish --verbose $dry_run --package ahi

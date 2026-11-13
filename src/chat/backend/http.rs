@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::protocol::{self, RequestContext, StreamOutcome};
-use super::tool_loop::{SessionGrants, ToolRuntime};
+use super::tool_loop::{Caller, SessionGrants, ToolRuntime, TurnContext};
 use super::{ChatRequest, CompletionBackend, ResponseEvent};
 use crate::chat::transcript::{ChatMessage, ToolPayload, TranscriptRole};
 use crate::directories::Directories;
@@ -37,6 +37,10 @@ pub(crate) struct HttpBackend {
     /// An explicit policy file (`ahi tui --tools`) used instead of the
     /// workspace's `ahi.tools.yaml`.
     actions: Option<PathBuf>,
+    /// Named in every audit line a tool round appends.
+    caller: Caller,
+    /// Bounds every tool call of a turn; `None` is the chat's unbounded turn.
+    deadline: Option<Instant>,
     grants: SessionGrants,
     /// One client for the life of the chat: connections are reused across
     /// tool rounds and turns instead of a TLS handshake per request.
@@ -53,6 +57,8 @@ impl HttpBackend {
             state,
             workspace: None,
             actions: None,
+            caller: Caller::default(),
+            deadline: None,
             grants: SessionGrants::default(),
             agent: ureq::Agent::config_builder()
                 .max_redirects(0)
@@ -71,12 +77,29 @@ impl HttpBackend {
         self
     }
 
-    #[cfg(test)]
-    fn with_workspace(state: Directories, workspace: PathBuf) -> Self {
-        Self {
-            workspace: Some(workspace),
-            ..Self::new(state)
-        }
+    /// Confine tools to `directory` and read its `ahi.tools.yaml` (unless
+    /// `with_actions` named a file) instead of the process's working
+    /// directory.
+    #[allow(dead_code)] // `ahi exec --workdir`
+    pub(crate) fn in_workspace(mut self, directory: PathBuf) -> Self {
+        self.workspace = Some(directory);
+        self
+    }
+
+    /// Who the audit log says ran each tool.
+    #[allow(dead_code)] // `ahi exec` and `ahi serve`
+    pub(crate) fn with_caller(mut self, caller: Caller) -> Self {
+        self.caller = caller;
+        self
+    }
+
+    /// Bound every tool call of the turn: none starts past `deadline` and a
+    /// command's own timeout is clamped to what remains. The caller still
+    /// cancels at the deadline; this keeps a call from outliving it.
+    #[allow(dead_code)] // `ahi exec --timeout`
+    pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 }
 
@@ -90,6 +113,8 @@ impl CompletionBackend for HttpBackend {
         let agent = self.agent.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Arc::clone(&cancel);
+        let caller = self.caller.clone();
+        let deadline = self.deadline;
         let handle = std::thread::spawn(move || {
             let workspace = workspace.or_else(|| std::env::current_dir().ok());
             let result = complete(
@@ -97,6 +122,8 @@ impl CompletionBackend for HttpBackend {
                 ToolSource {
                     workspace: workspace.as_deref(),
                     actions: actions.as_deref(),
+                    caller,
+                    deadline,
                 },
                 grants,
                 &agent,
@@ -171,6 +198,8 @@ struct ToolSource<'a> {
     /// Tool root; `None` disables tools for the turn.
     workspace: Option<&'a Path>,
     actions: Option<&'a Path>,
+    caller: Caller,
+    deadline: Option<Instant>,
 }
 
 fn complete(
@@ -191,7 +220,12 @@ fn complete(
     if let Some(window) = metadata.context_window {
         protocol::emit(sender, ResponseEvent::ContextWindow(window.get()))?;
     }
-    let ToolSource { workspace, actions } = source;
+    let ToolSource {
+        workspace,
+        actions,
+        caller,
+        deadline,
+    } = source;
     let mut tools = match workspace {
         Some(directory) => ToolRuntime::load(
             directory,
@@ -200,6 +234,11 @@ fn complete(
             connection.destination(),
             grants,
             actions,
+            TurnContext {
+                caller,
+                deadline,
+                cancel: Arc::clone(cancel),
+            },
         )?,
         None => None,
     };

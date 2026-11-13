@@ -1,7 +1,9 @@
 use super::*;
 use crate::chat::backend::parse_selection;
 use crate::chat::backend::sse::FRAME_CAP;
-use crate::chat::backend::{ProposedAction, ToolCall, ToolDecision};
+// `Caller` and `ToolRecord` are used by the Unix-only cancel and record tests.
+#[cfg_attr(not(unix), allow(unused_imports))]
+use crate::chat::backend::{Caller, ProposedAction, ToolCall, ToolDecision, ToolRecord};
 use crate::chat::thinking::ThinkingLevel;
 use crate::chat::transcript::ChatMessage;
 use crate::error::ErrorKind;
@@ -160,7 +162,7 @@ fn write_models(state: &Path, url: &str, model: serde_json::Value) {
 fn backend(state: &Path) -> HttpBackend {
     let workspace = state.join("empty-workspace");
     fs::create_dir_all(&workspace).unwrap();
-    HttpBackend::with_workspace(Directories::single_root(state.to_path_buf()), workspace)
+    HttpBackend::new(Directories::single_root(state.to_path_buf())).in_workspace(workspace)
 }
 
 fn responses_fixture(body: &str) -> (Result<StreamOutcome>, Vec<ResponseEvent>, String) {
@@ -955,10 +957,8 @@ impl ToolFixture {
     }
 
     fn backend(&self) -> HttpBackend {
-        HttpBackend::with_workspace(
-            Directories::single_root(self.state.clone()),
-            self.workspace.clone(),
-        )
+        HttpBackend::new(Directories::single_root(self.state.clone()))
+            .in_workspace(self.workspace.clone())
     }
 }
 
@@ -1321,6 +1321,7 @@ fn without_timing(events: Vec<ResponseEvent>) -> Vec<ResponseEvent> {
                 exit_code,
                 detail,
                 elapsed: std::time::Duration::ZERO,
+                record: None,
             },
             other => other,
         })
@@ -1366,6 +1367,7 @@ fn an_approve_rule_runs_the_call_and_resubmits_the_exchange() {
                     lines: 1,
                 }),
                 elapsed: std::time::Duration::ZERO,
+                record: None,
             },
             ResponseEvent::ToolCallReturned,
             ResponseEvent::TextDelta("done".into()),
@@ -1600,6 +1602,8 @@ fn file_write_rules_edit_and_create_with_line_counts_and_an_audit_line() {
     assert_eq!(lines[0]["tool"], "edit_file");
     assert_eq!(lines[0]["path"], "src/a.rs");
     assert_eq!(lines[0]["outcome"], "ok");
+    assert_eq!(lines[0]["origin"], "tui");
+    assert!(lines[0]["run_id"].is_null());
     assert_eq!(lines[0]["lines_added"], 2);
     assert!(lines[0]["before"].is_string() && lines[0]["after"].is_string());
     assert_eq!(lines[1]["tool"], "write_file");
@@ -1697,6 +1701,180 @@ fn command_rules_match_argv_prefixes_show_the_command_and_grant_the_rule_prefix(
     assert_eq!(lines[2]["cwd"], "src");
     assert_eq!(lines[2]["exit_code"], 2);
     assert!(!audit.contains("hello"), "output is not logged");
+    let records: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseEvent::ToolResult { record, .. } => Some(record.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.len(), 5);
+    assert!(
+        matches!(
+            records[0],
+            Some(ToolRecord::Command { argv, cwd, outcome, ran: Some(true), exit_code: Some(0), .. })
+                if argv[0] == "sh" && cwd.is_empty() && outcome == "ok"
+        ),
+        "{:?}",
+        records[0]
+    );
+    assert_eq!(records[3], None, "a denial has no record");
+    assert_eq!(events.last(), Some(&ResponseEvent::Completed));
+    server.join().unwrap();
+}
+
+/// Cancelling in the middle of a batch: the running command is killed with
+/// everything it spawned, the calls after it never start, and the turn ends
+/// as cancelled. The caller's run id reaches the audit log on the way.
+#[cfg(unix)]
+#[test]
+fn cancelling_during_a_batch_kills_the_command_tree_and_runs_nothing_more() {
+    let (url, _server) = server_sequence(vec![
+        calls_stream(&[
+            (
+                "c1",
+                "run_command",
+                // The grandchild would hold stdout open past a kill of the
+                // shell alone, and the call would not return for 30 s.
+                json!({"argv": ["sh", "-c", "sleep 30 & sleep 30"]}),
+            ),
+            (
+                "c2",
+                "write_file",
+                json!({"path": "src/after.rs", "content": "// late\n"}),
+            ),
+        ]),
+        text_stream("never"),
+    ]);
+    let policy = "version: 1\nrules:\n\
+        - {id: shell, action: command, match: {argv: [sh]}, effect: approve}\n\
+        - {id: new-src, action: file_write, match: {tool: write_file, path: src}, effect: approve}\n";
+    let fixture = ToolFixture::new(&url, policy, json!({"id": "vendor/model"}));
+    let mut backend = fixture.backend().with_caller(Caller {
+        origin: "exec",
+        run_id: Some("run-7".into()),
+    });
+    let receiver = backend.submit(request());
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ResponseEvent::ToolCallsRequested { .. } => break,
+            ResponseEvent::ContextWindow(_) | ResponseEvent::Usage { .. } => {}
+            other => panic!("unexpected event before the calls: {other:?}"),
+        }
+    }
+    thread::sleep(Duration::from_millis(300));
+    let cancelled_at = std::time::Instant::now();
+    backend.cancel();
+    let events = collect_events(receiver);
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(5),
+        "the kill did not take the grandchild: {:?}",
+        cancelled_at.elapsed()
+    );
+    assert_eq!(
+        results(&events),
+        vec![
+            ("c1".into(), 1, "error: command cancelled and killed".into()),
+            (
+                "c2".into(),
+                126,
+                "denied: turn cancelled before this call started".into()
+            ),
+        ]
+    );
+    assert!(
+        !fixture.workspace.join("src/after.rs").exists(),
+        "a write after the cancel"
+    );
+    assert!(
+        matches!(events.last(), Some(ResponseEvent::Failed { message, .. }) if message == "response cancelled"),
+        "{events:?}"
+    );
+    let audit = fs::read_to_string(fixture.state.join("audit.log")).unwrap();
+    let lines: Vec<serde_json::Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "only the command that ran is audited: {audit}"
+    );
+    assert_eq!(lines[0]["origin"], "exec");
+    assert_eq!(lines[0]["run_id"], "run-7");
+    assert_eq!(lines[0]["outcome"], "command cancelled and killed");
+    assert!(lines[0]["exit_code"].is_null());
+    let record = events.iter().find_map(|event| match event {
+        ResponseEvent::ToolResult {
+            record: Some(record),
+            ..
+        } => Some(record.as_ref().clone()),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            &record,
+            Some(ToolRecord::Command {
+                ran: Some(true),
+                exit_code: None,
+                ..
+            })
+        ),
+        "{record:?}"
+    );
+    assert_eq!(record.unwrap().effect(), Some(true));
+}
+
+/// A turn deadline clamps a command's own timeout and refuses calls that
+/// would start after it.
+#[cfg(unix)]
+#[test]
+fn a_turn_deadline_clamps_commands_and_refuses_late_calls() {
+    let (url, server) = server_sequence(vec![
+        calls_stream(&[
+            // Clamped from 600 s to the 2 s that remain, so killed at 2 s.
+            (
+                "c1",
+                "run_command",
+                json!({"argv": ["sleep", "30"], "timeout": 600}),
+            ),
+            // Starts inside the deadline and ends past it.
+            ("c2", "run_command", json!({"argv": ["sleep", "0.5"]})),
+            // Would start past the deadline: refused, no process.
+            ("c3", "run_command", json!({"argv": ["true"]})),
+        ]),
+        text_stream("done"),
+    ]);
+    let policy = "version: 1\nrules:\n\
+        - {id: sleep, action: command, match: {argv: [sleep]}, effect: approve}\n\
+        - {id: noop, action: command, match: {argv: ['true']}, effect: approve}\n";
+    let fixture = ToolFixture::new(&url, policy, json!({"id": "vendor/model"}));
+    let mut backend = fixture
+        .backend()
+        .with_deadline(std::time::Instant::now() + Duration::from_millis(2300));
+    let started = std::time::Instant::now();
+    let events = collect(&mut backend, request());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        results(&events),
+        vec![
+            (
+                "c1".into(),
+                1,
+                "error: command timed out and was killed".into()
+            ),
+            ("c2".into(), 0, "exit 0 (no output)".into()),
+            (
+                "c3".into(),
+                1,
+                "error: deadline reached: the turn's time ran out before this call started".into()
+            ),
+        ]
+    );
     assert_eq!(events.last(), Some(&ResponseEvent::Completed));
     server.join().unwrap();
 }
@@ -1875,7 +2053,7 @@ fn tools_never_read_the_state_directory_inside_the_workspace() {
     let nested = fixture.workspace.join("src/state");
     fs::rename(&fixture.state, &nested).unwrap();
     let mut backend =
-        HttpBackend::with_workspace(Directories::single_root(nested), fixture.workspace.clone());
+        HttpBackend::new(Directories::single_root(nested)).in_workspace(fixture.workspace.clone());
     let (events, _) = collect_answering(&mut backend, request(), vec![]);
     assert_eq!(
         results(&events),
