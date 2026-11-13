@@ -40,7 +40,7 @@ One JSON object per line in each direction, over the socket or the stdio bridge.
 | `turn.cancel` | `session`, `run_id` | `{}`; the turn closes as `cancelled` |
 | `ask.answer` | `session`, `ask_id`, `allow: [bool]` | `{}` |
 
-Events: `entry` (a line written to the session, with its `seq`), `text` (streamed assistant text not yet an entry), `ask` (`ask_id`, the calls with tool, target, and detail), `turn` (`status` and the result document), `keepalive` every 15 s on an idle subscription. A subscriber that falls 256 events behind is dropped and resumes with `after` set to the last `seq` it saw; entries are the durable record and `text` is repeatable only from the entry it ends up in.
+Events: `entry` (a line written to the session, with its `seq`), `text` (streamed assistant text not yet an entry), `ask` (`ask_id`, the calls with tool, target, and detail), `turn` (`status` and the result document), `keepalive` every 15 s on an idle subscription, and `lagged` (`session`) as the last word of a subscription that fell 256 events behind and was dropped: the client resubscribes with `after` set to the last `seq` it saw (`ahi exec`, `ahi tui`, and `delegate` all do), or fails; entries are the durable record and `text` is repeatable only from the entry it ends up in.
 
 Error kinds: `usage`, `config`, `auth`, `policy`, `session`, `conflict`, `not_found`; a closed turn's document carries `turn`, `transport`, `protocol`, `limit`, `auth`, or `policy` as its `error.kind`.
 

@@ -8,6 +8,11 @@
 - `load_skill`, a builtin tool: returns a skill's `SKILL.md` body, or one of its declared reference files, as a tool result after a header naming the skill, its root, its size, and its hash. Text with the authority of any file read: none. Advertised only when an approved skill exists and validates; its description lists the approved skills as `name: description — when`, the only skill text in a request before a load. An `ask` rule prompts with the name and what is read, never the text; `s` grants the name for the session; unattended turns deny it with the reason the model sees.
 - The skills loader (`src/skills/`): a skill is `.ahi/skills/<name>/SKILL.md` in the working directory or `<config>/skills/<name>/SKILL.md` on the operator's host, a YAML frontmatter (`name` equal to the directory, one-line `description`, optional `when`, up to 16 `.md`/`.txt` `references`, informational `version`, unknown keys refused) and a body. Caps of 32 KiB per file and 64 skills per root; a symbolic link anywhere from `.ahi` down, a name that collides with another's when case is ignored, or any other fault rejects the skill with a reason `ahi doctor` prints (`skills (repo): …`, `skill rejected (…): name: reason`). An operator skill shadows a repo skill of the same name. `.ahi` itself and everything under `.ahi/skills` join the paths tools never write.
 
+### Fixed
+
+- A subscriber that fell 256 events behind was dropped without a word, and a client following a turn waited on nothing. The server now sends one `lagged` event as the subscription's last word, the in-process service reports the same once, and `ahi exec`, `ahi tui`, and the `delegate` tool resubscribe from the last `seq` they saw.
+- `ahi connect` exits 3 when the server closed the connection first and 0 when stdin ended, so a coordinator can tell a client that went away from a server that died mid-turn.
+
 ## 0.16.1 (2026-11-13)
 
 ### Fixed

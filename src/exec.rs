@@ -379,6 +379,7 @@ fn follow(
         eprintln!("warning: termination signals are not watched on this platform");
     }
     let mut cancelled = false;
+    let mut last_seq = 0u64;
     loop {
         if !cancelled {
             if let Some(signal) = ahi_unix::received() {
@@ -416,6 +417,28 @@ fn follow(
                 result,
                 ..
             } if ended == run_id => return Ok(result),
+            // Fell behind the stream: pick it up again from the last entry
+            // seen; a `turn` event after that still ends the wait.
+            Event::Lagged {
+                session: ref lagged,
+            } if *lagged == session => {
+                if progress {
+                    eprintln!(
+                        "run {run_id}: fell behind the event stream; resubscribing from {last_seq}"
+                    );
+                }
+                client
+                    .call(
+                        "session.subscribe",
+                        json!({"session": session, "after": last_seq}),
+                    )
+                    .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
+            }
+            Event::Entry { ref entry, .. }
+                if entry["seq"].as_u64().is_some_and(|seq| {
+                    last_seq = last_seq.max(seq);
+                    false
+                }) => {}
             Event::Entry { entry, .. } if progress => {
                 if entry["type"] == "message" && entry["role"] == "tool" {
                     let name = entry["result"]["name"].as_str().unwrap_or("tool");
