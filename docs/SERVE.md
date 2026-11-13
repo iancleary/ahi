@@ -163,7 +163,7 @@ The client side is `ureq`, already present, over the Unix socket. Server-sent ev
 
 Each is a draft PR stacked on the previous, except the first, which is independent and can land at any time.
 
-- **S0 OSC 7501.** `ahi tui` and `ahi exec` report state as above when stdout is a terminal. Test: the sequence is written on each transition in a pty fixture and never when stdout is a pipe. Status: the `ahi tui` half is PR #69 off `main` (`src/program_status.rs`); `ahi exec` adds its three reports when the exec stack rebases over it.
+- **S0 OSC 7501.** `ahi tui` and `ahi exec` report state as above when stdout is a terminal. Test: the sequence is written on each transition in a pty fixture and never when stdout is a pipe. Status: done. The `ahi tui` half shipped in 0.15.0 (PR #69, `src/program_status.rs`); the `ahi exec` half is the last commit of PR #67.
 - **S1 serve over the socket.** `ahi serve` with `/health`, `/shutdown`, sessions, turns, turn results, settings; one thread per turn through the existing engine; `ahi exec` and `ahi session` route through the socket when live and refuse `--standalone` against a live socket. Test: a turn submitted over the socket against the fixture gateway produces the same result document and store rows as `ahi exec` does directly.
 - **S2 events.** Recorder fan-out, `/events` with `after`, `text` deltas, keepalive; `ahi exec` follows it for progress. Test: a dropped stream resumed with `after` sees every entry exactly once.
 - **S3 cancel and asks.** `DELETE` turns, `ask` events and answers, unattended fallback, drain on signal. Test: a cancelled `run_command` child is killed and the turn closes `cancelled` with `effects` reported; an unanswered ask is denied per call after the turn's deadline.
