@@ -16,6 +16,10 @@
 - `ahi serve` checks every connection's peer credentials (`SO_PEERCRED` / `getpeereid`) before reading a byte and refuses another user with `auth`; holds at most 64 connections and 16 subscriptions per connection, refusing the next with `limit`; and refuses new requests with `conflict` while it drains after `stop`.
 - `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.
 
+### Fixed
+
+- `ahi tui`: after the server died, every later turn failed until the chat restarted. The next turn now reconnects through the local socket (starting a server if none answers, with the version check) and continues the same session, which the server reopens from disk. Over `--via` the failure says to restart the chat.
+
 ## 0.16.1 (2026-11-13)
 
 ### Fixed

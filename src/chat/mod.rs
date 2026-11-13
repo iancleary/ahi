@@ -1722,12 +1722,21 @@ fn backend_for(
         Engine::Standalone { .. } => Box::new(
             HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf)),
         ),
-        Engine::Service(client) => Box::new(backend::service::ServiceBackend::new(
-            client,
-            session,
-            screen.workspace_root.clone(),
-            actions.map(Path::to_path_buf),
-        )),
+        Engine::Service(client) => {
+            // A local socket can be reached again after the server dies; a
+            // bridge cannot, its command is the operator's to restart.
+            let socket = client.socket().map(Path::to_path_buf);
+            let backend = backend::service::ServiceBackend::new(
+                client,
+                session,
+                screen.workspace_root.clone(),
+                actions.map(Path::to_path_buf),
+            );
+            Box::new(match socket {
+                Some(socket) => backend.with_local_reconnect(state_dir.clone(), socket),
+                None => backend,
+            })
+        }
     }
 }
 
