@@ -67,7 +67,7 @@ mod unix {
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use serde_json::{json, Value};
 
@@ -79,6 +79,8 @@ mod unix {
 
     /// A subscribed connection hears from the server at least this often.
     const KEEPALIVE: Duration = Duration::from_secs(15);
+    /// How often idle sessions (no turn, no subscriber) are let go of.
+    const RELEASE_EVERY: Duration = Duration::from_secs(15);
     /// The longest request line accepted.
     const MAX_LINE: usize = 2 * 1024 * 1024;
 
@@ -137,8 +139,16 @@ mod unix {
                 }
             })
         };
+        let mut next_release = Instant::now() + RELEASE_EVERY;
         while !stop.load(Ordering::Relaxed) && ahi_unix::received().is_none() {
             thread::sleep(Duration::from_millis(50));
+            if Instant::now() >= next_release {
+                let released = service.release_idle();
+                if verbose && released > 0 {
+                    eprintln!("released {released} idle session(s)");
+                }
+                next_release = Instant::now() + RELEASE_EVERY;
+            }
         }
         let reason = match ahi_unix::received() {
             Some(signal) => signal.name().to_string(),

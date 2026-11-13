@@ -404,7 +404,7 @@ mod tests {
         off.end_turn();
         assert_eq!(store.list().unwrap().0.len(), 2);
 
-        let mut resumed = Recorder::resumed(store.open(&id).unwrap(), "tui");
+        let mut resumed = Recorder::resumed(store.hold(&id).unwrap(), "tui");
         resumed.begin_turn(&store, &dir, &selection("m2"), "low", "q4");
         resumed.end_turn();
         let session = store.open(&id).unwrap();

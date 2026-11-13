@@ -565,6 +565,25 @@ impl Service {
         Ok(())
     }
 
+    /// Let go of sessions nobody is using: no open turn and no subscriber.
+    /// Each idle session's subscribers are probed with a keepalive first,
+    /// since only a send finds one whose connection has ended. Dropping a
+    /// session releases its file for `import`, a standalone chat, or
+    /// another server. Returns how many were released.
+    pub(crate) fn release_idle(&self) -> usize {
+        let mut lives = lock(&self.inner.lives);
+        let before = lives.len();
+        lives.retain(|_, live| {
+            let mut live = lock(live);
+            if live.open.is_some() {
+                return true;
+            }
+            live.emit(Event::Keepalive);
+            !live.subscribers.is_empty()
+        });
+        before - lives.len()
+    }
+
     /// Cancel every open turn and wait up to `grace` for them to close.
     pub(crate) fn shutdown(&self, grace: Duration) {
         let lives: Vec<Arc<Mutex<Live>>> = lock(&self.inner.lives).values().cloned().collect();
@@ -586,7 +605,7 @@ impl Service {
         if let Some(live) = lives.get(id) {
             return Ok(Arc::clone(live));
         }
-        let session = self.inner.store.open(id)?;
+        let session = self.inner.store.hold(id)?;
         let live = Arc::new(Mutex::new(Live::new(Recorder::resumed(session, "serve"))));
         lives.insert(id.to_string(), Arc::clone(&live));
         Ok(live)
@@ -1070,6 +1089,34 @@ mod tests {
             panic!("a turn entry");
         };
         assert_eq!(turn.status, Status::Failed);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_idle_session_is_released_once_its_last_subscriber_is_gone() {
+        let root = std::env::temp_dir().join(format!("ahi-service-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Directories::single_root(&root);
+        let service = Service::open(&state);
+        let header = service
+            .create_session(Some(&root), Some("local"), Some("vendor/model"), "off")
+            .unwrap();
+        let store = Store::new(&state);
+        #[cfg(unix)]
+        assert!(
+            matches!(store.hold(&header.id), Err(StoreError::Conflict(_))),
+            "the service holds the file"
+        );
+        let events = service.subscribe(&header.id, 0).unwrap();
+        assert_eq!(service.release_idle(), 0, "a subscriber keeps it");
+        drop(events);
+        assert_eq!(service.release_idle(), 1);
+        assert!(lock(&service.inner.lives).is_empty());
+        drop(store.hold(&header.id).unwrap());
+        // It comes back from the record when asked for again.
+        let info = service.session_info(&header.id).unwrap();
+        assert_eq!(info["header"]["id"], header.id);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

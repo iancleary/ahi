@@ -1628,13 +1628,22 @@ pub(crate) fn interact_resumed(
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
-    let stored = session::Store::new(state_dir)
-        .open(session_id)
-        .map_err(|err| Error::new(err.to_string()))?;
+    let store = session::Store::new(state_dir);
     let screen = match engine {
         // The server records; the screen only reads the session to start.
-        Engine::Service(_) => ChatScreen::load_resumed_reading(state_dir, &stored),
-        Engine::Standalone { .. } => ChatScreen::load_resumed(state_dir, stored),
+        Engine::Service(_) => {
+            let stored = store
+                .open(session_id)
+                .map_err(|err| Error::new(err.to_string()))?;
+            ChatScreen::load_resumed_reading(state_dir, &stored)
+        }
+        // This chat writes the session, so it holds the file.
+        Engine::Standalone { .. } => {
+            let stored = store
+                .hold(session_id)
+                .map_err(|err| Error::new(err.to_string()))?;
+            ChatScreen::load_resumed(state_dir, stored)
+        }
     };
     let backend = backend_for(
         state_dir,
@@ -2249,7 +2258,7 @@ mod tests {
         let id = stored.id().to_string();
         drop(stored);
 
-        let mut screen = ChatScreen::load_resumed(&dirs, store.open(&id).unwrap());
+        let mut screen = ChatScreen::load_resumed(&dirs, store.hold(&id).unwrap());
         assert_eq!(
             screen.selection,
             parse_selection("openai/gpt-5"),

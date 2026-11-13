@@ -1,6 +1,6 @@
-//! The two POSIX calls `ahi` needs and `std` does not expose: a signal
-//! handler that records a termination signal, and `kill` aimed at a whole
-//! process group.
+//! The POSIX calls `ahi` needs and `std` does not expose: a signal handler
+//! that records a termination signal, `kill` aimed at a whole process group,
+//! and `flock` for one writer per session file.
 //!
 //! This in-repo crate exists so `ahi` itself can keep `unsafe_code = "forbid"`:
 //! it declares each libc function it calls and has no dependencies, the same
@@ -76,7 +76,14 @@ extern "C" {
     fn signal(signum: i32, handler: usize) -> usize;
     /// POSIX `kill(2)`. A negative `pid` names a process group.
     fn kill(pid: i32, sig: i32) -> i32;
+    /// BSD `flock(2)`, on Linux and macOS alike: an advisory lock on the
+    /// open file description, released when its last descriptor closes.
+    fn flock(fd: i32, operation: i32) -> i32;
 }
+
+/// `LOCK_EX | LOCK_NB`: exclusive, and fail instead of waiting.
+#[cfg(unix)]
+const LOCK_EX_NB: i32 = 2 | 4;
 
 /// The handler. Async-signal-safe: one atomic exchange and one `signal`
 /// call, which POSIX lists among the functions a handler may call.
@@ -142,6 +149,32 @@ pub fn kill_process_group(_pid: u32) -> bool {
     false
 }
 
+/// Take an exclusive advisory lock on `file` without waiting. `Ok(true)`
+/// when this description now holds it, `Ok(false)` when another holds it
+/// (in this process or any other), `Err` for anything else. The lock lasts
+/// as long as `file` and its clones are open.
+#[cfg(unix)]
+pub fn try_lock_exclusive(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `flock` takes two integers and touches no memory; the
+    // descriptor is open for as long as `file` is borrowed.
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX_NB) } == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(false)
+    } else {
+        Err(err)
+    }
+}
+
+/// Not Unix: no advisory locks; every caller is told it holds the file.
+#[cfg(not(unix))]
+pub fn try_lock_exclusive(_file: &std::fs::File) -> std::io::Result<bool> {
+    Ok(true)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -196,5 +229,18 @@ mod tests {
         );
         assert!(!kill_process_group(child.id()), "the group is gone");
         assert!(!kill_process_group(0));
+    }
+
+    #[test]
+    fn a_locked_file_refuses_a_second_description_until_the_first_closes() {
+        let path = std::env::temp_dir().join(format!("ahi-unix-lock-{}", std::process::id()));
+        let first = std::fs::File::create(&path).unwrap();
+        let second = std::fs::File::options().write(true).open(&path).unwrap();
+        assert!(try_lock_exclusive(&first).unwrap());
+        assert!(!try_lock_exclusive(&second).unwrap());
+        drop(first);
+        assert!(try_lock_exclusive(&second).unwrap());
+        drop(second);
+        std::fs::remove_file(&path).unwrap();
     }
 }

@@ -973,6 +973,30 @@ fn an_ask_nobody_hears_is_answered_unattended_and_the_turn_closes() {
     );
     assert!(info["open_run_id"].is_null(), "{info}");
 
+    // The server holds the session file: export reads it, import is refused.
+    let exported = dir.join("ops/held.jsonl");
+    let export = ahi(&dir)
+        .args([
+            "session",
+            "export",
+            &session,
+            "--to",
+            exported.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&export), 0, "{}", err(&export));
+    let import = ahi(&dir)
+        .args(["session", "import", exported.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_ne!(code(&import), 0);
+    assert!(
+        err(&import).contains("held by another process"),
+        "{}",
+        err(&import)
+    );
+
     let stop = ahi(&dir)
         .args(["serve", "stop", "--socket", socket.to_str().unwrap()])
         .output()
