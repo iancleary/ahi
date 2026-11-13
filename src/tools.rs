@@ -349,8 +349,9 @@ mod tests {
     }
 
     /// The repository's own policy begins with the `read-all` example, rule
-    /// for rule, and adds only command rules after it, so `ahi tools init`
-    /// here shows the same default the repository uses.
+    /// for rule, and adds only file-write and command rules after it (no
+    /// further read rules), so `ahi tools init` here shows the same read
+    /// default the repository uses.
     #[test]
     fn repository_policy_starts_with_read_all() {
         let root = tool_policy::parse(
@@ -365,10 +366,15 @@ mod tests {
         assert_eq!(root.rules[..shared], read_all.rules[..]);
         assert!(
             root.rules.len() > shared,
-            "the repository policy adds command rules"
+            "the repository policy adds edit and command rules"
         );
         for rule in &root.rules[shared..] {
-            assert_eq!(rule.action, tool_policy::ActionKind::Command, "{}", rule.id);
+            assert_ne!(
+                rule.action,
+                tool_policy::ActionKind::ToolCall,
+                "{}",
+                rule.id
+            );
         }
     }
 

@@ -3,6 +3,8 @@
 pub(crate) mod diff;
 pub(crate) mod format;
 pub(crate) mod highlight;
+#[cfg(test)]
+mod layout_tests;
 pub(crate) mod links;
 pub(crate) mod markdown;
 pub(crate) mod render;
