@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.1 (2026-11-13)
+
 ### Fixed
 
 - `ahi serve`: an `ask` emitted after its last subscriber had gone, or one no client ever answered, left the turn open and the session `conflict` until the server restarted. The ask is now sent first and tested after: one nobody heard is answered `Unattended` at once; while one waits, the subscribers are probed every second with a `keepalive`, and the asks are settled `Unattended` when the last subscriber leaves or after ten minutes.
