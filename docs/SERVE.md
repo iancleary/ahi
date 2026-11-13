@@ -35,7 +35,7 @@ One JSON object per line in each direction, over the socket or the stdio bridge.
 | `session.entries` | `session`, `after?` or `branch?` | entries after `after` in write order, or the branch ending at `branch` |
 | `session.subscribe` | `session`, `after?` | `{}`; entries after `after` arrive first, then everything live |
 | `session.settings` | `session`, `gateway`+`model?`, `thinking?` | the settings; refused while a turn runs |
-| `turn.submit` | `session`, `prompt`, `workdir?` (default: the session's directory), `run_id?`, `prompt_sha256?`, `tools?`, `timeout?`, `thinking?`, `unattended?`, `origin?`, `client?` | `{"run_id", "status": "running"}`; the stored result document when `run_id` repeats with the same prompt; `conflict` when a turn is open; `usage` when `run_id` is not 1 to 64 of `[A-Za-z0-9_-]`, `timeout` is not 1 to 3600 whole seconds, `prompt_sha256` is not 64 hex digits, or `client` exceeds 64 printable bytes |
+| `turn.submit` | `session`, `prompt`, `workdir?` (default: the session's directory), `run_id?`, `prompt_sha256?`, `tools?`, `timeout?`, `thinking?`, `unattended?`, `origin?`, `client?` | `{"run_id", "status": "running"}`; the stored result document when `run_id` repeats with the same prompt; `conflict` when a turn is open; `limit` when the session file has reached its 64 MiB budget (start a new session); `usage` when `run_id` is not 1 to 64 of `[A-Za-z0-9_-]`, `timeout` is not 1 to 3600 whole seconds, `prompt_sha256` is not 64 hex digits, or `client` exceeds 64 printable bytes |
 | `turn.get` | `session`, `run_id` | the result document, or `status: running` |
 | `turn.cancel` | `session`, `run_id` | `{}`; the turn closes as `cancelled` |
 | `ask.answer` | `session`, `ask_id`, `allow: [bool]` | `{}` |

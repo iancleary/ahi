@@ -1090,6 +1090,13 @@ impl ChatScreen {
                 return Ok(ScreenAction::Continue);
             }
         };
+        if !text.trim_start().starts_with('/') && self.recorder.over_budget() {
+            self.push_notice(
+                "this session has reached its 64 MiB budget; /clear starts a new one and the draft was kept"
+                    .to_string(),
+            );
+            return Ok(ScreenAction::Continue);
+        }
         self.input.clear();
         self.settings_menu.reset();
         if text.trim_start().starts_with('/') {

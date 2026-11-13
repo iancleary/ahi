@@ -324,7 +324,14 @@ mod tests {
         assert!(try_lock_exclusive(&first).unwrap());
         assert!(!try_lock_exclusive(&second).unwrap());
         drop(first);
-        assert!(try_lock_exclusive(&second).unwrap());
+        // Another test in this process may have forked while `first` was
+        // open; the child's copy of the descriptor holds the lock until it
+        // execs, so the release can lag by a few milliseconds.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !try_lock_exclusive(&second).unwrap() {
+            assert!(Instant::now() < deadline, "the lock was not released");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         drop(second);
         std::fs::remove_file(&path).unwrap();
     }

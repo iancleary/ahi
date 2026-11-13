@@ -15,6 +15,7 @@
 - `ahi serve` holds `serve.lock` beside the socket for its life (`flock`, `ahi-unix` 0.3.0), so two chats starting at once can no longer produce two servers with one listening on an unlinked socket forever; only the lock holder removes the socket file, and a second `ahi serve` exits at once saying a server already runs. The socket is bound under a private name, set to mode 600, and renamed into place, so it is never visible with umask permissions.
 - `ahi serve` checks every connection's peer credentials (`SO_PEERCRED` / `getpeereid`) before reading a byte and refuses another user with `auth`; holds at most 64 connections and 16 subscriptions per connection, refusing the next with `limit`; and refuses new requests with `conflict` while it drains after `stop`.
 - `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.
+- A session file has a 64 MiB budget: at or past it the next `turn.submit` is refused with `limit` ("start a new session") and the chat says so and keeps the draft, while a turn in flight finishes. `ahi session list` reads each file line by line instead of materializing every entry, and its `--json` rows carry `bytes`.
 
 ## 0.16.1 (2026-11-13)
 
