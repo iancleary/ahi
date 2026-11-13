@@ -135,6 +135,9 @@ struct ChatScreen {
     status: crate::program_status::Reporter,
     /// The session this chat is recorded into.
     recorder: session::recorder::Recorder,
+    /// `--tools <file>`, when given, for the `$name` check; otherwise the
+    /// working directory's `ahi.tools.yaml`.
+    actions_file: Option<std::path::PathBuf>,
 }
 
 impl ChatScreen {
@@ -201,6 +204,7 @@ impl ChatScreen {
         let (thinking, notice) = thinking::read(state_dir);
         let mut screen = Self {
             recorder,
+            actions_file: None,
             preferences: preferences::read(state_dir),
             turn_started: None,
             workspace_root: std::env::current_dir().unwrap_or_default(),
@@ -1076,6 +1080,16 @@ impl ChatScreen {
             }
             return Ok(ScreenAction::Continue);
         }
+        // `$name` asks the model to use a skill. The load is still the
+        // model's call under the rule; here only the name is checked, so a
+        // name no rule approves is refused at the input line, not sent.
+        let text = match self.skill_request(&text) {
+            Ok(text) => text,
+            Err(notice) => {
+                self.push_notice(notice);
+                return Ok(ScreenAction::Continue);
+            }
+        };
         self.input.clear();
         self.settings_menu.reset();
         if text.trim_start().starts_with('/') {
@@ -1085,6 +1099,43 @@ impl ChatScreen {
         self.scroll_from_bottom = 0;
         self.send_transcript(backend);
         Ok(ScreenAction::Continue)
+    }
+
+    /// `$name rest` becomes `Use the skill "name".` over `rest`, when a
+    /// rule approves `name`; anything else starting with `$` is refused with
+    /// the reason and the draft is kept.
+    fn skill_request(&self, text: &str) -> std::result::Result<String, String> {
+        let Some(rest) = text.trim_start().strip_prefix('$') else {
+            return Ok(text.to_string());
+        };
+        let (name, remainder) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        if !crate::hooks::policy::valid_rule_id(name) {
+            return Err(
+                "`$` names a skill: 1 to 64 letters, digits, '-', '_', or '.'; the draft was kept"
+                    .to_string(),
+            );
+        }
+        let policy = match &self.actions_file {
+            Some(file) => crate::tool_policy::load_file(file, &backend::tools::BUILTIN).map(Some),
+            None => crate::tool_policy::load(&self.workspace_root, &backend::tools::BUILTIN),
+        };
+        let approved = policy
+            .ok()
+            .flatten()
+            .map(|policy| policy.approved_skills())
+            .unwrap_or_default();
+        if !approved.iter().any(|approved| approved == name) {
+            return Err(format!(
+                "no {} rule approves the skill \"{name}\"; the draft was kept",
+                crate::tool_policy::FILE_NAME
+            ));
+        }
+        let remainder = remainder.trim();
+        Ok(if remainder.is_empty() {
+            format!("Use the skill \"{name}\".")
+        } else {
+            format!("Use the skill \"{name}\".\n{remainder}")
+        })
     }
 
     /// Start a turn from the transcript as it stands. Screen-only rows stay
@@ -1384,10 +1435,13 @@ impl ChatScreen {
                 exit_code,
                 detail,
                 elapsed,
-                record: _,
+                record,
             } => {
                 self.recorder
                     .tool_result(&call_id, &tool, &output, &content, exit_code);
+                if let Some(record) = record.as_deref() {
+                    self.recorder.skill_load(record);
+                }
                 let mut message = ChatMessage::new(TranscriptRole::Tool { exit_code }, output);
                 message.tool = Some(ToolPayload::Result {
                     call_id,
@@ -1606,11 +1660,12 @@ pub(crate) fn interact(
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
     let record = matches!(engine, Engine::Standalone { record: true });
-    let screen = ChatScreen::load_recording(
+    let mut screen = ChatScreen::load_recording(
         state_dir,
         selection,
         session::recorder::Recorder::new(record, "tui"),
     );
+    screen.actions_file = actions.map(Path::to_path_buf);
     let backend = backend_for(state_dir, engine, &screen, None, actions);
     interact_screen(state_dir, screen, backend, reopen_picker)
 }
@@ -1629,7 +1684,7 @@ pub(crate) fn interact_resumed(
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
     let store = session::Store::new(state_dir);
-    let screen = match engine {
+    let mut screen = match engine {
         // The server records; the screen only reads the session to start.
         Engine::Service(_) => {
             let stored = store
@@ -1645,6 +1700,7 @@ pub(crate) fn interact_resumed(
             ChatScreen::load_resumed(state_dir, stored)
         }
     };
+    screen.actions_file = actions.map(Path::to_path_buf);
     let backend = backend_for(
         state_dir,
         engine,
@@ -2439,6 +2495,69 @@ mod tests {
             .unwrap();
         assert_eq!(screen.input_text(), "one\n");
         assert_eq!(backend.requests.len(), 1);
+        let _ = fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn a_dollar_prefix_asks_for_an_approved_skill_and_refuses_the_rest() {
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-skill");
+        let mut screen = screen_in(&state);
+        let work = state.join("work");
+        fs::create_dir_all(&work).unwrap();
+        screen.workspace_root = work.clone();
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        // No policy: nothing is approved, the draft stays.
+        screen.set_input_text("$rust-review look at src");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert!(backend.requests.is_empty());
+        assert_eq!(screen.input_text(), "$rust-review look at src");
+        assert!(screen
+            .messages
+            .last()
+            .is_some_and(|m| m.role == TranscriptRole::Notice
+                && m.text
+                    .contains("no ahi.tools.yaml rule approves the skill \"rust-review\"")));
+        fs::write(
+            work.join("ahi.tools.yaml"),
+            "version: 1\nrules:\n- {id: r, action: skill, match: {skill: rust-review}, effect: approve}\n",
+        )
+        .unwrap();
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(
+            backend.requests[0].messages.last().unwrap().text,
+            "Use the skill \"rust-review\".\nlook at src"
+        );
+        assert!(screen.input_text().is_empty());
+        screen.set_input_text("$not a name!");
+        screen
+            .apply_action(KeyAction::Submit, &mut backend)
+            .unwrap();
+        assert_eq!(backend.requests.len(), 1);
+        assert_eq!(screen.input_text(), "$not a name!");
+        // A `--tools` file wins over the working directory's.
+        let elsewhere = state.join("ops.yaml");
+        fs::write(
+            &elsewhere,
+            "version: 1\nrules:\n- {id: r, action: skill, match: {skill: release}, effect: approve}\n",
+        )
+        .unwrap();
+        screen.actions_file = Some(elsewhere);
+        assert_eq!(
+            screen.skill_request("$release").unwrap(),
+            "Use the skill \"release\"."
+        );
+        assert!(screen
+            .skill_request("$rust-review")
+            .unwrap_err()
+            .contains("no ahi.tools.yaml rule approves"));
+        assert_eq!(screen.skill_request("plain text").unwrap(), "plain text");
         let _ = fs::remove_dir_all(state);
     }
 

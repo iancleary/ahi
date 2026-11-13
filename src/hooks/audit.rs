@@ -133,6 +133,38 @@ pub struct DelegateEvent<'a> {
     pub duration_ms: u128,
 }
 
+pub struct SkillEvent<'a> {
+    pub origin: &'a str,
+    pub run_id: Option<&'a str>,
+    pub repo: &'a Path,
+    pub name: &'a str,
+    pub root: &'a str,
+    pub file: Option<&'a str>,
+    pub outcome: &'a str,
+    pub sha256: &'a str,
+    pub bytes: usize,
+}
+
+pub fn append_skill(state_dir: &Path, event: &SkillEvent<'_>) -> Result<()> {
+    append_line(
+        state_dir,
+        json!({
+            "time": now(),
+            "command": "tool",
+            "origin": event.origin,
+            "run_id": event.run_id,
+            "tool": "load_skill",
+            "repo": event.repo.display().to_string(),
+            "name": event.name,
+            "root": event.root,
+            "file": event.file,
+            "outcome": event.outcome,
+            "sha256": event.sha256,
+            "bytes": event.bytes,
+        }),
+    )
+}
+
 pub fn append_delegate(state_dir: &Path, event: &DelegateEvent<'_>) -> Result<()> {
     append_line(
         state_dir,

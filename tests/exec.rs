@@ -1068,3 +1068,88 @@ fn exec_exits_6_when_the_service_never_reports_the_turn() {
     let _ = fs::remove_file(&socket);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_skill_load_is_in_the_result_the_session_and_the_audit_log() {
+    let (url, gateway) = loopback(tool_round(
+        &[(
+            "c1",
+            "load_skill",
+            serde_json::json!({"name": "rust-review"}),
+        )],
+        "reviewed",
+    ));
+    let dir = fixture(&url);
+    let skill = dir.join("work/.ahi/skills/rust-review");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: rust-review\ndescription: Review Rust changes\n---\n# Review\nLook twice.\n",
+    )
+    .unwrap();
+    let policy = dir.join("ops/skills.tools.yaml");
+    fs::write(
+        &policy,
+        "version: 1\nrules:\n\
+         - {id: review, action: skill, match: {skill: rust-review}, effect: approve}\n",
+    )
+    .unwrap();
+    let output = exec(
+        &dir,
+        &[
+            "-p",
+            "review it",
+            "--tools",
+            policy.to_str().unwrap(),
+            "--run-id",
+            "skill-1",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(code(&output), 0, "{}", err(&output));
+    let doc: serde_json::Value = serde_json::from_str(&out(&output)).unwrap();
+    assert_eq!(doc["text"], "reviewed");
+    assert_eq!(doc["tools"]["calls"], 1);
+    assert_eq!(doc["tools"]["skills"], 1);
+    assert_eq!(doc["effects"], "none");
+    let record = &doc["ledger"][0];
+    assert_eq!(record["tool"], "load_skill");
+    assert_eq!(record["name"], "rust-review");
+    assert_eq!(record["root"], "repo");
+    assert_eq!(record["bytes"], 21);
+    assert_eq!(record["sha256"].as_str().unwrap().len(), 64);
+    assert!(record.get("text").is_none(), "{record}");
+    let requests = gateway.join().unwrap();
+    assert!(
+        requests[0].contains("rust-review: Review Rust changes"),
+        "the description is advertised: {}",
+        requests[0]
+    );
+    assert!(
+        requests[1].contains("Look twice."),
+        "the text reaches the model as a tool result: {}",
+        requests[1]
+    );
+    let audit = fs::read_to_string(dir.join("state/audit.log")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(audit.lines().next().unwrap()).unwrap();
+    assert_eq!(line["tool"], "load_skill");
+    assert_eq!(line["name"], "rust-review");
+    assert_eq!(line["root"], "repo");
+    assert_eq!(line["run_id"], "skill-1");
+    assert!(line.get("text").is_none());
+    let rows = sessions(&dir);
+    let id = rows[0]["id"].as_str().unwrap();
+    let shown = ahi(&dir).args(["session", "show", id]).output().unwrap();
+    assert_eq!(code(&shown), 0, "{}", err(&shown));
+    assert!(
+        out(&shown).contains("— skill rust-review (repo, 21 bytes)"),
+        "{}",
+        out(&shown)
+    );
+    assert!(
+        !out(&shown).contains("Look twice"),
+        "show never prints the text"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}

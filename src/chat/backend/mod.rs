@@ -183,6 +183,20 @@ pub(crate) enum ToolRecord {
         exit_code: Option<i32>,
         duration_ms: u128,
     },
+    /// A skill the model read: which, from which root, which file, and the
+    /// hash and size of what it saw. Never the text.
+    Skill {
+        name: String,
+        /// `repo` or `operator`; empty when the load failed before a root
+        /// answered.
+        root: String,
+        /// A declared reference, or `None` for `SKILL.md`.
+        file: Option<String>,
+        /// `ok`, or the tool's error message.
+        outcome: String,
+        sha256: String,
+        bytes: usize,
+    },
     /// A task handed to a worker: which one, the worker's session and run,
     /// how it ended, and what the worker says it changed.
     Delegate {
@@ -207,6 +221,8 @@ impl ToolRecord {
         match self {
             Self::Write { outcome, .. } => Some(outcome == "ok"),
             Self::Command { ran, .. } => *ran,
+            // A read: nothing in the working directory changes.
+            Self::Skill { .. } => Some(false),
             Self::Delegate { effects, .. } => match effects.as_str() {
                 "none" => Some(false),
                 "some" => Some(true),
