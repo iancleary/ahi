@@ -21,7 +21,8 @@ use serde_json::{json, Value};
 use crate::directories::Directories;
 use crate::service::client::Client;
 use crate::service::wire;
-use crate::service::{Event, TurnRequest};
+use crate::service::{Event, TurnRequest, CANCEL_GRACE, GRACE};
+use std::time::Instant;
 
 /// The largest prompt accepted, from any source.
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
@@ -279,15 +280,14 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
     let attended =
         !options.headless && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let progress = options.headless || options.verbose;
+    let timeout = Duration::from_secs(options.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let request = TurnRequest {
         prompt,
         run_id: options.run_id.clone(),
         prompt_sha256: Some(digest),
         workdir: Some(workdir.clone()),
         tools: options.tools.clone(),
-        timeout: Some(Duration::from_secs(
-            options.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
-        )),
+        timeout: Some(timeout),
         thinking: options.thinking.clone(),
         unattended: !attended,
         origin: "exec",
@@ -307,7 +307,10 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
         if progress {
             eprintln!("run {run_id} session {session} started");
         }
-        follow(&mut client, &session, &run_id, attended, progress)?
+        // The service closes a turn at its timeout plus its graces; a turn
+        // still open past that is one the service will never close.
+        let deadline = Instant::now() + timeout + GRACE + CANCEL_GRACE;
+        follow(&mut client, &session, &run_id, attended, progress, deadline)?
     } else {
         if progress {
             eprintln!(
@@ -363,6 +366,7 @@ fn follow(
     run_id: &str,
     attended: bool,
     progress: bool,
+    deadline: Instant,
 ) -> Outcome<Value> {
     let watched = ahi_unix::watch(&[
         ahi_unix::Signal::Interrupt,
@@ -383,7 +387,15 @@ fn follow(
         }
         let event = match client.next_event(Duration::from_millis(100)) {
             Ok(event) => event,
-            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return Err((
+                        Exit::Cancelled,
+                        format!("run {run_id} did not close in time; the service never reported its turn"),
+                    ));
+                }
+                continue;
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err((
                     Exit::Turn,
