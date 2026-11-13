@@ -135,8 +135,28 @@ pub struct Entry {
 pub enum Kind {
     Message(StoredMessage),
     Turn(Turn),
-    ModelChange { gateway: String, model: String },
-    ThinkingChange { level: String },
+    ModelChange {
+        gateway: String,
+        model: String,
+    },
+    ThinkingChange {
+        level: String,
+    },
+    /// The model read a skill: which, from which root, which file, and the
+    /// hash and size of what it saw. Written after the tool result it
+    /// accompanies, so `--resume` replays what the model saw and the record
+    /// says where it came from.
+    SkillLoad {
+        name: String,
+        root: String,
+        file: Option<String>,
+        sha256: String,
+        bytes: usize,
+    },
+    /// An entry type this ahi does not know, kept whole: a newer ahi wrote
+    /// it. It holds its place in the sequence, says nothing to the model,
+    /// and is written back unchanged by `export` and `import`.
+    Unknown(Value),
 }
 
 /// A transcript message as stored: role, text, and the tool exchange the
@@ -299,6 +319,23 @@ impl Entry {
                 object.insert("type".into(), json!("thinking_change"));
                 object.insert("level".into(), json!(level));
             }
+            Kind::SkillLoad {
+                name,
+                root,
+                file,
+                sha256,
+                bytes,
+            } => {
+                object.insert("type".into(), json!("skill_load"));
+                object.insert("name".into(), json!(name));
+                object.insert("root".into(), json!(root));
+                if let Some(file) = file {
+                    object.insert("file".into(), json!(file));
+                }
+                object.insert("sha256".into(), json!(sha256));
+                object.insert("bytes".into(), json!(bytes));
+            }
+            Kind::Unknown(original) => return original.clone(),
         }
         Value::Object(object)
     }
@@ -387,9 +424,15 @@ impl Entry {
             Some("thinking_change") => Kind::ThinkingChange {
                 level: text("level").ok_or_else(|| corrupt("level"))?,
             },
-            Some(other) => {
-                return Err(StoreError::Corrupt(format!("unknown entry type `{other}`")))
-            }
+            Some("skill_load") => Kind::SkillLoad {
+                name: text("name").ok_or_else(|| corrupt("name"))?,
+                root: text("root").ok_or_else(|| corrupt("root"))?,
+                file: text("file"),
+                sha256: text("sha256").ok_or_else(|| corrupt("sha256"))?,
+                bytes: value["bytes"].as_u64().ok_or_else(|| corrupt("bytes"))? as usize,
+            },
+            // A type a newer ahi wrote: kept whole, in its place.
+            Some(_) => Kind::Unknown(value.clone()),
             None => return Err(corrupt("type")),
         };
         Ok(Self {
@@ -622,14 +665,19 @@ mod tests {
         for bad in [
             json!({"seq": 1, "type": "message", "role": "tool", "text": "x"}),
             json!({"seq": 1, "type": "turn", "run_id": "r", "status": "won"}),
-            json!({"seq": 1, "type": "note"}),
             json!({"type": "message", "role": "operator", "text": "x"}),
+            json!({"seq": 1, "type": "skill_load", "name": "x", "root": "repo"}),
         ] {
             assert!(
                 matches!(Entry::from_json(&bad), Err(StoreError::Corrupt(_))),
                 "{bad}"
             );
         }
+        // A type this ahi does not know is kept whole, not refused.
+        let newer = json!({"seq": 1, "type": "note", "pitch": "c"});
+        let entry = Entry::from_json(&newer).unwrap();
+        assert!(matches!(&entry.kind, Kind::Unknown(kept) if kept["pitch"] == "c"));
+        assert_eq!(entry.to_json(), newer);
         let header = Header::new("/w", "g", "m", "low");
         let back = Header::from_json(&header.to_json()).unwrap();
         assert_eq!(back, header);

@@ -647,7 +647,18 @@ pub(super) struct Executed {
     pub(super) write: Option<WriteReport>,
     pub(super) command: Option<CommandReport>,
     pub(super) delegation: Option<delegate::DelegationReport>,
+    pub(super) skill: Option<SkillReport>,
     pub(super) detail: Option<ToolDetail>,
+}
+
+/// What a `load_skill` call read, for the record: never the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SkillReport {
+    pub(super) name: String,
+    pub(super) root: String,
+    pub(super) file: Option<String>,
+    pub(super) sha256: String,
+    pub(super) bytes: usize,
 }
 
 /// A call that did not finish: the text the model and the operator see,
@@ -742,6 +753,13 @@ pub(super) fn execute(
             let text = crate::skills::read(skill, file.as_deref())
                 .map_err(|_| "the skill could not be read; `ahi doctor` says why")?;
             let digest = crate::session::sha256_hex(text.as_bytes());
+            let report = SkillReport {
+                name: skill.name.clone(),
+                root: skill.root.as_str().to_string(),
+                file: file.clone(),
+                sha256: digest.clone(),
+                bytes: text.len(),
+            };
             let content = match file {
                 Some(file) => format!(
                     "skill {} reference {file} from {} ({} bytes, sha256 {})\n{text}",
@@ -764,6 +782,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: Some(report),
             })
         }
         Arguments::Delegate {
@@ -780,6 +799,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: Some(outcome.report),
+                skill: None,
             })
         }
         Arguments::Command { argv, timeout_secs } => {
@@ -804,6 +824,7 @@ pub(super) fn execute(
                 write: None,
                 command: Some(report),
                 delegation: None,
+                skill: None,
             })
         }
         Arguments::Edit {
@@ -821,6 +842,7 @@ pub(super) fn execute(
                 write: Some(report),
                 command: None,
                 delegation: None,
+                skill: None,
                 detail: Some(ToolDetail::Write {
                     before: texts.before,
                     after: texts.after,
@@ -835,6 +857,7 @@ pub(super) fn execute(
                 write: Some(report),
                 command: None,
                 delegation: None,
+                skill: None,
                 detail: Some(ToolDetail::Write {
                     before: texts.before,
                     after: texts.after,
@@ -854,6 +877,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
             })
         }
         Arguments::List => {
@@ -864,6 +888,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
                 detail: None,
             })
         }
@@ -879,6 +904,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
             })
         }
         Arguments::Search {
@@ -912,6 +938,7 @@ pub(super) fn execute(
                 write: None,
                 command: None,
                 delegation: None,
+                skill: None,
             })
         }
     }

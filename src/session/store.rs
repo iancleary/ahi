@@ -710,4 +710,83 @@ mod tests {
         assert!(matches!(other.import(&fork), Err(StoreError::Conflict(_))));
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn a_skill_load_round_trips_and_an_unknown_entry_keeps_its_place() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("session-skill");
+        let store = Store::new(&Directories::single_root(dir.join("state")));
+        let mut session = store
+            .create(Header::new("/w", "local", "m", "off"))
+            .unwrap();
+        session
+            .append(
+                None,
+                vec![
+                    message(Role::Operator, "q1"),
+                    Kind::SkillLoad {
+                        name: "rust-review".into(),
+                        root: "repo".into(),
+                        file: None,
+                        sha256: "ab".repeat(32),
+                        bytes: 21,
+                    },
+                    Kind::SkillLoad {
+                        name: "rust-review".into(),
+                        root: "repo".into(),
+                        file: Some("checklist.md".into()),
+                        sha256: "cd".repeat(32),
+                        bytes: 9,
+                    },
+                    turn("r1", Status::Ok),
+                ],
+            )
+            .unwrap();
+        let id = session.id().to_string();
+        let path = store.dir().join(format!("{id}.jsonl"));
+        drop(session);
+        // A newer ahi wrote an entry type this one does not know.
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str(
+            "{\"seq\":5,\"parent\":4,\"time\":\"t\",\"type\":\"telemetry\",\"watts\":3}\n",
+        );
+        fs::write(&path, text).unwrap();
+        let reopened = store.open(&id).unwrap();
+        assert_eq!(reopened.entries().len(), 5);
+        assert_eq!(
+            reopened.entries()[1].kind,
+            Kind::SkillLoad {
+                name: "rust-review".into(),
+                root: "repo".into(),
+                file: None,
+                sha256: "ab".repeat(32),
+                bytes: 21,
+            }
+        );
+        let Kind::Unknown(kept) = &reopened.entries()[4].kind else {
+            panic!("the unknown entry is kept, not refused");
+        };
+        assert_eq!(kept["type"], "telemetry");
+        assert_eq!(reopened.entries()[4].seq, 5);
+        assert_eq!(
+            reopened.entries()[4].to_json()["watts"],
+            3,
+            "written back whole"
+        );
+        assert_eq!(
+            reopened.active_parent(),
+            Some(4),
+            "the turn is still the tip"
+        );
+        // It says nothing to the model, and the next turn hangs off it.
+        assert_eq!(reopened.active_messages(None).len(), 1);
+        let mut held = store.hold(&id).unwrap();
+        held.append(Some(5), vec![message(Role::Operator, "q2")])
+            .unwrap();
+        assert_eq!(held.entries()[5].seq, 6);
+        drop(held);
+        let out = dir.join("out.jsonl");
+        store.export(&id, &out).unwrap();
+        assert!(fs::read_to_string(&out).unwrap().contains("\"watts\":3"));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
