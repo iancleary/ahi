@@ -19,6 +19,10 @@
 - A subscriber that fell 256 events behind was dropped without a word, and a client following a turn waited on nothing. The server now sends one `lagged` event as the subscription's last word, the in-process service reports the same once, and `ahi exec`, `ahi tui`, and the `delegate` tool resubscribe from the last `seq` they saw.
 - `ahi connect` exits 3 when the server closed the connection first and 0 when stdin ended, so a coordinator can tell a client that went away from a server that died mid-turn.
 
+### Fixed
+
+- `ahi tui`: after the server died, every later turn failed until the chat restarted. The next turn now reconnects through the local socket (starting a server if none answers, with the version check) and continues the same session, which the server reopens from disk. Over `--via` the failure says to restart the chat.
+
 ## 0.16.1 (2026-11-13)
 
 ### Fixed

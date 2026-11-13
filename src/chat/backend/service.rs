@@ -42,7 +42,15 @@ pub(crate) struct ServiceBackend {
     running: Option<String>,
     /// Bumps per approval batch, like the engine's own counter.
     batches: u64,
+    /// How to reach the service again after the connection died: for the
+    /// local socket, start a server if none answers and open a new client.
+    /// `None` for a bridge, whose command the operator restarts.
+    reconnect: Option<Reconnect>,
 }
+
+/// A way to a fresh client. The session id is kept, so the server reopens
+/// the same session from disk and the chat continues where it was.
+pub(crate) type Reconnect = Box<dyn FnMut() -> Result<Client, String> + Send>;
 
 impl ServiceBackend {
     pub(crate) fn new(
@@ -59,7 +67,50 @@ impl ServiceBackend {
             settings: None,
             running: None,
             batches: 0,
+            reconnect: None,
         }
+    }
+
+    /// Reconnect through the local socket: `ensure_running`, then a new
+    /// client, then the version check, on the next turn after a dead one.
+    pub(crate) fn with_local_reconnect(
+        mut self,
+        state: crate::directories::Directories,
+        socket: PathBuf,
+    ) -> Self {
+        self.reconnect = Some(Box::new(move || {
+            let path = crate::serve::ensure_running(&state, Some(&socket))
+                .map_err(|err| err.to_string())?;
+            let mut client = Client::open(&state, Some(&path), false).map_err(|err| err.message)?;
+            let health = client
+                .call("health", json!({}))
+                .map_err(|err| err.message)?;
+            crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)
+                .map_err(|err| err.to_string())?;
+            Ok(client)
+        }));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_reconnect(mut self, reconnect: Reconnect) -> Self {
+        self.reconnect = Some(reconnect);
+        self
+    }
+
+    /// Replace the dead client with a fresh one, when there is a way to one.
+    /// The settings cache is dropped so the next turn reads them from the
+    /// server, which reopened the session from disk.
+    fn reconnect(&mut self) -> Result<(), String> {
+        let Some(reconnect) = self.reconnect.as_mut() else {
+            return Err("the connection to the service closed; restart the chat".to_string());
+        };
+        let client = reconnect()?;
+        if let Ok(mut slot) = self.client.lock() {
+            *slot = client;
+        }
+        self.settings = None;
+        Ok(())
     }
 
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -125,6 +176,39 @@ impl ServiceBackend {
         }
         Ok(session)
     }
+    /// Settings, then a subscription from the tip, then the turn: the
+    /// session id and the run id, or the first refusal.
+    fn start_turn(
+        &mut self,
+        request: &ChatRequest,
+        prompt: &str,
+    ) -> Result<(String, String), String> {
+        let session = self.prepare(request)?;
+        let turn = TurnRequest {
+            prompt: prompt.to_string(),
+            run_id: None,
+            prompt_sha256: None,
+            workdir: Some(self.workdir.clone()),
+            tools: self.actions.clone(),
+            timeout: None,
+            thinking: Some(request.thinking.as_str().to_string()),
+            unattended: false,
+            origin: "tui",
+            client: "ahi tui".to_string(),
+        };
+        let info = self.call("session.get", json!({"session": session}))?;
+        let tip = info["tip"].as_u64().unwrap_or(0);
+        self.call(
+            "session.subscribe",
+            json!({"session": session, "after": tip}),
+        )?;
+        let answer = self.call(
+            "turn.submit",
+            crate::service::wire::turn_params(&session, &turn),
+        )?;
+        let run_id = answer["run_id"].as_str().unwrap_or_default().to_string();
+        Ok((session, run_id))
+    }
 }
 
 impl CompletionBackend for ServiceBackend {
@@ -144,53 +228,28 @@ impl CompletionBackend for ServiceBackend {
             });
             return receiver;
         };
-        let session = match self.prepare(&request) {
-            Ok(session) => session,
-            Err(message) => {
-                let _ = sender.send(ResponseEvent::Failed {
-                    message,
-                    kind: ErrorKind::Other,
-                });
-                return receiver;
-            }
-        };
-        let turn = TurnRequest {
-            prompt,
-            run_id: None,
-            prompt_sha256: None,
-            workdir: Some(self.workdir.clone()),
-            tools: self.actions.clone(),
-            timeout: None,
-            thinking: Some(request.thinking.as_str().to_string()),
-            unattended: false,
-            origin: "tui",
-            client: "ahi tui".to_string(),
-        };
-        // Subscribe from the tip, then submit; events from the turn follow.
-        let submitted = self
-            .call("session.get", json!({"session": session}))
-            .and_then(|info| {
-                let tip = info["tip"].as_u64().unwrap_or(0);
-                self.call(
-                    "session.subscribe",
-                    json!({"session": session, "after": tip}),
-                )
-            })
-            .and_then(|_| {
-                self.call(
-                    "turn.submit",
-                    crate::service::wire::turn_params(&session, &turn),
-                )
-            });
-        let run_id = match submitted {
-            Ok(answer) => answer["run_id"].as_str().unwrap_or_default().to_string(),
-            Err(message) => {
-                let _ = sender.send(ResponseEvent::Failed {
-                    message,
-                    kind: ErrorKind::Other,
-                });
-                return receiver;
-            }
+        // Prepare, subscribe from the tip, submit. A dead server fails the
+        // first call of that; one reconnect and one retry, then the failure
+        // is the operator's to read.
+        let (session, run_id) = match self.start_turn(&request, &prompt) {
+            Ok(started) => started,
+            Err(first) => match self
+                .reconnect()
+                .and_then(|()| self.start_turn(&request, &prompt))
+            {
+                Ok(started) => started,
+                Err(message) => {
+                    let _ = sender.send(ResponseEvent::Failed {
+                        message: if message == first {
+                            message
+                        } else {
+                            format!("{first}; {message}")
+                        },
+                        kind: ErrorKind::Transport,
+                    });
+                    return receiver;
+                }
+            },
         };
         self.running = Some(run_id.clone());
         let client = Arc::clone(&self.client);
@@ -535,6 +594,7 @@ mod tests {
             calls_stream("read_file", json!({"path": "src/a.rs"})),
             text_stream("read it"),
             text_stream("fresh"),
+            text_stream("back"),
         ]);
         let dir = crate::fixture_directory::create_unique_fixture_directory("service-backend");
         fs::create_dir_all(dir.join("work/src")).unwrap();
@@ -595,6 +655,39 @@ mod tests {
         assert_ne!(second, session);
         assert_eq!(store.open(&second).unwrap().settings().thinking, "high");
         assert_eq!(store.list().unwrap().0.len(), 2);
+
+        // The server dies: the next turn reconnects and continues the same
+        // session, which the fresh service reopens from disk.
+        let dead = Client::via(&["false".to_string()]).unwrap();
+        *backend.client.lock().unwrap() = dead;
+        let reconnect_state = state.clone();
+        let mut backend = backend.with_reconnect(Box::new(move || {
+            Client::open(&reconnect_state, None, true).map_err(|err| err.message)
+        }));
+        let mut again = request("again");
+        again.thinking = crate::chat::thinking::ThinkingLevel::High;
+        let receiver = backend.submit(again);
+        assert_eq!(collect(&receiver, |_| {}), ["text back", "Completed"]);
+        assert_eq!(backend.session.as_deref(), Some(second.as_str()));
+        let continued = store.open(&second).unwrap();
+        assert_eq!(
+            continued.summary().turns,
+            2,
+            "the same session, one turn more"
+        );
+        assert_eq!(
+            continued.settings().thinking,
+            "high",
+            "settings read back from the server"
+        );
+        // Without a way back, the failure names the remedy.
+        let dead = Client::via(&["false".to_string()]).unwrap();
+        *backend.client.lock().unwrap() = dead;
+        backend.reconnect = None;
+        let receiver = backend.submit(request("lost"));
+        let seen = collect(&receiver, |_| {});
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("restart the chat"), "{}", seen[0]);
         gateway.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
