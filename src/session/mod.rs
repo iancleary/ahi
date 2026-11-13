@@ -481,6 +481,17 @@ pub(crate) fn valid_id(id: &str) -> bool {
         })
 }
 
+/// A caller-chosen run id: 1 to 64 letters, digits, `-`, or `_`. It names
+/// a thread and an ask id and is written into the record, so nothing else
+/// is accepted, from the command line or the wire.
+pub(crate) fn valid_run_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 /// The machine's name, for the header: the environment first, then the
 /// `hostname` program, then `unknown`. Never an error.
 fn host() -> String {

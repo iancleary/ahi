@@ -146,12 +146,7 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
         }
     }
     if let Some(run_id) = &options.run_id {
-        if run_id.is_empty()
-            || run_id.len() > 64
-            || !run_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-        {
+        if !crate::session::valid_run_id(run_id) {
             return Err(usage("--run-id is 1 to 64 letters, digits, `-`, or `_`"));
         }
     }

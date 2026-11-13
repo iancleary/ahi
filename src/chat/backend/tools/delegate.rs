@@ -25,7 +25,7 @@ use crate::service::client::Client;
 use crate::service::Event;
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
-pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
+pub(crate) use crate::service::wire::MAX_TIMEOUT_SECS;
 pub(crate) const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 /// The default `AHI_DELEGATE_VIA`.
 pub(crate) const DEFAULT_VIA: &str = "hc connect --worker {worker}";
