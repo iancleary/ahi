@@ -17,6 +17,10 @@
 - `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.
 - A session file has a 64 MiB budget: at or past it the next `turn.submit` is refused with `limit` ("start a new session") and the chat says so and keeps the draft, while a turn in flight finishes. `ahi session list` reads each file line by line instead of materializing every entry, and its `--json` rows carry `bytes`.
 
+### Fixed
+
+- `ahi tui`: after the server died, every later turn failed until the chat restarted. The next turn now reconnects through the local socket (starting a server if none answers, with the version check) and continues the same session, which the server reopens from disk. Over `--via` the failure says to restart the chat.
+
 ## 0.16.1 (2026-11-13)
 
 ### Fixed
