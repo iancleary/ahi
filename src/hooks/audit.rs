@@ -115,6 +115,43 @@ pub fn append_command(state_dir: &Path, event: &CommandEvent<'_>) -> Result<()> 
     )
 }
 
+/// One task handed to a worker by the `delegate` tool. The worker's
+/// session and run ids are the join to its own record; the task text and
+/// the answer are never logged.
+pub struct DelegateEvent<'a> {
+    pub origin: &'a str,
+    pub run_id: Option<&'a str>,
+    pub repo: &'a Path,
+    pub worker: &'a str,
+    pub session: &'a str,
+    pub worker_run_id: &'a str,
+    pub outcome: &'a str,
+    pub status: &'a str,
+    pub effects: &'a str,
+    pub duration_ms: u128,
+}
+
+pub fn append_delegate(state_dir: &Path, event: &DelegateEvent<'_>) -> Result<()> {
+    append_line(
+        state_dir,
+        json!({
+            "time": now(),
+            "command": "tool",
+            "origin": event.origin,
+            "run_id": event.run_id,
+            "tool": "delegate",
+            "repo": event.repo.display().to_string(),
+            "worker": event.worker,
+            "session": event.session,
+            "worker_run_id": event.worker_run_id,
+            "outcome": event.outcome,
+            "status": event.status,
+            "effects": event.effects,
+            "duration_ms": event.duration_ms,
+        }),
+    )
+}
+
 pub struct HookEnv<'a> {
     pub hook: &'a str,
     pub names: &'a [String],

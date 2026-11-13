@@ -120,6 +120,18 @@ fn record_json(record: &ToolRecord) -> Value {
             "tool": "run_command", "argv": argv, "cwd": cwd, "outcome": outcome,
             "ran": ran, "exit_code": exit_code, "duration_ms": duration_ms,
         }),
+        ToolRecord::Delegate {
+            worker,
+            session,
+            run_id,
+            outcome,
+            status,
+            effects,
+            duration_ms,
+        } => json!({
+            "tool": "delegate", "worker": worker, "session": session, "run_id": run_id,
+            "outcome": outcome, "status": status, "effects": effects, "duration_ms": duration_ms,
+        }),
     }
 }
 

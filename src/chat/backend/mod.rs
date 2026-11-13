@@ -183,17 +183,33 @@ pub(crate) enum ToolRecord {
         exit_code: Option<i32>,
         duration_ms: u128,
     },
+    /// A task handed to a worker: which one, the worker's session and run,
+    /// how it ended, and what the worker says it changed.
+    Delegate {
+        worker: String,
+        session: String,
+        run_id: String,
+        outcome: String,
+        status: String,
+        /// The worker's `effects`: `none`, `some`, `unknown`.
+        effects: String,
+        duration_ms: u128,
+    },
 }
 
 impl ToolRecord {
     /// Whether this call changed the working directory or ran a program.
-    /// `None` when that cannot be known from the outcome. Read by the
-    /// ledger `ahi exec` and `ahi serve` build.
-    #[allow(dead_code)]
+    /// `None` when that cannot be known from the outcome. For a delegation
+    /// it is the worker's word on its own directory, not this one.
     pub(crate) fn effect(&self) -> Option<bool> {
         match self {
             Self::Write { outcome, .. } => Some(outcome == "ok"),
             Self::Command { ran, .. } => *ran,
+            Self::Delegate { effects, .. } => match effects.as_str() {
+                "none" => Some(false),
+                "some" => Some(true),
+                _ => None,
+            },
         }
     }
 }

@@ -110,6 +110,8 @@ pub struct Options {
     pub check: bool,
     pub socket: Option<PathBuf>,
     pub standalone: bool,
+    /// A command whose stdio carries the protocol to a server elsewhere.
+    pub via: Option<String>,
     pub verbose: bool,
 }
 
@@ -232,8 +234,17 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
         }
     }
 
-    let mut client = Client::open(state, options.socket.as_deref(), options.standalone)
-        .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
+    let mut client = match &options.via {
+        Some(command) => {
+            if options.standalone || options.socket.is_some() {
+                return Err(usage("--via contradicts --standalone and --socket"));
+            }
+            let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+            Client::via(&argv).map_err(|err| (Exit::for_kind(err.kind), err.message))?
+        }
+        None => Client::open(state, options.socket.as_deref(), options.standalone)
+            .map_err(|err| (Exit::for_kind(err.kind), err.message))?,
+    };
     if options.verbose {
         if let Some(path) = client.socket() {
             eprintln!("using the server on {}", path.display());
@@ -272,7 +283,7 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
         prompt,
         run_id: options.run_id.clone(),
         prompt_sha256: Some(digest),
-        workdir: workdir.clone(),
+        workdir: Some(workdir.clone()),
         tools: options.tools.clone(),
         timeout: Some(Duration::from_secs(
             options.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),

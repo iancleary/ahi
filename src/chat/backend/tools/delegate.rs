@@ -1,0 +1,231 @@
+//! `delegate`: hand a task to a worker and wait for its answer.
+//!
+//! The worker is another `ahi serve`, reached the way herdr-core reaches a
+//! remote core: a command whose stdin and stdout carry the JSON lines.
+//! `AHI_DELEGATE_VIA` names that command as an argv template with
+//! `{worker}` for the label; the default, `hc connect --worker {worker}`,
+//! asks hc, which owns the registry of labels and hosts, to connect this
+//! process to the worker it maps the label to. ahi never learns the host:
+//! the policy names a label, the command resolves it, and this module speaks
+//! the service protocol over whatever comes back.
+//!
+//! One call is one turn on the worker: a session is created on the worker
+//! (continuing `task` when given) in the directory its server runs in, the
+//! prompt is submitted unattended with the call's timeout, and the turn's
+//! result document becomes the tool result: the answer, the status, and the
+//! worker's `effects`, which is what a coordinator reads before deciding
+//! whether to look at the working directory again.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+
+use crate::service::client::Client;
+use crate::service::Event;
+
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
+pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
+pub(crate) const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+/// The default `AHI_DELEGATE_VIA`.
+pub(crate) const DEFAULT_VIA: &str = "hc connect --worker {worker}";
+/// How much of the worker's answer reaches the model.
+const MAX_ANSWER_BYTES: usize = 64 * 1024;
+
+/// What a delegation did, for the audit log and the ledger. Never the
+/// prompt or the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DelegationReport {
+    pub(crate) worker: String,
+    /// The worker session, which is the task id the model may continue.
+    pub(crate) session: String,
+    pub(crate) run_id: String,
+    /// `ok`, `failed`, `cancelled`, `timeout`.
+    pub(crate) status: String,
+    /// The worker's `effects`: `none`, `some`, or `unknown`.
+    pub(crate) effects: String,
+    pub(crate) duration_ms: u128,
+}
+
+pub(crate) struct Outcome {
+    pub(crate) content: String,
+    pub(crate) report: DelegationReport,
+}
+
+/// The connect command for `worker`: `AHI_DELEGATE_VIA` or the default,
+/// split on whitespace, `{worker}` replaced in every token.
+pub(crate) fn via_command(worker: &str) -> Vec<String> {
+    let template = std::env::var("AHI_DELEGATE_VIA")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_VIA.to_string());
+    template
+        .split_whitespace()
+        .map(|token| token.replace("{worker}", worker))
+        .collect()
+}
+
+pub(super) fn run(
+    worker: &str,
+    prompt: &str,
+    task: Option<&str>,
+    timeout_secs: u64,
+    cancel: &AtomicBool,
+) -> Result<Outcome, &'static str> {
+    let started = Instant::now();
+    let argv = via_command(worker);
+    let mut client = Client::via(&argv).map_err(|_| {
+        "cannot reach the worker: the connect command did not start (is hc on PATH?)"
+    })?;
+    let session = match task {
+        Some(task) => {
+            client
+                .call("session.get", json!({"session": task}))
+                .map_err(|_| "the worker has no such task")?;
+            task.to_string()
+        }
+        None => client
+            .call("session.create", json!({}))
+            .map_err(|_| "the worker refused to open a session")?["id"]
+            .as_str()
+            .ok_or("the worker returned no session id")?
+            .to_string(),
+    };
+    let tip = client
+        .call("session.get", json!({"session": session}))
+        .map_err(|_| "the worker lost the session")?["tip"]
+        .as_u64()
+        .unwrap_or(0);
+    client
+        .call(
+            "session.subscribe",
+            json!({"session": session, "after": tip}),
+        )
+        .map_err(|_| "the worker refused the subscription")?;
+    let submitted = client
+        .call(
+            "turn.submit",
+            json!({
+                "session": session,
+                "prompt": prompt,
+                "timeout": timeout_secs,
+                "unattended": true,
+                "origin": "serve",
+                "client": "ahi delegate",
+            }),
+        )
+        .map_err(|_| "the worker refused the task")?;
+    let run_id = submitted["run_id"].as_str().unwrap_or_default().to_string();
+    let doc = if submitted["status"] == "running" {
+        let deadline = started + Duration::from_secs(timeout_secs) + Duration::from_secs(5);
+        let mut cancelled = false;
+        loop {
+            if !cancelled && cancel.load(Ordering::Relaxed) {
+                cancelled = true;
+                let _ = client.call("turn.cancel", json!({"session": session, "run_id": run_id}));
+            }
+            if Instant::now() > deadline {
+                return Err("the worker did not answer in time");
+            }
+            match client.next_event(Duration::from_millis(100)) {
+                Ok(Event::Turn {
+                    run_id: ended,
+                    result,
+                    ..
+                }) if ended == run_id => break result,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("the connection to the worker closed before it answered")
+                }
+            }
+        }
+    } else {
+        submitted
+    };
+    Ok(outcome(
+        worker,
+        &session,
+        &run_id,
+        &doc,
+        started.elapsed().as_millis(),
+    ))
+}
+
+fn outcome(worker: &str, session: &str, run_id: &str, doc: &Value, duration_ms: u128) -> Outcome {
+    let status = doc["status"].as_str().unwrap_or("failed").to_string();
+    let effects = doc["effects"].as_str().unwrap_or("unknown").to_string();
+    let mut content = format!("task {session} on {worker}: {status}\n");
+    if status == "ok" {
+        let text = doc["text"].as_str().unwrap_or_default();
+        let mut cut = text.len().min(MAX_ANSWER_BYTES);
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        content.push_str(&text[..cut]);
+        if cut < text.len() {
+            content.push_str("\n[answer truncated]");
+        }
+    } else if let Some(message) = doc["error"]["message"].as_str() {
+        content.push_str(&format!(
+            "{}: {message}",
+            doc["error"]["kind"].as_str().unwrap_or("error")
+        ));
+    }
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&format!("effects: {effects}"));
+    Outcome {
+        content,
+        report: DelegationReport {
+            worker: worker.to_string(),
+            session: session.to_string(),
+            run_id: run_id.to_string(),
+            status,
+            effects,
+            duration_ms,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_connect_command_comes_from_the_environment_with_the_label_filled_in() {
+        std::env::remove_var("AHI_DELEGATE_VIA");
+        assert_eq!(
+            via_command("rust-ci"),
+            ["hc", "connect", "--worker", "rust-ci"]
+        );
+        std::env::set_var("AHI_DELEGATE_VIA", "ssh {worker}.example ahi connect");
+        assert_eq!(via_command("box"), ["ssh", "box.example", "ahi", "connect"]);
+        std::env::remove_var("AHI_DELEGATE_VIA");
+    }
+
+    #[test]
+    fn the_result_names_the_task_the_status_and_the_effects() {
+        let ok = outcome(
+            "docs",
+            "s1",
+            "r1",
+            &json!({"status": "ok", "text": "done", "effects": "some"}),
+            5,
+        );
+        assert_eq!(ok.content, "task s1 on docs: ok\ndone\neffects: some");
+        assert_eq!(ok.report.effects, "some");
+        let failed = outcome(
+            "docs",
+            "s1",
+            "r1",
+            &json!({"status": "failed", "error": {"kind": "transport", "message": "down"}}),
+            5,
+        );
+        assert_eq!(
+            failed.content,
+            "task s1 on docs: failed\ntransport: down\neffects: unknown"
+        );
+    }
+}

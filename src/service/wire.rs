@@ -132,12 +132,11 @@ pub(crate) fn turn_request(params: &Value) -> ServiceResult<TurnRequest> {
     if prompt.trim().is_empty() {
         return Err(usage("the prompt is empty"));
     }
-    let workdir = text("workdir").ok_or_else(|| usage("turn.submit needs a workdir"))?;
     Ok(TurnRequest {
         prompt,
         run_id: text("run_id"),
         prompt_sha256: text("prompt_sha256"),
-        workdir: PathBuf::from(workdir),
+        workdir: text("workdir").map(PathBuf::from),
         tools: text("tools").map(PathBuf::from),
         timeout: params["timeout"].as_u64().map(Duration::from_secs),
         thinking: text("thinking"),
@@ -154,7 +153,7 @@ pub(crate) fn turn_params(session: &str, request: &TurnRequest) -> Value {
         "prompt": request.prompt,
         "run_id": request.run_id,
         "prompt_sha256": request.prompt_sha256,
-        "workdir": request.workdir.display().to_string(),
+        "workdir": request.workdir.as_ref().map(|path| path.display().to_string()),
         "tools": request.tools.as_ref().map(|path| path.display().to_string()),
         "timeout": request.timeout.map(|timeout| timeout.as_secs()),
         "thinking": request.thinking,
@@ -194,13 +193,10 @@ pub(crate) fn dispatch(
         "session.list" => Ok(Value::Array(service.list_sessions()?)),
         "session.create" => {
             let text = |key: &str| params[key].as_str();
-            let cwd = text("cwd").ok_or_else(|| usage("session.create needs a cwd"))?;
-            let gateway = text("gateway").ok_or_else(|| usage("session.create needs a gateway"))?;
-            let model = text("model").ok_or_else(|| usage("session.create needs a model"))?;
             let header = service.create_session(
-                std::path::Path::new(cwd),
-                gateway,
-                model,
+                text("cwd").map(std::path::Path::new),
+                text("gateway"),
+                text("model"),
                 text("thinking").unwrap_or("off"),
             )?;
             Ok(header.to_json())

@@ -25,12 +25,16 @@ pub(crate) const WRITE_TOOLS: [&str; 2] = ["edit_file", "write_file"];
 /// The builtin tool that runs a program. Governed by `action: command`
 /// rules, matched on an argv prefix and a working directory.
 pub(crate) const COMMAND_TOOL: &str = "run_command";
+/// The builtin tool that hands a task to a worker. Governed by
+/// `action: delegate` rules, matched on the worker's label.
+pub(crate) const DELEGATE_TOOL: &str = "delegate";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActionKind {
     ToolCall,
     FileWrite,
     Command,
+    Delegate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +48,8 @@ pub(crate) struct ToolRule {
     /// For `command`, the working directory the command may run in.
     pub(crate) path: Option<String>,
     /// `command` only: the argv prefix the command must start with, compared
-    /// token by token, exactly.
+    /// token by token, exactly. For `delegate`, the one worker label the rule
+    /// names, matched the same way against the call's label.
     pub(crate) argv: Option<Vec<String>>,
     /// `command` only: toolchain variable names passed through to the
     /// process in addition to the base set, as in `ahi.hooks.yaml`.
@@ -267,6 +272,9 @@ struct RawMatch {
     /// `command` only: the argv prefix, required.
     #[serde(default)]
     argv: Option<Vec<String>>,
+    /// `delegate` only: the worker label, required.
+    #[serde(default)]
+    worker: Option<String>,
 }
 
 const PLANNED_KINDS: [&str; 3] = ["vcs_push", "outbound_message", "pre_commit"];
@@ -305,6 +313,9 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 return Err(fail("toolchain_env applies only to action: command".into()));
             }
         }
+        if rule.action != "delegate" && rule.matcher.worker.is_some() {
+            return Err(fail("match.worker applies only to action: delegate".into()));
+        }
         let mut argv = None;
         let mut toolchain_env = Vec::new();
         let (action, tools) = match rule.action.as_str() {
@@ -338,6 +349,37 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 )?;
                 (ActionKind::Command, vec![COMMAND_TOOL.to_string()])
             }
+            "delegate" => {
+                if rule
+                    .matcher
+                    .tool
+                    .as_deref()
+                    .is_some_and(|tool| tool != DELEGATE_TOOL)
+                {
+                    return Err(fail(format!(
+                        "action: delegate governs `{DELEGATE_TOOL}` only; omit match.tool"
+                    )));
+                }
+                if rule.matcher.path.is_some() {
+                    return Err(fail(
+                        "match.path does not apply to action: delegate; a worker is named by its label"
+                            .into(),
+                    ));
+                }
+                let Some(worker) = rule.matcher.worker.take() else {
+                    return Err(fail(
+                        "match.worker is required for action: delegate (the worker's label)".into(),
+                    ));
+                };
+                if !crate::hooks::policy::valid_rule_id(&worker) {
+                    return Err(fail(
+                        "match.worker is a label of 1-64 ASCII letters, digits, '-', '_', or '.'"
+                            .into(),
+                    ));
+                }
+                argv = Some(vec![worker]);
+                (ActionKind::Delegate, vec![DELEGATE_TOOL.to_string()])
+            }
             "tool_call" => {
                 let Some(tool) = rule.matcher.tool else {
                     return Err(fail("match.tool is required for action: tool_call".into()));
@@ -352,11 +394,18 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                         "`{tool}` runs a program; govern it with action: command"
                     )));
                 }
+                if tool == DELEGATE_TOOL {
+                    return Err(fail(format!(
+                        "`{tool}` hands a task to a worker; govern it with action: delegate"
+                    )));
+                }
                 if !builtin_tools.contains(&tool.as_str()) {
                     let readers: Vec<&str> = builtin_tools
                         .iter()
                         .copied()
-                        .filter(|t| !WRITE_TOOLS.contains(t) && *t != COMMAND_TOOL)
+                        .filter(|t| {
+                            !WRITE_TOOLS.contains(t) && *t != COMMAND_TOOL && *t != DELEGATE_TOOL
+                        })
                         .collect();
                     return Err(fail(format!(
                         "`{tool}` is not a builtin tool (expected one of: {})",
@@ -382,7 +431,9 @@ pub(crate) fn parse(src: &str, origin: &str, builtin_tools: &[&str]) -> Result<A
                 return Err(fail(if PLANNED_KINDS.contains(&other) {
                     format!("action `{other}` is not implemented yet")
                 } else {
-                    format!("unknown action `{other}` (expected tool_call, file_write, or command)")
+                    format!(
+                        "unknown action `{other}` (expected tool_call, file_write, command, or delegate)"
+                    )
                 }));
             }
         };
@@ -777,7 +828,7 @@ mod tests {
             }
         }
         assert_eq!(
-            seen, 8,
+            seen, 9,
             "examples/tools changed; update this test and its README"
         );
         // The explicit lookup never treats a missing file as "no policy".
@@ -788,5 +839,58 @@ mod tests {
             "{error}"
         );
         assert!(load(&examples, &TOOLS).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod delegate_tests {
+    use super::*;
+
+    fn parse_rules(rules: &str) -> Result<ActionPolicy> {
+        parse(
+            &format!("version: 1\nrules:\n{rules}"),
+            "test",
+            &crate::chat::backend::tools::BUILTIN,
+        )
+    }
+
+    #[test]
+    fn delegate_rules_name_a_worker_label_and_nothing_else() {
+        let policy = parse_rules(
+            "- {id: ci, action: delegate, match: {worker: rust-ci}, effect: approve, ask: true}\n\
+             - {id: docs, action: delegate, match: {worker: docs}, effect: approve}\n\
+             - {id: no-prod, action: delegate, match: {worker: prod}, effect: deny}\n",
+        )
+        .unwrap();
+        assert_eq!(policy.advertised_tools(), ["delegate"]);
+        assert_eq!(policy.rules[0].action, ActionKind::Delegate);
+        assert_eq!(policy.rules[0].argv, Some(vec!["rust-ci".to_string()]));
+        let label = |name: &str| vec![name.to_string()];
+        assert!(matches!(
+            policy.evaluate(DELEGATE_TOOL, "", &label("rust-ci")),
+            Verdict::Ask { rule_id } if rule_id == "ci"
+        ));
+        assert!(matches!(
+            policy.evaluate(DELEGATE_TOOL, "", &label("docs")),
+            Verdict::Approve { rule_id } if rule_id == "docs"
+        ));
+        assert!(matches!(
+            policy.evaluate(DELEGATE_TOOL, "", &label("prod")),
+            Verdict::Deny { rule_id: Some(rule_id) } if rule_id == "no-prod"
+        ));
+        assert!(matches!(
+            policy.evaluate(DELEGATE_TOOL, "", &label("other")),
+            Verdict::Deny { rule_id: None }
+        ));
+        for (bad, message) in [
+            ("- {id: x, action: delegate, match: {}, effect: approve}\n", "match.worker is required"),
+            ("- {id: x, action: delegate, match: {worker: 'a b'}, effect: approve}\n", "label"),
+            ("- {id: x, action: delegate, match: {worker: w, path: src}, effect: approve}\n", "match.path does not apply"),
+            ("- {id: x, action: tool_call, match: {tool: read_file, worker: w}, effect: approve}\n", "match.worker applies only"),
+            ("- {id: x, action: tool_call, match: {tool: delegate}, effect: approve}\n", "govern it with action: delegate"),
+        ] {
+            let error = parse_rules(bad).unwrap_err().to_string();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
     }
 }

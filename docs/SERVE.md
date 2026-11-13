@@ -30,12 +30,12 @@ One JSON object per line in each direction, over the socket or the stdio bridge.
 | `health` | | `version`, `store`, `open_turns` |
 | `shutdown` | | `{}`; the server cancels open turns, waits up to 5 s, exits |
 | `session.list` | | one object per session, newest first |
-| `session.create` | `cwd`, `gateway`, `model`, `thinking?` | the header |
+| `session.create` | `cwd?` (default: the server's directory), `gateway?`+`model?` (default: the host's saved selection), `thinking?` | the header |
 | `session.get` | `session` | `header`, `tip`, `active_parent`, `settings`, `open_run_id` |
 | `session.entries` | `session`, `after?` or `branch?` | entries after `after` in write order, or the branch ending at `branch` |
 | `session.subscribe` | `session`, `after?` | `{}`; entries after `after` arrive first, then everything live |
 | `session.settings` | `session`, `gateway`+`model?`, `thinking?` | the settings; refused while a turn runs |
-| `turn.submit` | `session`, `prompt`, `workdir`, `run_id?`, `prompt_sha256?`, `tools?`, `timeout?`, `thinking?`, `unattended?`, `origin?`, `client?` | `{"run_id", "status": "running"}`; the stored result document when `run_id` repeats with the same prompt; `conflict` when a turn is open |
+| `turn.submit` | `session`, `prompt`, `workdir?` (default: the session's directory), `run_id?`, `prompt_sha256?`, `tools?`, `timeout?`, `thinking?`, `unattended?`, `origin?`, `client?` | `{"run_id", "status": "running"}`; the stored result document when `run_id` repeats with the same prompt; `conflict` when a turn is open |
 | `turn.get` | `session`, `run_id` | the result document, or `status: running` |
 | `turn.cancel` | `session`, `run_id` | `{}`; the turn closes as `cancelled` |
 | `ask.answer` | `session`, `ask_id`, `allow: [bool]` | `{}` |
@@ -61,8 +61,10 @@ The command a person types and the worker a coordinator runs over ssh. The promp
 
 `ServiceBackend` (`src/chat/backend/service.rs`) implements the screen's `CompletionBackend`: `submit` creates the session at the first turn (in the screen's working directory, with its model and thinking level), sends changed settings as `session.settings`, subscribes from the tip, submits the last operator message as the prompt, and turns the session's events back into the screen's `ResponseEvent`s: `text` deltas, the assistant's calls and each tool result from `entry` events, `ask` events as approval requests whose decisions go back as `ask.answer`, and the `turn` event as `Completed` or `Failed`. `cancel` is `turn.cancel`; `/clear` is `reset`, a new session at the next turn. The server records, so the screen's own recorder is off; `--resume` reads the session file for its settings and messages and continues it on the server.
 
+## Reaching a server elsewhere
+
+The client has a third transport besides the in-process service and the local socket: the stdin and stdout of a command (`Client::via`). `ahi tui --via "ssh host ahi connect"` and `ahi exec --via …` attach to that host's server with ssh's authentication and nothing else, and the `delegate` tool reaches a worker the same way through the command `AHI_DELEGATE_VIA` names ([DELEGATION.md](DELEGATION.md)). The command runs with the hook runner's scrubbed environment plus `PATH`.
+
 ## Later
 
-- Attaching to a remote session over `--attach "ssh host ahi connect"`, so the chat and an hc space can share a live session across machines.
-- Delegation from a chat session over the socket (`docs/DELEGATION.md` to be rewritten against this protocol).
 - Import and export over the wire; a Windows named-pipe listener; per-tool OSC 7501 child records.

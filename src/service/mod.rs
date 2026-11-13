@@ -55,8 +55,8 @@ pub(crate) struct TurnRequest {
     /// Hex SHA-256 the caller computed; the turn is refused when the prompt
     /// does not match it.
     pub(crate) prompt_sha256: Option<String>,
-    /// Tool root. Must be a directory.
-    pub(crate) workdir: PathBuf,
+    /// Tool root. Must be a directory; `None` is the session's directory.
+    pub(crate) workdir: Option<PathBuf>,
     /// An explicit policy file in place of the workdir's `ahi.tools.yaml`.
     pub(crate) tools: Option<PathBuf>,
     pub(crate) timeout: Option<Duration>,
@@ -200,11 +200,14 @@ impl Service {
             .count()
     }
 
+    /// A session in `cwd`, or in the directory this process runs in, which
+    /// is how a worker started by hc inside a checkout gets that checkout.
+    /// `gateway` and `model` default to the process's saved selection.
     pub(crate) fn create_session(
         &self,
-        cwd: &Path,
-        gateway: &str,
-        model: &str,
+        cwd: Option<&Path>,
+        gateway: Option<&str>,
+        model: Option<&str>,
         thinking: &str,
     ) -> ServiceResult<Header> {
         if ThinkingLevel::parse(thinking).is_none() {
@@ -213,7 +216,26 @@ impl Service {
                 format!("unknown thinking level `{thinking}`"),
             ));
         }
-        let header = Header::new(&cwd.display().to_string(), gateway, model, thinking);
+        let cwd = match cwd {
+            Some(cwd) => cwd.to_path_buf(),
+            None => std::env::current_dir().map_err(|err| {
+                ServiceError::new("config", format!("no working directory: {err}"))
+            })?,
+        };
+        let (gateway, model) = match (gateway, model) {
+            (Some(gateway), Some(model)) => (gateway.to_string(), model.to_string()),
+            _ => {
+                let saved = crate::tui::saved_selection(&self.inner.state).ok_or_else(|| {
+                    ServiceError::new(
+                        "config",
+                        "no model named and none selected on this host; run `ahi tui` once or name gateway and model",
+                    )
+                })?;
+                let selection = crate::chat::backend::parse_selection(&saved);
+                (selection.gateway, selection.model)
+            }
+        };
+        let header = Header::new(&cwd.display().to_string(), &gateway, &model, thinking);
         let session = self.inner.store.create(header.clone())?;
         lock(&self.inner.lives).insert(
             header.id.clone(),
@@ -378,15 +400,18 @@ impl Service {
                 "a turn is running on this session",
             ));
         }
-        let workdir = request
+        let requested = request
             .workdir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&live.session().header().cwd));
+        let workdir = requested
             .canonicalize()
             .ok()
             .filter(|path| path.is_dir())
             .ok_or_else(|| {
                 ServiceError::new(
                     "usage",
-                    format!("workdir {} is not a directory", request.workdir.display()),
+                    format!("workdir {} is not a directory", requested.display()),
                 )
             })?;
         if let Some(tools) = &request.tools {

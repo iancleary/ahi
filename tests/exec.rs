@@ -699,3 +699,150 @@ fn serve_start_brings_up_one_detached_server_that_exec_then_uses() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+/// A coordinator's turn hands a task to a worker: the worker is another
+/// `ahi serve` reached through the connect command `AHI_DELEGATE_VIA`
+/// names, here `ahi connect` to its socket.
+#[cfg(unix)]
+#[test]
+fn a_coordinator_delegates_a_task_to_a_worker_server() {
+    // One gateway, three turns in order: the coordinator asks to delegate,
+    // the worker answers, the coordinator concludes.
+    let (url, gateway) = loopback(
+        tool_round(
+            &[(
+                "c1",
+                "delegate",
+                serde_json::json!({"worker": "docs", "prompt": "write the summary"}),
+            )],
+            "delegated and done",
+        )
+        .into_iter()
+        .take(1)
+        .chain(vec![
+            stream(STREAM),
+            tool_round(&[], "delegated and done").pop().unwrap(),
+        ])
+        .collect(),
+    );
+    let coordinator = fixture(&url);
+    let worker = fixture(&url);
+    fs::write(worker.join("state/selection"), "local/vendor/model\n").unwrap();
+    let socket = std::env::temp_dir().join(format!("ahi-worker-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&socket);
+    let mut server = Command::new(env!("CARGO_BIN_EXE_ahi"))
+        .arg("--state-dir")
+        .arg(worker.join("state"))
+        .args(["serve", "--socket", socket.to_str().unwrap()])
+        .current_dir(worker.join("work"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "the worker server did not come up"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let policy = coordinator.join("ops/tools.yaml");
+    fs::write(
+        &policy,
+        "version: 1\nrules:\n- {id: docs, action: delegate, match: {worker: docs}, effect: approve}\n",
+    )
+    .unwrap();
+    let prompt = coordinator.join("ops/task.md");
+    fs::write(&prompt, "get the docs written").unwrap();
+    let result = coordinator.join("ops/result.json");
+    let via = format!(
+        "{} --state-dir {} connect --socket {}",
+        env!("CARGO_BIN_EXE_ahi"),
+        worker.join("state").display(),
+        socket.display()
+    );
+    let output = ahi(&coordinator)
+        .env("AHI_DELEGATE_VIA", &via)
+        .args([
+            "exec",
+            "--model",
+            "local/vendor/model",
+            "--standalone",
+            "--headless",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--result-file",
+            result.to_str().unwrap(),
+            "--tools",
+            policy.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", err(&output));
+    assert_eq!(out(&output), "delegated and done\n");
+    assert!(
+        err(&output).contains("tool delegate docs exit 0"),
+        "{}",
+        err(&output)
+    );
+    let requests = gateway.join().unwrap();
+    assert!(
+        requests[1].contains("write the summary"),
+        "the worker got the task"
+    );
+    assert!(
+        requests[2].contains("task ")
+            && requests[2].contains("on docs: ok")
+            && requests[2].contains("effects: none"),
+        "the coordinator's model sees the worker's answer and effects: {}",
+        requests[2]
+    );
+    assert!(requests[2].contains("Hello 世界"));
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&result).unwrap()).unwrap();
+    assert_eq!(doc["tools"]["calls"], 1);
+    assert_eq!(doc["effects"], "none", "the worker changed nothing");
+    assert_eq!(doc["ledger"][0]["tool"], "delegate");
+    assert_eq!(doc["ledger"][0]["worker"], "docs");
+    assert_eq!(doc["ledger"][0]["status"], "ok");
+    let worker_sessions = Command::new(env!("CARGO_BIN_EXE_ahi"))
+        .arg("--state-dir")
+        .arg(worker.join("state"))
+        .args(["session", "list", "--json"])
+        .output()
+        .unwrap();
+    let row: serde_json::Value = serde_json::from_str(out(&worker_sessions).trim()).unwrap();
+    assert_eq!(
+        row["id"], doc["ledger"][0]["session"],
+        "the task id is the worker session"
+    );
+    assert_eq!(
+        row["cwd"],
+        worker
+            .join("work")
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string(),
+        "the worker session lives where its server runs"
+    );
+    let audit = fs::read_to_string(coordinator.join("state/audit.log")).unwrap();
+    assert!(audit.contains("\"tool\":\"delegate\"") && audit.contains("\"worker\":\"docs\""));
+    assert!(
+        !audit.contains("write the summary"),
+        "the task text is not logged"
+    );
+
+    let stop = Command::new(env!("CARGO_BIN_EXE_ahi"))
+        .arg("--state-dir")
+        .arg(worker.join("state"))
+        .args(["serve", "stop", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(code(&stop), 0);
+    server.wait().unwrap();
+    fs::remove_dir_all(coordinator).unwrap();
+    fs::remove_dir_all(worker).unwrap();
+}
