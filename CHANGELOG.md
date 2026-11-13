@@ -3,6 +3,7 @@
 ## Unreleased
 
 ## 0.16.0 (2026-11-13)
+
 ### Added
 
 - A new in-repo workspace crate, `ahi-unix`, holds the two POSIX calls ahi needs and `std` does not expose: a signal handler that records SIGINT, SIGTERM, or SIGHUP for a loop to poll (first arrival wins, default disposition restored so a second copy ends the process), and `kill` aimed at a process group. It has no dependencies, compiles to stubs elsewhere, and like `ahi-win32` is published before `ahi`; `ahi` itself keeps forbidding unsafe code.
