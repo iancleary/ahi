@@ -17,7 +17,7 @@ mod preferences;
 mod scroll_navigation;
 mod selection;
 mod status;
-mod thinking;
+pub(crate) mod thinking;
 pub(crate) mod transcript;
 mod usage;
 

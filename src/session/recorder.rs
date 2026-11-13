@@ -32,6 +32,8 @@ pub(crate) struct Recorder {
     segment: String,
     turn: Option<OpenTurn>,
     failed: Option<String>,
+    /// Entries written since `take_fresh`, for a fan-out to followers.
+    fresh: Vec<super::Entry>,
 }
 
 struct OpenTurn {
@@ -52,6 +54,7 @@ impl Recorder {
             segment: String::new(),
             turn: None,
             failed: None,
+            fresh: Vec::new(),
         }
     }
 
@@ -67,13 +70,24 @@ impl Recorder {
             segment: String::new(),
             turn: None,
             failed: None,
+            fresh: Vec::new(),
         }
     }
 
     /// The session being written, once it exists.
-    #[allow(dead_code)] // the server reports it
+    #[allow(dead_code)] // the chat screen will show it
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session.as_ref().map(Session::id)
+    }
+
+    /// The session being written, for readers that share the recorder.
+    pub(crate) fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// Entries written since the last call, in write order.
+    pub(crate) fn take_fresh(&mut self) -> Vec<super::Entry> {
+        std::mem::take(&mut self.fresh)
     }
 
     /// `/clear`: the next turn starts a new session.
@@ -84,6 +98,7 @@ impl Recorder {
         self.segment.clear();
         self.turn = None;
         self.failed = None;
+        self.fresh.clear();
     }
 
     /// The first write failure, once. The screen shows it as an alert.
@@ -125,9 +140,18 @@ impl Recorder {
                 }
             }
         }
+        self.begin_turn_as(super::run_id(), prompt);
+    }
+
+    /// Open a turn with a caller's run id on a session that already exists.
+    /// Nothing is written when there is no session or recording stopped.
+    pub(crate) fn begin_turn_as(&mut self, run_id: String, prompt: &str) {
+        if !self.enabled || self.failed.is_some() || self.session.is_none() {
+            return;
+        }
         self.segment.clear();
         self.turn = Some(OpenTurn {
-            run_id: super::run_id(),
+            run_id,
             prompt_sha256: super::sha256_hex(prompt.as_bytes()),
         });
         self.record(Kind::Message(StoredMessage {
@@ -203,6 +227,12 @@ impl Recorder {
         );
     }
 
+    /// The turn ended as `status` with a caller-built result object (the
+    /// server's result document without its text).
+    pub(crate) fn finish_turn(&mut self, status: Status, result: serde_json::Value) {
+        self.close(status, result);
+    }
+
     fn close(&mut self, status: Status, result: serde_json::Value) {
         let Some(open) = self.turn.take() else {
             return;
@@ -262,7 +292,10 @@ impl Recorder {
         let mut kinds = std::mem::take(&mut self.pending);
         kinds.push(kind);
         match session.append(self.parent, kinds) {
-            Ok(entries) => self.parent = entries.last().map(|entry| entry.seq),
+            Ok(entries) => {
+                self.parent = entries.last().map(|entry| entry.seq);
+                self.fresh.extend_from_slice(entries);
+            }
             Err(err) => self.failed = Some(err.to_string()),
         }
     }
