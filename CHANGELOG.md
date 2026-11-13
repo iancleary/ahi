@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.15.0 (2026-11-12)
+
 ### Added
 
 - `read_file` results in the chat show each file line behind its line number, starting at the requested offset. The tool's own `[lines A-B of N]` and "more lines" notes stay dim and unnumbered.
