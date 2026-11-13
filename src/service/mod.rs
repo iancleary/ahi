@@ -1104,6 +1104,7 @@ mod tests {
             .create_session(Some(&root), Some("local"), Some("vendor/model"), "off")
             .unwrap();
         let store = Store::new(&state);
+        #[cfg(unix)]
         assert!(
             matches!(store.hold(&header.id), Err(StoreError::Conflict(_))),
             "the service holds the file"

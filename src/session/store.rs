@@ -594,6 +594,8 @@ mod tests {
         assert_eq!(store.open(&id).unwrap().entries().len(), 10);
         // Holding the session cuts the torn line, so an append starts whole.
         let mut held = store.hold(&id).unwrap();
+        // No advisory locks off Unix: the stub says every holder holds it.
+        #[cfg(unix)]
         assert!(matches!(store.hold(&id), Err(StoreError::Conflict(_))));
         held.append(Some(10), vec![message(Role::Operator, "q4")])
             .unwrap();
@@ -674,7 +676,8 @@ mod tests {
         let other = Store::new(&Directories::single_root(dir.join("other")));
         let (imported, added) = other.import(&out).unwrap();
         assert_eq!((imported.id(), added), (a.id(), 2));
-        // While a process holds the session, import refuses it.
+        // While a process holds the session, import refuses it (Unix locks).
+        #[cfg(unix)]
         assert!(matches!(other.import(&out), Err(StoreError::Conflict(_))));
         drop(imported);
         let (again, added) = other.import(&out).unwrap();
