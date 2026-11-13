@@ -1,7 +1,7 @@
 [package]
 name = "ahi-unix"
-description = "The POSIX calls ahi needs and std does not expose: signal handlers, process-group kill, and flock. In-repo so ahi can forbid unsafe code."
-version = "0.2.0"
+description = "The POSIX calls ahi needs and std does not expose: signal handlers, process-group kill, flock, and peer credentials. In-repo so ahi can forbid unsafe code."
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.88"

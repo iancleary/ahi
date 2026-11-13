@@ -10,6 +10,12 @@
 - The session reader keeps an entry type it does not know in its place (seq continuity, written back whole by `export` and `import`) instead of refusing the file as corrupt, so a 0.16 ahi can read a session a newer ahi wrote.
 - The skills loader (`src/skills/`): a skill is `.ahi/skills/<name>/SKILL.md` in the working directory or `<config>/skills/<name>/SKILL.md` on the operator's host, a YAML frontmatter (`name` equal to the directory, one-line `description`, optional `when`, up to 16 `.md`/`.txt` `references`, informational `version`, unknown keys refused) and a body. Caps of 32 KiB per file and 64 skills per root; a symbolic link anywhere from `.ahi` down, a name that collides with another's when case is ignored, or any other fault rejects the skill with a reason `ahi doctor` prints (`skills (repo): …`, `skill rejected (…): name: reason`). An operator skill shadows a repo skill of the same name. `.ahi` itself and everything under `.ahi/skills` join the paths tools never write.
 
+### Fixed
+
+- `ahi serve` holds `serve.lock` beside the socket for its life (`flock`, `ahi-unix` 0.3.0), so two chats starting at once can no longer produce two servers with one listening on an unlinked socket forever; only the lock holder removes the socket file, and a second `ahi serve` exits at once saying a server already runs. The socket is bound under a private name, set to mode 600, and renamed into place, so it is never visible with umask permissions.
+- `ahi serve` checks every connection's peer credentials (`SO_PEERCRED` / `getpeereid`) before reading a byte and refuses another user with `auth`; holds at most 64 connections and 16 subscriptions per connection, refusing the next with `limit`; and refuses new requests with `conflict` while it drains after `stop`.
+- `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.
+
 ## 0.16.1 (2026-11-13)
 
 ### Fixed

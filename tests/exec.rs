@@ -550,7 +550,11 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
         .output()
         .unwrap();
     assert_eq!(code(&second), 1);
-    assert!(err(&second).contains("already answers"));
+    assert!(err(&second).contains("already runs"), "{}", err(&second));
+    assert!(
+        socket.with_extension("lock").exists(),
+        "the lock sits beside the socket"
+    );
 
     // exec finds the server and runs its turn there.
     let output = ahi(&dir)
@@ -577,10 +581,69 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     let rows = sessions(&dir);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["last_status"], "ok");
+    let turned = rows[0]["id"].as_str().unwrap().to_string();
+
+    // Caps: 64 connections, then a refusal; 16 subscriptions per connection.
+    // The kernel accepts every connect at once; the server seats them in
+    // order and refuses the one past the cap, which may be any of them if a
+    // seat from the exec above is still being given back, so each is read
+    // with a short timeout and exactly one carries the refusal.
+    let seats: Vec<std::os::unix::net::UnixStream> = (0..65)
+        .map(|_| {
+            let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            stream
+        })
+        .collect();
+    let mut refusals = 0;
+    for seat in &seats {
+        let mut line = String::new();
+        if BufReader::new(seat).read_line(&mut line).is_ok() && !line.is_empty() {
+            let refusal: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(refusal["error"]["kind"], "limit", "{line}");
+            refusals += 1;
+        }
+    }
+    assert_eq!(refusals, 1, "one connection past the cap is refused");
+    drop(seats);
+    let mut one = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    let mut lines = BufReader::new(one.try_clone().unwrap()).lines();
+    let created: serde_json::Value = {
+        writeln!(
+            one,
+            r#"{{"id": 1, "method": "session.create", "params": {{"cwd": "{}", "gateway": "local", "model": "vendor/model", "thinking": "off"}}}}"#,
+            dir.join("work").display()
+        )
+        .unwrap();
+        serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+    };
+    let sid = created["result"]["id"].as_str().unwrap().to_string();
+    let mut kinds = Vec::new();
+    for n in 0..17 {
+        writeln!(
+            one,
+            r#"{{"id": {n}, "method": "session.subscribe", "params": {{"session": "{sid}", "after": 0}}}}"#
+        )
+        .unwrap();
+        loop {
+            let v: serde_json::Value =
+                serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            if v.get("event").is_none() {
+                kinds.push(v["error"]["kind"].as_str().map(str::to_string));
+                break;
+            }
+        }
+    }
+    assert!(kinds[..16].iter().all(Option::is_none), "{kinds:?}");
+    assert_eq!(kinds[16].as_deref(), Some("limit"));
+    drop(lines);
+    drop(one);
 
     // connect bridges stdin and stdout to the socket: one request, one answer,
     // then a subscription whose replayed entries arrive as events.
-    let id = rows[0]["id"].as_str().unwrap();
+    let id = turned.as_str();
     let mut bridge = ahi(&dir)
         .args(["connect", "--socket", socket.to_str().unwrap()])
         .stdin(Stdio::piped())
@@ -1024,6 +1087,9 @@ fn exec_exits_6_when_the_service_never_reports_the_turn() {
             let request: serde_json::Value = serde_json::from_str(&line).unwrap();
             let method = request["method"].as_str().unwrap_or_default().to_string();
             let result = match method.as_str() {
+                "health" => {
+                    serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "open_turns": 0})
+                }
                 "session.create" => serde_json::json!({"id": "fake-session"}),
                 "session.get" => serde_json::json!({"id": "fake-session", "tip": 0}),
                 "turn.submit" => serde_json::json!({"status": "running", "run_id": "silent-1"}),
