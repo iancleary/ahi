@@ -676,12 +676,35 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     drop(stdin);
     assert!(bridge.wait().unwrap().success());
 
+    // A bridge still attached when the server stops exits 3, so a
+    // coordinator can tell "my stdin ended" from "the server went away".
+    let mut attached = ahi(&dir)
+        .args(["connect", "--socket", socket.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut attached_stdin = attached.stdin.take().unwrap();
+    writeln!(
+        attached_stdin,
+        r#"{{"id": 1, "method": "health", "params": {{}}}}"#
+    )
+    .unwrap();
+    let mut attached_lines = BufReader::new(attached.stdout.take().unwrap()).lines();
+    let answered: serde_json::Value =
+        serde_json::from_str(&attached_lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(answered["id"], 1);
+
     // stop ends the server cleanly and removes the socket.
     let stop = ahi(&dir)
         .args(["serve", "stop", "--socket", socket.to_str().unwrap()])
         .output()
         .unwrap();
     assert_eq!(code(&stop), 0, "{}", err(&stop));
+    let attached_status = attached.wait().unwrap();
+    assert_eq!(attached_status.code(), Some(3), "the server closed first");
+    drop(attached_stdin);
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = server.try_wait().unwrap() {

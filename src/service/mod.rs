@@ -120,6 +120,12 @@ pub(crate) enum Event {
         result: Value,
     },
     Keepalive,
+    /// The subscription fell `SUBSCRIBER_CAPACITY` events behind and was
+    /// dropped. The last word on it: a client resubscribes from the last
+    /// `seq` it saw, or fails.
+    Lagged {
+        session: String,
+    },
 }
 
 /// Why a request was refused. `kind` is one of the result document's

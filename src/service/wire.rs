@@ -95,6 +95,7 @@ impl Event {
                 "status": status.as_str(), "result": result
             }),
             Self::Keepalive => json!({"event": "keepalive"}),
+            Self::Lagged { session } => json!({"event": "lagged", "session": session}),
         }
     }
 
@@ -129,6 +130,9 @@ impl Event {
                 result: value.get("result")?.clone(),
             },
             "keepalive" => Self::Keepalive,
+            "lagged" => Self::Lagged {
+                session: text("session")?,
+            },
             _ => return None,
         })
     }
@@ -235,7 +239,7 @@ fn session_param(params: &Value) -> ServiceResult<&str> {
 pub(crate) fn dispatch(
     service: &Service,
     request: &Request,
-    subscribe: &mut dyn FnMut(Receiver<Event>),
+    subscribe: &mut dyn FnMut(&str, Receiver<Event>),
 ) -> ServiceResult<Value> {
     let params = &request.params;
     match request.method.as_str() {
@@ -262,11 +266,9 @@ pub(crate) fn dispatch(
             params["branch"].as_u64(),
         )?)),
         "session.subscribe" => {
-            let receiver = service.subscribe(
-                session_param(params)?,
-                params["after"].as_u64().unwrap_or(0),
-            )?;
-            subscribe(receiver);
+            let session = session_param(params)?;
+            let receiver = service.subscribe(session, params["after"].as_u64().unwrap_or(0))?;
+            subscribe(session, receiver);
             Ok(json!({}))
         }
         "session.settings" => {
@@ -338,6 +340,19 @@ mod tests {
             params[key] = value.clone();
         }
         turn_request(&params)
+    }
+
+    #[test]
+    fn a_lagged_event_round_trips() {
+        let event = Event::Lagged {
+            session: "s1".into(),
+        };
+        let json = event.to_json();
+        assert_eq!(json, json!({"event": "lagged", "session": "s1"}));
+        assert!(
+            matches!(Event::from_json(&json), Some(Event::Lagged { session }) if session == "s1")
+        );
+        assert!(Event::from_json(&json!({"event": "lagged"})).is_none());
     }
 
     #[test]

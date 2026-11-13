@@ -175,6 +175,7 @@ fn run_on(
     let doc = if submitted["status"] == "running" {
         let mut deadline = started + Duration::from_secs(timeout_secs) + Duration::from_secs(5);
         let mut cancelled = false;
+        let mut last_seq = tip;
         loop {
             if !cancelled && cancel.load(Ordering::Relaxed) {
                 cancelled = true;
@@ -200,6 +201,21 @@ fn run_on(
                     result,
                     ..
                 }) if ended == run_id => break result,
+                Ok(Event::Entry { entry, .. }) => {
+                    if let Some(seq) = entry["seq"].as_u64() {
+                        last_seq = last_seq.max(seq);
+                    }
+                }
+                // Fell behind the worker's stream: pick it up from the last
+                // entry seen; its `turn` event still ends the wait.
+                Ok(Event::Lagged { session: lagged }) if lagged == session => {
+                    client
+                        .call(
+                            "session.subscribe",
+                            json!({"session": session, "after": last_seq}),
+                        )
+                        .map_err(|_| "the worker refused the subscription")?;
+                }
                 Ok(_) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

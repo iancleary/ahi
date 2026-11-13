@@ -341,7 +341,10 @@ mod unix {
     }
 
     /// `ahi connect`: copy stdin to the socket and the socket to stdout
-    /// until either side closes. What `ssh host ahi connect` runs.
+    /// until either side closes. What `ssh host ahi connect` runs. Exits 0
+    /// when stdin ended (the client went away), 3 when the server closed
+    /// first (it stopped or died mid-turn), 1 when nothing answered: a
+    /// coordinator reads which side ended.
     pub fn connect(state: &Directories, socket: Option<&Path>) -> Result<u8> {
         let path = socket_path(state, socket);
         let Some(stream) = try_connect(&path) else {
@@ -349,8 +352,11 @@ mod unix {
             return Ok(1);
         };
         let mut to_socket = stream.try_clone().map_err(io_error)?;
+        let stdin_ended = Arc::new(AtomicBool::new(false));
+        let ended = Arc::clone(&stdin_ended);
         let inbound = thread::spawn(move || {
             let _ = io::copy(&mut io::stdin().lock(), &mut to_socket);
+            ended.store(true, Ordering::Relaxed);
             let _ = to_socket.shutdown(std::net::Shutdown::Write);
         });
         // Not `io::copy`: its buffered-writer path fills stdout's buffer before
@@ -375,7 +381,12 @@ mod unix {
         }
         // The server closed; a reader still blocked on stdin ends with the process.
         drop(inbound);
-        Ok(0)
+        if stdin_ended.load(Ordering::Relaxed) {
+            Ok(0)
+        } else {
+            eprintln!("the server on {} closed the connection", path.display());
+            Ok(3)
+        }
     }
 
     fn io_error(err: io::Error) -> Error {
@@ -500,10 +511,11 @@ mod unix {
             }
             let forward_to = Arc::clone(&writer);
             let closed_flag = Arc::clone(&closed);
-            let mut subscribe = |receiver: Receiver<Event>| {
+            let mut subscribe = |session: &str, receiver: Receiver<Event>| {
                 let writer = Arc::clone(&forward_to);
                 let closed = Arc::clone(&closed_flag);
-                thread::spawn(move || forward(receiver, writer, closed));
+                let session = session.to_string();
+                thread::spawn(move || forward(session, receiver, writer, closed));
             };
             let answer = wire::dispatch(&service, &request, &mut subscribe);
             if write_line(&writer, &wire::response(&request.id, answer)).is_err() {
@@ -515,9 +527,15 @@ mod unix {
     }
 
     /// Events of one subscription to one connection, with a keepalive when
-    /// nothing happens. Ends when the session drops the subscriber, a write
+    /// nothing happens. Ends when the session drops the subscriber (said
+    /// with one `lagged` event, so the client knows to resubscribe), a write
     /// fails, or the connection's reader has ended.
-    fn forward(receiver: Receiver<Event>, writer: Arc<Mutex<UnixStream>>, closed: Arc<AtomicBool>) {
+    fn forward(
+        session: String,
+        receiver: Receiver<Event>,
+        writer: Arc<Mutex<UnixStream>>,
+        closed: Arc<AtomicBool>,
+    ) {
         let mut idle = Duration::ZERO;
         loop {
             if closed.load(Ordering::Relaxed) {
@@ -536,7 +554,10 @@ mod unix {
                     idle = Duration::ZERO;
                     Event::Keepalive
                 }
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = write_line(&writer, &Event::Lagged { session }.to_json());
+                    return;
+                }
             };
             if write_line(&writer, &event.to_json()).is_err() {
                 return;

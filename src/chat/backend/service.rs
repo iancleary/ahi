@@ -286,6 +286,7 @@ fn follow(
     mut batch: u64,
     sender: Sender<ResponseEvent>,
 ) {
+    let mut last_seq = 0u64;
     loop {
         // Wait on the events alone, never holding the client: the approval
         // thread needs it to answer, and so does `cancel`.
@@ -307,10 +308,39 @@ fn follow(
                 delta,
                 ..
             } if *id == run_id => sender.send(ResponseEvent::TextDelta(delta)).is_err(),
-            Event::Entry { entry, .. } => match entry_event(&entry) {
-                Some(events) => events.into_iter().any(|event| sender.send(event).is_err()),
-                None => false,
-            },
+            Event::Entry { entry, .. } => {
+                if let Some(seq) = entry["seq"].as_u64() {
+                    last_seq = last_seq.max(seq);
+                }
+                match entry_event(&entry) {
+                    Some(events) => events.into_iter().any(|event| sender.send(event).is_err()),
+                    None => false,
+                }
+            }
+            // Fell behind: pick the stream up again from the last entry seen,
+            // or tell the screen the turn is lost.
+            Event::Lagged {
+                session: ref lagged,
+            } if *lagged == session => {
+                let resubscribed = client.lock().ok().and_then(|mut client| {
+                    client
+                        .call(
+                            "session.subscribe",
+                            json!({"session": session, "after": last_seq}),
+                        )
+                        .ok()
+                });
+                if resubscribed.is_some() {
+                    false
+                } else {
+                    let _ = sender.send(ResponseEvent::Failed {
+                        message: "fell behind the service's events and could not resubscribe"
+                            .to_string(),
+                        kind: ErrorKind::Transport,
+                    });
+                    true
+                }
+            }
             Event::Ask {
                 run_id: ref id,
                 ask_id,

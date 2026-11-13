@@ -25,8 +25,15 @@ pub(crate) struct Client {
     events: Events,
 }
 
-/// The subscription's receiver, once there is one.
-pub(crate) type Events = Arc<Mutex<Option<Receiver<Event>>>>;
+/// The subscription's receiver, once there is one, with its session: when
+/// the in-process service drops a subscriber for lagging, the receiver ends
+/// and the next read is one `lagged` event for that session, then nothing.
+pub(crate) type Events = Arc<Mutex<Option<Subscription>>>;
+
+pub(crate) struct Subscription {
+    session: Option<String>,
+    receiver: Receiver<Event>,
+}
 
 enum Transport {
     /// Constructed in this process: no server on the host.
@@ -73,7 +80,10 @@ impl Client {
                     let (remote, events) = remote::Remote::new(Box::new(reader), Box::new(stream));
                     return Ok(Self {
                         transport: Transport::Remote(remote, path),
-                        events: Arc::new(Mutex::new(Some(events))),
+                        events: Arc::new(Mutex::new(Some(Subscription {
+                            session: None,
+                            receiver: events,
+                        }))),
                     });
                 }
                 if socket.is_some() {
@@ -151,7 +161,10 @@ impl Client {
                     stderr: kept,
                 },
             ),
-            events: Arc::new(Mutex::new(Some(events))),
+            events: Arc::new(Mutex::new(Some(Subscription {
+                session: None,
+                receiver: events,
+            }))),
         })
     }
 
@@ -188,9 +201,12 @@ impl Client {
         match &mut self.transport {
             Transport::Local(service) => {
                 let events = &self.events;
-                let mut subscribe = |receiver: Receiver<Event>| {
+                let mut subscribe = |session: &str, receiver: Receiver<Event>| {
                     if let Ok(mut slot) = events.lock() {
-                        *slot = Some(receiver);
+                        *slot = Some(Subscription {
+                            session: Some(session.to_string()),
+                            receiver,
+                        });
                     }
                 };
                 wire::dispatch(service, &request, &mut subscribe)
@@ -209,10 +225,18 @@ impl Client {
 
 /// The next event on `events`, if one arrives within `timeout`.
 pub(crate) fn next_event(events: &Events, timeout: Duration) -> Result<Event, RecvTimeoutError> {
-    let events = events.lock().map_err(|_| RecvTimeoutError::Disconnected)?;
-    match events.as_ref() {
-        Some(receiver) => receiver.recv_timeout(timeout),
-        None => Err(RecvTimeoutError::Disconnected),
+    let mut events = events.lock().map_err(|_| RecvTimeoutError::Disconnected)?;
+    let Some(subscription) = events.as_mut() else {
+        return Err(RecvTimeoutError::Disconnected);
+    };
+    match subscription.receiver.recv_timeout(timeout) {
+        // The in-process service dropped this subscriber for lagging; a
+        // remote one says so itself. Said once, then the subscription is gone.
+        Err(RecvTimeoutError::Disconnected) if subscription.session.is_some() => {
+            let session = subscription.session.take().unwrap_or_default();
+            Ok(Event::Lagged { session })
+        }
+        other => other,
     }
 }
 
@@ -425,6 +449,41 @@ mod via_tests {
             names,
             ["PATH", "PRE_COMMIT", "SSH_AGENT_PID", "SSH_AUTH_SOCK"]
         );
+    }
+
+    #[test]
+    fn a_dropped_local_subscription_is_one_lagged_event_then_nothing() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Event>(1);
+        let events: Events = Arc::new(Mutex::new(Some(Subscription {
+            session: Some("s1".into()),
+            receiver,
+        })));
+        sender.try_send(Event::Keepalive).unwrap();
+        assert!(matches!(
+            next_event(&events, Duration::from_millis(10)),
+            Ok(Event::Keepalive)
+        ));
+        drop(sender);
+        assert!(matches!(
+            next_event(&events, Duration::from_millis(10)),
+            Ok(Event::Lagged { session }) if session == "s1"
+        ));
+        assert!(matches!(
+            next_event(&events, Duration::from_millis(10)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+        // A remote subscription ends only with its connection: no lag is
+        // invented for it, the server announces its own.
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Event>(1);
+        let remote: Events = Arc::new(Mutex::new(Some(Subscription {
+            session: None,
+            receiver,
+        })));
+        drop(sender);
+        assert!(matches!(
+            next_event(&remote, Duration::from_millis(10)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
     }
 
     #[cfg(unix)]

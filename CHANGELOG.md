@@ -16,6 +16,8 @@
 - `ahi serve` checks every connection's peer credentials (`SO_PEERCRED` / `getpeereid`) before reading a byte and refuses another user with `auth`; holds at most 64 connections and 16 subscriptions per connection, refusing the next with `limit`; and refuses new requests with `conflict` while it drains after `stop`.
 - `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.
 - A session file has a 64 MiB budget: at or past it the next `turn.submit` is refused with `limit` ("start a new session") and the chat says so and keeps the draft, while a turn in flight finishes. `ahi session list` reads each file line by line instead of materializing every entry, and its `--json` rows carry `bytes`.
+- A subscriber that fell 256 events behind was dropped without a word, and a client following a turn waited on nothing. The server now sends one `lagged` event as the subscription's last word, the in-process service reports the same once, and `ahi exec`, `ahi tui`, and the `delegate` tool resubscribe from the last `seq` they saw.
+- `ahi connect` exits 3 when the server closed the connection first and 0 when stdin ended, so a coordinator can tell a client that went away from a server that died mid-turn.
 
 ### Fixed
 
