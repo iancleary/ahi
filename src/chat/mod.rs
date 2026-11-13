@@ -130,6 +130,8 @@ struct ChatScreen {
     click_origin: Option<(u16, u16)>,
     /// What the next successful clipboard write reports.
     copy_label: &'static str,
+    /// OSC 7501 reports for the multiplexer that holds this terminal.
+    status: crate::program_status::Reporter,
 }
 
 impl ChatScreen {
@@ -141,6 +143,7 @@ impl ChatScreen {
             workspace_root: std::env::current_dir().unwrap_or_default(),
             click_origin: None,
             copy_label: "Selection copied",
+            status: crate::program_status::Reporter::for_stdout(),
             state_dir: state_dir.clone(),
             selection: parse_selection(selection),
             thinking,
@@ -1031,6 +1034,7 @@ impl ChatScreen {
         self.response_in_progress = true;
         self.assistant_open = false;
         self.turn_started = Some(Instant::now());
+        self.report_status(crate::program_status::State::Working, "");
     }
 
     /// The footer row that closes a turn: `done in 12s · 14:02`. A notice
@@ -1054,6 +1058,20 @@ impl ChatScreen {
         );
         footer.elapsed = Some(elapsed);
         self.push_message(footer);
+    }
+
+    /// The sidebar row for this chat: directory and model.
+    fn status_title(&self) -> String {
+        let directory = self
+            .workspace_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string());
+        format!("{directory} · {}", self.selection.model)
+    }
+
+    fn report_status(&self, state: crate::program_status::State, msg: &str) {
+        self.status.state(state, &self.status_title(), msg);
     }
 
     fn dispatch_command(
@@ -1204,6 +1222,8 @@ impl ChatScreen {
                 if !self.assistant_open {
                     self.push_message(ChatMessage::new(TranscriptRole::Assistant, ""));
                 }
+                let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
+                self.report_status(crate::program_status::State::Working, &names.join(", "));
                 let last = self.messages.len().saturating_sub(1);
                 if let Some(message) = self.messages.last_mut() {
                     message.tool = Some(ToolPayload::Calls { calls, native });
@@ -1213,6 +1233,16 @@ impl ChatScreen {
                 false
             }
             ResponseEvent::ToolApprovalRequested(request) => {
+                let waiting = request
+                    .calls
+                    .first()
+                    .map(|call| format!("{} {}", call.tool, call.target))
+                    .unwrap_or_default();
+                self.status.blocked(
+                    crate::program_status::Kind::Permission,
+                    &self.status_title(),
+                    &waiting,
+                );
                 self.push_notice(String::new());
                 let pending = approval::PendingApproval::new(request, self.messages.len() - 1);
                 self.messages[pending.notice_index].text = pending.prompt();
@@ -1269,6 +1299,14 @@ impl ChatScreen {
             }
             ResponseEvent::Completed => {
                 self.approval = None;
+                let answer = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| matches!(message.role, TranscriptRole::Assistant))
+                    .map(|message| message.text.clone())
+                    .unwrap_or_default();
+                self.report_status(crate::program_status::State::Done, &answer);
                 self.push_turn_footer("done in");
                 true
             }
@@ -1289,6 +1327,10 @@ impl ChatScreen {
                                 TranscriptRole::Operator | TranscriptRole::Tool { .. }
                             )
                         });
+                self.report_status(
+                    crate::program_status::State::Error,
+                    &format!("{kind:?}").to_ascii_lowercase(),
+                );
                 self.push_alert(message);
                 self.turn_started = None;
                 true
@@ -1373,6 +1415,7 @@ impl ChatScreen {
             if let Some(pending) = self.approval.take() {
                 pending.finish();
             }
+            self.report_status(crate::program_status::State::Working, "");
         }
         self.scroll_from_bottom = 0;
     }
@@ -1443,6 +1486,7 @@ pub(crate) fn interact(
 ) -> Result<()> {
     let mut screen = ChatScreen::load(state_dir, selection);
     screen.push_header();
+    screen.report_status(crate::program_status::State::Idle, "");
     let mut backend =
         HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf));
     loop {
@@ -1461,7 +1505,10 @@ pub(crate) fn interact(
         cleanup.map_err(|err| Error::new(format!("disable paste: {err}")))?;
         let outcome = outcome?;
         match outcome {
-            SessionEnd::Exit => return Ok(()),
+            SessionEnd::Exit => {
+                screen.status.clear();
+                return Ok(());
+            }
             SessionEnd::Login => {
                 let notice = match crate::tui::login::run(state_dir) {
                     Ok(()) => "OpenAI login completed; model selection unchanged".to_string(),
@@ -1476,7 +1523,10 @@ pub(crate) fn interact(
                     match reopen_picker(PickerView::Catalog, &provider, Some(registration))? {
                         PickerOutcome::Selected(next) => screen.set_selection(&next),
                         PickerOutcome::Back => {}
-                        PickerOutcome::Exit => return Ok(()),
+                        PickerOutcome::Exit => {
+                            screen.status.clear();
+                            return Ok(());
+                        }
                     }
                 }
                 Ok(None) => screen.push_notice("Gateway discovery cancelled".to_string()),
@@ -1490,7 +1540,10 @@ pub(crate) fn interact(
                 match reopen_picker(view, &screen.selection.gateway, None)? {
                     PickerOutcome::Selected(next) => screen.set_selection(&next),
                     PickerOutcome::Back => {}
-                    PickerOutcome::Exit => return Ok(()),
+                    PickerOutcome::Exit => {
+                        screen.status.clear();
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1841,6 +1894,75 @@ mod tests {
 
     fn screen_in(state: &Path) -> ChatScreen {
         ChatScreen::load(&Directories::single_root(state), "openai/gpt-4.1")
+    }
+
+    #[test]
+    fn the_chat_reports_its_state_to_the_multiplexer_with_osc_7501() {
+        use crate::program_status::Reporter;
+        let state = crate::fixture_directory::create_unique_fixture_directory("chat-status");
+        let mut screen = screen_in(&state);
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        screen.status = Reporter::buffered(buffer.clone());
+        let reports = |buffer: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+            let written = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+            written
+                .split("\x1b]7501;")
+                .skip(1)
+                .map(|report| {
+                    report
+                        .trim_end_matches("\x1b\\")
+                        .split(':')
+                        .filter(|field| !field.starts_with("title="))
+                        .collect::<Vec<_>>()
+                        .join(":")
+                })
+                .collect::<Vec<String>>()
+        };
+
+        // A send is working; an approval is blocked; the answer is working
+        // again; a failure is an error named by its kind.
+        let mut backend = RecordingBackend {
+            requests: Vec::new(),
+        };
+        screen.set_input_text("hello");
+        press(&mut screen, &mut backend, crossterm::event::KeyCode::Enter);
+        let (event, _decisions) = approval(&[("src/a.rs", "src")]);
+        screen.apply_event(event);
+        screen.answer_approval(approval::ApprovalKey::Approve);
+        screen.apply_event(ResponseEvent::ToolCallsRequested {
+            calls: vec![backend::ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::Map::new(),
+            }],
+            native: None,
+        });
+        screen.apply_event(ResponseEvent::Failed {
+            message: "down".into(),
+            kind: crate::error::ErrorKind::Transport,
+        });
+        assert_eq!(
+            reports(&buffer),
+            [
+                "state=working:app=ahi",
+                "state=blocked:kind=permission:app=ahi:msg=cmVhZF9maWxlIHNyYy9hLnJz",
+                "state=working:app=ahi",
+                "state=working:app=ahi:msg=cmVhZF9maWxl",
+                "state=error:app=ahi:msg=dHJhbnNwb3J0",
+            ]
+        );
+        // The title names the directory and the model.
+        let written = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        let title = screen.status_title();
+        assert!(title.ends_with(" · gpt-4.1"), "{title}");
+        assert!(written.contains(":title="), "{written}");
+
+        // A completed turn is done, with the answer's first line.
+        buffer.lock().unwrap().clear();
+        screen.apply_event(ResponseEvent::TextDelta("All good\nmore".into()));
+        screen.apply_event(ResponseEvent::Completed);
+        assert_eq!(reports(&buffer), ["state=done:app=ahi:msg=QWxsIGdvb2Q="]);
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]

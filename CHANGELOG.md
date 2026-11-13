@@ -5,6 +5,7 @@
 ### Added
 
 - `read_file` results in the chat show each file line behind its line number, starting at the requested offset. The tool's own `[lines A-B of N]` and "more lines" notes stay dim and unnumbered.
+- The chat reports what it is doing to the terminal multiplexer that holds it with OSC 7501, the Program Status Protocol herdr-core reads: `idle` when open, `working` while a turn runs (naming the tools being called), `blocked` with `kind=permission` while a tool call waits for approval, `done` with the first line of the answer, `error` with the failure's kind, and `clear` on exit. The title is the working directory and model. The sequence is written only when stdout is a terminal; terminals that do not know it ignore it, as with any unknown OSC. Nothing is read back and no dependency is added.
 
 ### Changed
 
