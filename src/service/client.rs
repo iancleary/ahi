@@ -35,8 +35,22 @@ enum Transport {
     #[cfg(unix)]
     Remote(remote::Remote, PathBuf),
     /// Over the stdio of a command, herdr-core's `--via`.
-    Via(remote::Remote, std::process::Child),
+    Via(remote::Remote, Bridge),
 }
+
+/// The connect command behind a `Via` transport and what it said on stderr.
+struct Bridge {
+    child: std::process::Child,
+    /// The last `VIA_STDERR_CAP` bytes the command wrote to stderr.
+    stderr: Arc<Mutex<Vec<u8>>>,
+}
+
+/// Environment the connect command gets besides the hook runner's base:
+/// the agent an `ssh` in it authenticates with. Nothing else of the
+/// coordinator's travels.
+pub(crate) const VIA_ENV: &[&str] = &["SSH_AUTH_SOCK", "SSH_AGENT_PID"];
+/// How much of the connect command's stderr is kept for the operator.
+const VIA_STDERR_CAP: usize = 8 * 1024;
 
 impl Client {
     /// The server on `socket` (or the default socket) when one answers,
@@ -85,30 +99,74 @@ impl Client {
 
     /// Over the stdin and stdout of `argv`: a bridge such as
     /// `ssh host ahi connect`. The command runs with the hook runner's
-    /// scrubbed environment plus `PATH`, so a coordinator's secrets do not
-    /// travel with it; its stderr is the operator's.
+    /// scrubbed environment plus `PATH` and the ssh agent variables, so a
+    /// coordinator's secrets do not travel with it. Its stderr is captured
+    /// for the operator (`via_stderr`), never written to the terminal,
+    /// which may be a raw-mode screen, and never shown to the model.
     pub(crate) fn via(argv: &[String]) -> Result<Self, ServiceError> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| usage("empty connect command"))?;
-        let env = crate::hooks::local_hook::scrub_env(std::env::vars_os(), &[]);
+        let extra: Vec<String> = VIA_ENV.iter().map(|name| name.to_string()).collect();
+        let env = crate::hooks::local_hook::scrub_env(std::env::vars_os(), &extra);
         let mut child = std::process::Command::new(program)
             .args(args)
             .env_clear()
             .envs(env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|err| usage(format!("cannot start `{program}`: {err}")))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
             return Err(usage("the connect command has no stdio"));
         };
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&kept);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut stderr = stderr;
+            let mut chunk = [0u8; 1024];
+            while let Ok(n) = stderr.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut kept) = sink.lock() {
+                    kept.extend_from_slice(&chunk[..n]);
+                    if kept.len() > VIA_STDERR_CAP {
+                        let excess = kept.len() - VIA_STDERR_CAP;
+                        kept.drain(..excess);
+                    }
+                }
+            }
+        });
         let (remote, events) = remote::Remote::new(Box::new(stdout), Box::new(stdin));
         Ok(Self {
-            transport: Transport::Via(remote, child),
+            transport: Transport::Via(
+                remote,
+                Bridge {
+                    child,
+                    stderr: kept,
+                },
+            ),
             events: Arc::new(Mutex::new(Some(events))),
         })
+    }
+
+    /// What the connect command has written to stderr so far, for the
+    /// operator's eyes: `ssh` and `hc` diagnostics. Empty for the other
+    /// transports.
+    pub(crate) fn via_stderr(&self) -> String {
+        match &self.transport {
+            Transport::Via(_, bridge) => bridge
+                .stderr
+                .lock()
+                .map(|kept| String::from_utf8_lossy(&kept).trim().to_string())
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
     }
 
     /// The socket in use, or `None` for the in-process service and a bridge.
@@ -161,10 +219,10 @@ pub(crate) fn next_event(events: &Events, timeout: Duration) -> Result<Event, Re
 impl Drop for Client {
     fn drop(&mut self) {
         // The bridge ends with its stdin; a command that lingers is killed.
-        if let Transport::Via(remote, child) = &mut self.transport {
+        if let Transport::Via(remote, bridge) = &mut self.transport {
             remote.close();
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = bridge.child.kill();
+            let _ = bridge.child.wait();
         }
     }
 }
@@ -335,5 +393,53 @@ mod remote {
                 Err(mpsc::RecvTimeoutError::Disconnected)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod via_tests {
+    use super::*;
+
+    #[test]
+    fn the_connect_command_keeps_the_ssh_agent_and_nothing_secret() {
+        let extra: Vec<String> = VIA_ENV.iter().map(|name| name.to_string()).collect();
+        let env = crate::hooks::local_hook::scrub_env(
+            [
+                ("SSH_AUTH_SOCK", "/run/agent.sock"),
+                ("SSH_AGENT_PID", "42"),
+                ("OPENAI_API_KEY", "sk-no"),
+                ("AWS_SECRET_ACCESS_KEY", "no"),
+                ("GITHUB_TOKEN", "no"),
+                ("HC_SESSION", "no"),
+                ("PATH", "/usr/bin"),
+            ],
+            &extra,
+        );
+        let mut names: Vec<String> = env
+            .iter()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["PATH", "PRE_COMMIT", "SSH_AGENT_PID", "SSH_AUTH_SOCK"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bridge_that_fails_is_explained_by_its_stderr_and_not_by_the_terminal() {
+        let argv: Vec<String> = ["sh", "-c", "echo 'ssh: connect refused' >&2; exit 255"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut client = Client::via(&argv).unwrap();
+        let err = client.call("health", json!({})).unwrap_err();
+        assert_eq!(err.kind, "session");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while client.via_stderr().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(client.via_stderr(), "ssh: connect refused");
     }
 }

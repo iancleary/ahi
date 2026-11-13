@@ -246,10 +246,17 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
             eprintln!("using the server on {}", path.display());
         }
     }
+    // A refusal from a bridge is explained by what the connect command said.
     let mut call = |method: &str, params: Value| -> Outcome<Value> {
-        client
-            .call(method, params)
-            .map_err(|err| (Exit::for_kind(err.kind), err.message))
+        client.call(method, params).map_err(|err| {
+            let said = client.via_stderr();
+            let message = if err.kind == "session" && !said.is_empty() {
+                format!("{}; the connect command said: {said}", err.message)
+            } else {
+                err.message
+            };
+            (Exit::for_kind(err.kind), message)
+        })
     };
     let session = match &options.session {
         Some(id) => {
@@ -392,10 +399,15 @@ fn follow(
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => {
+                let said = client.via_stderr();
                 return Err((
                     Exit::Turn,
-                    "the connection to the service closed before the turn ended".into(),
-                ))
+                    if said.is_empty() {
+                        "the connection to the service closed before the turn ended".into()
+                    } else {
+                        format!("the connection to the service closed before the turn ended; the connect command said: {said}")
+                    },
+                ));
             }
         };
         match event {

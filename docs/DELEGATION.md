@@ -52,9 +52,11 @@ effects: none | some | unknown
 
 ## How the worker is reached
 
-`AHI_DELEGATE_VIA` is an argv template with `{worker}` for the label; the default is `hc connect --worker {worker}`. ahi runs it with the hook runner's scrubbed environment plus `PATH`, and speaks the service protocol, one JSON object per line, over its stdin and stdout, exactly as `ahi tui --via` and `ahi exec --via` do and as hc reaches its own cores with `--via`. Whatever the command connects to must be an `ahi serve`: hc's job is to map the label to a host it has a connection to and run `ahi connect` there.
+`AHI_DELEGATE_VIA` is an argv template with `{worker}` for the label; the default is `hc connect --worker {worker}`. ahi runs it with the hook runner's scrubbed environment plus `PATH` and the ssh agent variables (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`), and speaks the service protocol, one JSON object per line, over its stdin and stdout, exactly as `ahi tui --via` and `ahi exec --via` do and as hc reaches its own cores with `--via`. Whatever the command connects to must be an `ahi serve`: hc's job is to map the label to a host it has a connection to and run `ahi connect` there.
 
 On the worker, `session.create` with no `cwd` opens the session in the directory the server runs in, and with no model uses the host's saved selection (`<state>/selection`, written by `ahi tui`). hc therefore starts the worker's server inside the checkout with `hc run --on box ahi serve`, after one `ahi tui` (or a written `selection` file) has chosen the model there, and places a policy with `hc file`. The task runs unattended: an `ask` on the worker is denied with a reason the worker's model sees.
+
+When the coordinator's turn is cancelled, the delegation sends `turn.cancel` to the worker and waits at most a few seconds for its `turn` event; a worker that does not confirm leaves the result `cancelled` with `effects: unknown`. Whatever the connect command writes to stderr (`ssh` or `hc` diagnostics) is kept for the operator and written to the coordinator's stderr when that is not a terminal; the model only ever sees one of the fixed failure sentences, so a worker host cannot talk to the coordinator's model through the bridge.
 
 ## Assumption to confirm with hc
 

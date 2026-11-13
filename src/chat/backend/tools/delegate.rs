@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::service::client::Client;
-use crate::service::Event;
+use crate::service::{Event, CANCEL_GRACE};
+use std::io::IsTerminal;
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 pub(crate) use crate::service::wire::MAX_TIMEOUT_SECS;
@@ -74,11 +75,32 @@ pub(super) fn run(
     timeout_secs: u64,
     cancel: &AtomicBool,
 ) -> Result<Outcome, &'static str> {
-    let started = Instant::now();
     let argv = via_command(worker);
     let mut client = Client::via(&argv).map_err(|_| {
         "cannot reach the worker: the connect command did not start (is hc on PATH?)"
     })?;
+    // Every failure below is a fixed sentence for the model. What the
+    // connect command said on stderr is the operator's, so it goes to this
+    // process's stderr only when that is not a screen.
+    let result = run_on(&mut client, worker, prompt, task, timeout_secs, cancel);
+    if result.is_err() {
+        let said = client.via_stderr();
+        if !said.is_empty() && !std::io::stderr().is_terminal() {
+            eprintln!("delegate {worker}: the connect command said: {said}");
+        }
+    }
+    result
+}
+
+fn run_on(
+    client: &mut Client,
+    worker: &str,
+    prompt: &str,
+    task: Option<&str>,
+    timeout_secs: u64,
+    cancel: &AtomicBool,
+) -> Result<Outcome, &'static str> {
+    let started = Instant::now();
     let session = match task {
         Some(task) => {
             client
@@ -126,14 +148,25 @@ pub(super) fn run(
         .ok_or("the worker returned no usable run id")?
         .to_string();
     let doc = if submitted["status"] == "running" {
-        let deadline = started + Duration::from_secs(timeout_secs) + Duration::from_secs(5);
+        let mut deadline = started + Duration::from_secs(timeout_secs) + Duration::from_secs(5);
         let mut cancelled = false;
         loop {
             if !cancelled && cancel.load(Ordering::Relaxed) {
                 cancelled = true;
                 let _ = client.call("turn.cancel", json!({"session": session, "run_id": run_id}));
+                // The worker gets its own grace to report; a partitioned or
+                // deaf worker must not hold this tool call for its whole
+                // timeout. Past that, its effects are unknown.
+                deadline = deadline.min(Instant::now() + CANCEL_GRACE + Duration::from_secs(2));
             }
             if Instant::now() > deadline {
+                if cancelled {
+                    break json!({
+                        "status": "cancelled",
+                        "effects": "unknown",
+                        "error": {"kind": "turn", "message": "the worker did not confirm the cancel"},
+                    });
+                }
                 return Err("the worker did not answer in time");
             }
             match client.next_event(Duration::from_millis(100)) {
@@ -246,5 +279,29 @@ mod tests {
             failed.content,
             "task s1 on docs: failed\ntransport: down\neffects: unknown"
         );
+        let unconfirmed = outcome(
+            "docs",
+            "s1",
+            "r1",
+            &json!({
+                "status": "cancelled", "effects": "unknown",
+                "error": {"kind": "turn", "message": "the worker did not confirm the cancel"},
+            }),
+            5,
+        );
+        assert_eq!(
+            unconfirmed.content,
+            "task s1 on docs: cancelled\nturn: the worker did not confirm the cancel\neffects: unknown"
+        );
+        assert_eq!(unconfirmed.report.status, "cancelled");
+        let long = outcome(
+            "docs",
+            "s1",
+            "r1",
+            &json!({"status": "failed", "error": {"kind": "turn", "message": "x".repeat(MAX_ERROR_BYTES + 1)}}),
+            5,
+        );
+        assert!(long.content.contains(" [truncated]"));
+        assert!(long.content.len() < MAX_ERROR_BYTES + 100);
     }
 }
