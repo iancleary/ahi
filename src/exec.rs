@@ -13,14 +13,15 @@
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::directories::Directories;
-use crate::service::wire::{self, Request};
-use crate::service::{Event, Service, ServiceError, TurnRequest};
+use crate::service::client::Client;
+use crate::service::wire;
+use crate::service::{Event, TurnRequest};
 
 /// The largest prompt accepted, from any source.
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
@@ -231,14 +232,25 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
         }
     }
 
-    let mut client = Client::open(state, options)?;
+    let mut client = Client::open(state, options.socket.as_deref(), options.standalone)
+        .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
+    if options.verbose {
+        if let Some(path) = client.socket() {
+            eprintln!("using the server on {}", path.display());
+        }
+    }
+    let mut call = |method: &str, params: Value| -> Outcome<Value> {
+        client
+            .call(method, params)
+            .map_err(|err| (Exit::for_kind(err.kind), err.message))
+    };
     let session = match &options.session {
         Some(id) => {
-            client.call("session.get", json!({"session": id}))?;
+            call("session.get", json!({"session": id}))?;
             id.clone()
         }
         None => {
-            let header = client.call(
+            let header = call(
                 "session.create",
                 json!({
                     "cwd": workdir.display().to_string(),
@@ -271,14 +283,14 @@ fn execute(state: &Directories, options: &Options) -> Outcome<Exit> {
         client: "ahi exec".to_string(),
     };
     // Subscribe before submitting so no event is missed.
-    let tip = client.call("session.get", json!({"session": session}))?["tip"]
+    let tip = call("session.get", json!({"session": session}))?["tip"]
         .as_u64()
         .unwrap_or(0);
-    client.call(
+    call(
         "session.subscribe",
         json!({"session": session, "after": tip}),
     )?;
-    let submitted = client.call("turn.submit", wire::turn_params(&session, &request))?;
+    let submitted = call("turn.submit", wire::turn_params(&session, &request))?;
     let doc = if submitted["status"] == "running" {
         let run_id = submitted["run_id"].as_str().unwrap_or_default().to_string();
         if progress {
@@ -407,10 +419,12 @@ fn follow(
                 } else {
                     vec![false; calls.len()]
                 };
-                client.call(
-                    "ask.answer",
-                    json!({"session": session, "ask_id": ask_id, "allow": allow}),
-                )?;
+                client
+                    .call(
+                        "ask.answer",
+                        json!({"session": session, "ask_id": ask_id, "allow": allow}),
+                    )
+                    .map_err(|err| (Exit::for_kind(err.kind), err.message))?;
             }
             _ => {}
         }
@@ -532,157 +546,6 @@ fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
         ));
     }
     std::fs::rename(&tmp, path)
-}
-
-/// The service, reached one of two ways with one calling shape.
-enum Client {
-    /// Constructed in this process: no server on the host.
-    Local {
-        service: Service,
-        events: Option<Receiver<Event>>,
-    },
-    /// Over the socket of a running `ahi serve`.
-    #[cfg(unix)]
-    Remote(remote::Remote),
-}
-
-impl Client {
-    fn open(state: &Directories, options: &Options) -> Outcome<Self> {
-        #[cfg(unix)]
-        {
-            if !options.standalone {
-                let path = crate::serve::socket_path(state, options.socket.as_deref());
-                if let Some(stream) = crate::serve::try_connect(&path) {
-                    if options.verbose {
-                        eprintln!("using the server on {}", path.display());
-                    }
-                    return Ok(Self::Remote(remote::Remote::new(stream)));
-                }
-                if options.socket.is_some() {
-                    return Err(usage(format!("no server answers on {}", path.display())));
-                }
-            } else if options.socket.is_some() {
-                return Err(usage("--standalone and --socket contradict each other"));
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = options;
-        Ok(Self::Local {
-            service: Service::open(state),
-            events: None,
-        })
-    }
-
-    fn call(&mut self, method: &str, params: Value) -> Outcome<Value> {
-        let request = Request {
-            id: json!(1),
-            method: method.to_string(),
-            params,
-        };
-        let result: Result<Value, ServiceError> = match self {
-            Self::Local { service, events } => {
-                let mut subscribe = |receiver: Receiver<Event>| *events = Some(receiver);
-                wire::dispatch(service, &request, &mut subscribe)
-            }
-            #[cfg(unix)]
-            Self::Remote(remote) => remote.call(&request),
-        };
-        result.map_err(|err| (Exit::for_kind(err.kind), err.message))
-    }
-
-    fn next_event(&mut self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
-        match self {
-            Self::Local { events, .. } => match events {
-                Some(receiver) => receiver.recv_timeout(timeout),
-                None => Err(RecvTimeoutError::Disconnected),
-            },
-            #[cfg(unix)]
-            Self::Remote(remote) => remote.events.recv_timeout(timeout),
-        }
-    }
-}
-
-#[cfg(unix)]
-mod remote {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-    use std::sync::mpsc::{self, Receiver};
-    use std::thread;
-    use std::time::Duration;
-
-    use serde_json::Value;
-
-    use crate::service::wire::Request;
-    use crate::service::{Event, ServiceError};
-
-    /// One socket, one request at a time, events on the side.
-    pub(super) struct Remote {
-        stream: UnixStream,
-        responses: Receiver<Value>,
-        pub(super) events: Receiver<Event>,
-    }
-
-    impl Remote {
-        pub(super) fn new(stream: UnixStream) -> Self {
-            let (answers, responses) = mpsc::channel();
-            let (notify, events) = mpsc::channel();
-            if let Ok(reader) = stream.try_clone() {
-                thread::spawn(move || {
-                    for line in BufReader::new(reader).lines() {
-                        let Ok(line) = line else { break };
-                        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                            continue;
-                        };
-                        if value.get("event").is_some() {
-                            if let Some(event) = Event::from_json(&value) {
-                                if notify.send(event).is_err() {
-                                    break;
-                                }
-                            }
-                        } else if answers.send(value).is_err() {
-                            break;
-                        }
-                    }
-                });
-            }
-            Self {
-                stream,
-                responses,
-                events,
-            }
-        }
-
-        pub(super) fn call(&mut self, request: &Request) -> Result<Value, ServiceError> {
-            let closed = || ServiceError {
-                kind: "session",
-                message: "the server closed the connection".to_string(),
-            };
-            let mut line = request.to_json().to_string();
-            line.push('\n');
-            self.stream
-                .write_all(line.as_bytes())
-                .map_err(|_| closed())?;
-            let answer = self
-                .responses
-                .recv_timeout(Duration::from_secs(30))
-                .map_err(|_| closed())?;
-            if let Some(error) = answer.get("error") {
-                return Err(ServiceError {
-                    kind: match error["kind"].as_str() {
-                        Some("usage") => "usage",
-                        Some("config") => "config",
-                        Some("auth") => "auth",
-                        Some("policy") => "policy",
-                        Some("conflict") => "conflict",
-                        Some("not_found") => "not_found",
-                        _ => "session",
-                    },
-                    message: error["message"].as_str().unwrap_or("refused").to_string(),
-                });
-            }
-            Ok(answer.get("result").cloned().unwrap_or(Value::Null))
-        }
-    }
 }
 
 #[cfg(test)]

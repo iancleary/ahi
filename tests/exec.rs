@@ -647,3 +647,55 @@ fn the_server_runs_a_turn_over_the_socket_and_connect_bridges_stdio() {
     assert_eq!(code(&gone), 1);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn serve_start_brings_up_one_detached_server_that_exec_then_uses() {
+    let (url, gateway) = loopback(vec![stream(STREAM)]);
+    let dir = fixture(&url);
+    let socket = std::env::temp_dir().join(format!("ahi-start-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&socket);
+    let started = ahi(&dir)
+        .args(["serve", "start", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(code(&started), 0, "{}", err(&started));
+    assert_eq!(out(&started).trim(), socket.to_str().unwrap());
+    assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+    let again = ahi(&dir)
+        .args(["serve", "start", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(code(&again), 0);
+    assert_eq!(out(&again), out(&started), "the running server is reused");
+    let log = fs::read_to_string(dir.join("state/serve.log")).unwrap();
+    assert_eq!(log.matches("listening on").count(), 1, "{log}");
+
+    let output = ahi(&dir)
+        .args([
+            "exec",
+            "--model",
+            "local/vendor/model",
+            "-p",
+            "hi",
+            "--socket",
+        ])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", err(&output));
+    assert_eq!(out(&output), "Hello 世界\n");
+    gateway.join().unwrap();
+
+    let stop = ahi(&dir)
+        .args(["serve", "stop", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(code(&stop), 0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while socket.exists() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        thread::sleep(Duration::from_millis(20));
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

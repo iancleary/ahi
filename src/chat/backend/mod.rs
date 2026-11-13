@@ -5,6 +5,7 @@
 
 mod http;
 mod protocol;
+pub(crate) mod service;
 mod sse;
 mod tool_call;
 mod tool_loop;
@@ -120,6 +121,9 @@ pub(crate) trait CompletionBackend {
     /// proceeds, and the connection is dropped at the next read. The screen
     /// drops the receiver as well, so the turn's final event goes nowhere.
     fn cancel(&mut self) {}
+    /// `/clear`: the conversation starts over; a backend that keeps a
+    /// session for it starts a new one at the next turn.
+    fn reset(&mut self) {}
 }
 
 /// One call awaiting the operator, described by its prepared (normalized)

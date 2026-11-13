@@ -154,11 +154,32 @@ impl ChatScreen {
         let settings = stored.settings();
         let messages = stored.active_messages(None);
         let id = stored.id().to_string();
-        let mut screen = Self::load_recording(
+        let screen = Self::load_recording(
             state_dir,
             &format!("{}/{}", settings.gateway, settings.model),
             session::recorder::Recorder::resumed(stored, "tui"),
         );
+        Self::resumed_from(screen, &settings, messages, &id)
+    }
+
+    /// The same screen when the service records: the session is read for
+    /// its settings and messages and not written by this process.
+    fn load_resumed_reading(state_dir: &Directories, stored: &session::Session) -> Self {
+        let settings = stored.settings();
+        let screen = Self::load_recording(
+            state_dir,
+            &format!("{}/{}", settings.gateway, settings.model),
+            session::recorder::Recorder::new(false, "tui"),
+        );
+        Self::resumed_from(screen, &settings, stored.active_messages(None), stored.id())
+    }
+
+    fn resumed_from(
+        mut screen: Self,
+        settings: &session::Settings,
+        messages: Vec<ChatMessage>,
+        id: &str,
+    ) -> Self {
         if let Some(level) = thinking::ThinkingLevel::parse(&settings.thinking) {
             screen.thinking = level;
         }
@@ -1165,6 +1186,7 @@ impl ChatScreen {
                     self.recorder.cancel_turn();
                 }
                 self.recorder.reset();
+                backend.reset();
                 self.messages.clear();
                 self.dirty = transcript::render::Dirty::From(0);
                 self.text_selection.clear();
@@ -1560,24 +1582,37 @@ pub(crate) fn check_actions_file(path: &Path) -> Result<()> {
 /// Run the chat screen until the operator exits or asks for the model picker.
 /// `actions` is the operator's explicit policy file, used for every turn in
 /// place of the working directory's `ahi.tools.yaml`.
-/// `record` is false for `ahi tui --no-history`.
+/// How the screen runs its turns.
+pub(crate) enum Engine {
+    /// The engine in this process, recording the session itself (unless
+    /// `record` is false for `--no-history`).
+    Standalone { record: bool },
+    /// The session service, which records; the screen is a client.
+    Service(crate::service::client::Client),
+}
+
+/// Run the chat screen until the operator exits or asks for the model picker.
+/// `actions` is the operator's explicit policy file, used for every turn in
+/// place of the working directory's `ahi.tools.yaml`.
 pub(crate) fn interact(
     state_dir: &Directories,
     selection: &str,
     actions: Option<&Path>,
-    record: bool,
+    engine: Engine,
     reopen_picker: impl FnMut(
         PickerView,
         &str,
         Option<crate::harness::GatewayRegistration>,
     ) -> Result<PickerOutcome>,
 ) -> Result<()> {
+    let record = matches!(engine, Engine::Standalone { record: true });
     let screen = ChatScreen::load_recording(
         state_dir,
         selection,
         session::recorder::Recorder::new(record, "tui"),
     );
-    interact_screen(state_dir, screen, actions, reopen_picker)
+    let backend = backend_for(state_dir, engine, &screen, None, actions);
+    interact_screen(state_dir, screen, backend, reopen_picker)
 }
 
 /// `ahi tui --resume <id>`: the chat over a stored session, continuing it
@@ -1586,6 +1621,7 @@ pub(crate) fn interact_resumed(
     state_dir: &Directories,
     session_id: &str,
     actions: Option<&Path>,
+    engine: Engine,
     reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -1595,14 +1631,45 @@ pub(crate) fn interact_resumed(
     let stored = session::Store::new(state_dir)
         .open(session_id)
         .map_err(|err| Error::new(err.to_string()))?;
-    let screen = ChatScreen::load_resumed(state_dir, stored);
-    interact_screen(state_dir, screen, actions, reopen_picker)
+    let screen = match engine {
+        // The server records; the screen only reads the session to start.
+        Engine::Service(_) => ChatScreen::load_resumed_reading(state_dir, &stored),
+        Engine::Standalone { .. } => ChatScreen::load_resumed(state_dir, stored),
+    };
+    let backend = backend_for(
+        state_dir,
+        engine,
+        &screen,
+        Some(session_id.to_string()),
+        actions,
+    );
+    interact_screen(state_dir, screen, backend, reopen_picker)
+}
+
+fn backend_for(
+    state_dir: &Directories,
+    engine: Engine,
+    screen: &ChatScreen,
+    session: Option<String>,
+    actions: Option<&Path>,
+) -> Box<dyn CompletionBackend> {
+    match engine {
+        Engine::Standalone { .. } => Box::new(
+            HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf)),
+        ),
+        Engine::Service(client) => Box::new(backend::service::ServiceBackend::new(
+            client,
+            session,
+            screen.workspace_root.clone(),
+            actions.map(Path::to_path_buf),
+        )),
+    }
 }
 
 fn interact_screen(
     state_dir: &Directories,
     mut screen: ChatScreen,
-    actions: Option<&Path>,
+    mut backend: Box<dyn CompletionBackend>,
     mut reopen_picker: impl FnMut(
         PickerView,
         &str,
@@ -1611,15 +1678,14 @@ fn interact_screen(
 ) -> Result<()> {
     screen.push_header();
     screen.report_status(crate::program_status::State::Idle, "");
-    let mut backend =
-        HttpBackend::new(state_dir.clone()).with_actions(actions.map(Path::to_path_buf));
+    let backend = backend.as_mut();
     loop {
         let mut terminal =
             crate::term::try_init().map_err(|err| Error::new(format!("terminal: {err}")))?;
         let outcome =
             crossterm::execute!(std::io::stdout(), EnableBracketedPaste, DisableMouseCapture)
                 .map_err(|err| Error::new(format!("enable paste: {err}")))
-                .and_then(|()| session_loop(&mut terminal, &mut screen, &mut backend));
+                .and_then(|()| session_loop(&mut terminal, &mut screen, backend));
         let cleanup = crossterm::execute!(
             std::io::stdout(),
             DisableMouseCapture,

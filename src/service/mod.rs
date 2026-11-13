@@ -16,6 +16,7 @@
 // the in-process client still goes through `dispatch`.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+pub(crate) mod client;
 pub(crate) mod ledger;
 pub(crate) mod wire;
 

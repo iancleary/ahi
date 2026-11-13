@@ -32,7 +32,14 @@ pub fn socket_path(state: &Directories, explicit: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(unix)]
-pub use unix::{connect, run, stop, try_connect};
+pub use unix::{connect, ensure_running, run, stop, try_connect};
+
+#[cfg(not(unix))]
+pub fn ensure_running(_state: &Directories, _socket: Option<&Path>) -> Result<PathBuf> {
+    Err(Error::new(
+        "ahi serve needs a Unix socket; on this platform run `ahi tui --standalone`",
+    ))
+}
 
 #[cfg(not(unix))]
 pub fn run(_state: &Directories, _socket: Option<&Path>, _verbose: bool) -> Result<u8> {
@@ -55,7 +62,7 @@ pub fn connect(_state: &Directories, _socket: Option<&Path>) -> Result<u8> {
 mod unix {
     use std::io::{self, BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
@@ -145,6 +152,65 @@ mod unix {
         let _ = std::fs::remove_file(&path);
         drop(accept);
         Ok(0)
+    }
+
+    /// The socket of a live server, starting one detached when none
+    /// answers: stdio to `<state>/serve.log`, its own process group, so it
+    /// outlives the chat that started it. Two starters race on the bind; the
+    /// loser finds the winner answering and uses it.
+    pub fn ensure_running(state: &Directories, socket: Option<&Path>) -> Result<PathBuf> {
+        let path = socket_path(state, socket);
+        if try_connect(&path).is_some() {
+            return Ok(path);
+        }
+        let exe = std::env::current_exe()
+            .map_err(|err| Error::new(format!("cannot find the ahi binary: {err}")))?;
+        crate::directories::create_private_dir(&state.state)
+            .map_err(|err| Error::new(format!("cannot create {}: {err}", state.state.display())))?;
+        let log_path = state.state.join("serve.log");
+        let log = crate::directories::private_file()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|err| Error::new(format!("cannot open {}: {err}", log_path.display())))?;
+        let errors = log
+            .try_clone()
+            .map_err(|err| Error::new(format!("cannot open {}: {err}", log_path.display())))?;
+        let mut command = std::process::Command::new(exe);
+        // A single-root layout is passed on; the XDG layout resolves the same
+        // way in the child from the same environment.
+        if state.config == state.state && state.data == state.state {
+            command.arg("--state-dir").arg(&state.state);
+            if state.cache != state.state {
+                command.arg("--cache-dir").arg(&state.cache);
+            }
+        }
+        command
+            .arg("serve")
+            .arg("--socket")
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(log)
+            .stderr(errors);
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        command
+            .spawn()
+            .map_err(|err| Error::new(format!("cannot start ahi serve: {err}")))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if try_connect(&path).is_some() {
+                return Ok(path);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Err(Error::new(format!(
+            "ahi serve did not answer on {} within 2 s; see {}",
+            path.display(),
+            log_path.display()
+        )))
     }
 
     /// `ahi serve stop`: ask the server on the socket to exit.
