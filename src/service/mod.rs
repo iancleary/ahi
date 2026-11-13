@@ -18,6 +18,7 @@
 
 pub(crate) mod client;
 pub(crate) mod ledger;
+pub(crate) mod via;
 pub(crate) mod wire;
 
 use std::collections::HashMap;

@@ -111,7 +111,7 @@ struct Outcome {
 /// run can apply that rule's `toolchain_env` and a session grant can take
 /// that rule's argv prefix.
 enum Plan {
-    Done(Outcome),
+    Done(Box<Outcome>),
     Run(PreparedCall, String),
     Ask(PreparedCall, String),
 }
@@ -175,10 +175,14 @@ impl ToolRuntime {
             .iter()
             .map(|call| {
                 if over_limit {
-                    return Plan::Done(error(&call.name, None, "tool round limit reached"));
+                    return Plan::Done(Box::new(error(
+                        &call.name,
+                        None,
+                        "tool round limit reached",
+                    )));
                 }
                 match tools::prepare(call) {
-                    Err(message) => Plan::Done(error(&call.name, None, message)),
+                    Err(message) => Plan::Done(Box::new(error(&call.name, None, message))),
                     Ok(prepared) => self.plan(prepared),
                 }
             })
@@ -187,7 +191,7 @@ impl ToolRuntime {
         let mut messages = Vec::with_capacity(calls.len());
         for (call, plan) in calls.iter().zip(plans) {
             let mut outcome = match plan {
-                Plan::Done(outcome) => outcome,
+                Plan::Done(outcome) => *outcome,
                 // A cancelled batch runs nothing further, including calls that
                 // rules alone had approved: the operator walked away from it.
                 Plan::Ask(prepared, _) | Plan::Run(prepared, _) if cancelled => {
@@ -246,11 +250,14 @@ impl ToolRuntime {
         {
             Verdict::Deny {
                 rule_id: Some(rule),
-            } => Plan::Done(denied(&prepared, &format!("denied by rule {rule}"))),
-            Verdict::Deny { rule_id: None } => Plan::Done(denied(
+            } => Plan::Done(Box::new(denied(
+                &prepared,
+                &format!("denied by rule {rule}"),
+            ))),
+            Verdict::Deny { rule_id: None } => Plan::Done(Box::new(denied(
                 &prepared,
                 &format!("no {} rule allows this call", tool_policy::FILE_NAME),
-            )),
+            ))),
             Verdict::Approve { rule_id } => Plan::Run(prepared, rule_id),
             Verdict::Ask { rule_id } if self.granted(&prepared) => Plan::Run(prepared, rule_id),
             Verdict::Ask { rule_id } => Plan::Ask(prepared, rule_id),
@@ -325,7 +332,7 @@ impl ToolRuntime {
         };
         for (index, decision) in pending.into_iter().zip(decisions) {
             let Plan::Ask(prepared, rule) =
-                std::mem::replace(&mut plans[index], Plan::Done(empty()))
+                std::mem::replace(&mut plans[index], Plan::Done(Box::new(empty())))
             else {
                 unreachable!("pending holds only Ask plans")
             };
@@ -356,11 +363,13 @@ impl ToolRuntime {
                     }
                     Plan::Run(prepared, rule)
                 }
-                ToolDecision::Deny => Plan::Done(denied(&prepared, "denied by the operator")),
-                ToolDecision::Unattended => Plan::Done(denied(
+                ToolDecision::Deny => {
+                    Plan::Done(Box::new(denied(&prepared, "denied by the operator")))
+                }
+                ToolDecision::Unattended => Plan::Done(Box::new(denied(
                     &prepared,
                     "this call needs operator approval and no operator is attending the turn",
-                )),
+                ))),
             };
         }
         Ok(false)
@@ -455,6 +464,7 @@ impl ToolRuntime {
                 }
                 if prepared.tool == tools::DELEGATE {
                     let none = tools::delegate::DelegationReport {
+                        via: tools::delegate::via_command(prepared.target()).unwrap_or_default(),
                         worker: prepared.target().to_string(),
                         session: String::new(),
                         run_id: String::new(),
@@ -523,6 +533,7 @@ impl ToolRuntime {
         outcome: &str,
     ) -> ToolRecord {
         let record = ToolRecord::Delegate {
+            via: report.via.clone(),
             worker: report.worker.clone(),
             session: report.session.clone(),
             run_id: report.run_id.clone(),
@@ -584,6 +595,7 @@ impl ToolRuntime {
                 },
             ),
             ToolRecord::Delegate {
+                via,
                 worker,
                 session,
                 run_id,
@@ -597,6 +609,7 @@ impl ToolRuntime {
                     origin: caller.origin,
                     run_id: caller.run_id.as_deref(),
                     repo: self.workspace.root(),
+                    via,
                     worker,
                     session,
                     worker_run_id: run_id,

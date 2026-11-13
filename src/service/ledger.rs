@@ -121,6 +121,7 @@ fn record_json(record: &ToolRecord) -> Value {
             "ran": ran, "exit_code": exit_code, "duration_ms": duration_ms,
         }),
         ToolRecord::Delegate {
+            via,
             worker,
             session,
             run_id,
@@ -129,7 +130,7 @@ fn record_json(record: &ToolRecord) -> Value {
             effects,
             duration_ms,
         } => json!({
-            "tool": "delegate", "worker": worker, "session": session, "run_id": run_id,
+            "tool": "delegate", "via": via, "worker": worker, "session": session, "run_id": run_id,
             "outcome": outcome, "status": status, "effects": effects, "duration_ms": duration_ms,
         }),
     }

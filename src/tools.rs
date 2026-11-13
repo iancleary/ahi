@@ -299,6 +299,25 @@ pub fn summary(root: &Path) -> Result<Option<Summary>> {
 
 /// Doctor lines for `root`, the same text whether or not a file exists.
 pub fn doctor_lines(root: &Path) -> Vec<String> {
+    let mut lines = policy_lines(root);
+    lines.push(delegate_via_line());
+    lines
+}
+
+/// The connect command `delegate` would run, parsed the way it will be.
+fn delegate_via_line() -> String {
+    let (template, set) = crate::chat::backend::tools::delegate::via_template();
+    let source = if set { "AHI_DELEGATE_VIA" } else { "default" };
+    match crate::service::via::split(&template) {
+        Ok(argv) => format!(
+            "delegate via: {} ({source}; `{{worker}}` is the label)",
+            argv.join(" ")
+        ),
+        Err(err) => format!("delegate via: {err} ({source}: {template})"),
+    }
+}
+
+fn policy_lines(root: &Path) -> Vec<String> {
     let path = root.join(FILE_NAME);
     match summary(root) {
         Ok(Some(summary)) => {
