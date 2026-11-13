@@ -456,6 +456,10 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
         }
     }
     let mut recorder = Recorder::default();
+    // Written only when stdout is a terminal: a pipe or a result file never
+    // sees the escape sequence.
+    let status = crate::program_status::Reporter::for_stdout();
+    let mut status_title = String::new();
     let outcome = match preflight(state, options, &report) {
         Err(failure) => Err(failure),
         Ok(Step::Replay(replay)) => return replay_turn(options, &mut report, replay),
@@ -477,9 +481,29 @@ pub fn run(state: &Directories, options: &Options) -> Finished {
         }
         Ok(Step::Run(mut prepared)) => {
             recorder = Recorder::new(prepared.store.take(), prepared.protocol);
+            status_title = format!(
+                "{} · {}",
+                prepared
+                    .root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| ".".to_string()),
+                report.model
+            );
+            status.state(crate::program_status::State::Working, &status_title, "");
             complete(state, options, prepared, &mut report, &mut recorder)
         }
     };
+    // The multiplexer that holds this terminal, if one does, learns how the
+    // turn ended before the result is written.
+    match &outcome {
+        Ok(text) => status.state(crate::program_status::State::Done, &status_title, text),
+        Err(failure) => status.state(
+            crate::program_status::State::Error,
+            &status_title,
+            failure.kind,
+        ),
+    }
     // The turn line closes the branch: status, exit code, and the result
     // without its text (the answer is the assistant message before it).
     let mut turn_exit = match &outcome {
