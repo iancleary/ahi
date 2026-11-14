@@ -25,6 +25,11 @@ pub(crate) struct Client {
     events: Events,
 }
 
+/// How long a call waits for its answer unless the caller says otherwise:
+/// long enough for a server resolving a model connection, short enough
+/// that a wedged server is a report, not a hang.
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The subscription's receiver, once there is one, with its session: when
 /// the in-process service drops a subscriber for lagging, the receiver ends
 /// and the next read is one `lagged` event for that session, then nothing.
@@ -192,7 +197,20 @@ impl Client {
         }
     }
 
+    /// One request, waiting up to `CALL_TIMEOUT` for the answer.
     pub(crate) fn call(&mut self, method: &str, params: Value) -> Result<Value, ServiceError> {
+        self.call_within(method, params, CALL_TIMEOUT)
+    }
+
+    /// One request, waiting up to `timeout` for the answer. A server that
+    /// does not answer in time is reported as such; a late answer is
+    /// discarded by request id, never mistaken for the next call's.
+    pub(crate) fn call_within(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ServiceError> {
         let request = Request {
             id: json!(1),
             method: method.to_string(),
@@ -212,8 +230,8 @@ impl Client {
                 wire::dispatch(service, &request, &mut subscribe)
             }
             #[cfg(unix)]
-            Transport::Remote(remote, _) => remote.call(&request),
-            Transport::Via(remote, _) => remote.call(&request),
+            Transport::Remote(remote, _) => remote.call(&request, timeout),
+            Transport::Via(remote, _) => remote.call(&request, timeout),
         }
     }
 
@@ -264,7 +282,7 @@ mod remote {
     use std::thread;
     use std::time::Duration;
 
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     use crate::service::wire::{Request, MAX_ERROR_LEN, MAX_LINE};
     use crate::service::{Event, ServiceError};
@@ -273,6 +291,8 @@ mod remote {
     pub(super) struct Remote {
         writer: Option<Box<dyn Write + Send>>,
         responses: Receiver<Value>,
+        /// The next request id; answers are matched on it.
+        next_id: u64,
     }
 
     impl Remote {
@@ -318,6 +338,7 @@ mod remote {
                 Self {
                     writer: Some(writer),
                     responses,
+                    next_id: 1,
                 },
                 events,
             )
@@ -328,10 +349,21 @@ mod remote {
             self.writer = None;
         }
 
-        pub(super) fn call(&mut self, request: &Request) -> Result<Value, ServiceError> {
+        pub(super) fn call(
+            &mut self,
+            request: &Request,
+            timeout: Duration,
+        ) -> Result<Value, ServiceError> {
             let closed = || ServiceError {
                 kind: "session",
                 message: "the server closed the connection".to_string(),
+            };
+            let id = self.next_id;
+            self.next_id += 1;
+            let request = Request {
+                id: json!(id),
+                method: request.method.clone(),
+                params: request.params.clone(),
             };
             let mut line = request.to_json().to_string();
             line.push('\n');
@@ -340,10 +372,30 @@ mod remote {
                 .write_all(line.as_bytes())
                 .and_then(|()| writer.flush())
                 .map_err(|_| closed())?;
-            let answer = self
-                .responses
-                .recv_timeout(Duration::from_secs(30))
-                .map_err(|_| closed())?;
+            let deadline = std::time::Instant::now() + timeout;
+            let answer = loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                match self.responses.recv_timeout(remaining) {
+                    // Ours, or a refusal the server could not address (a
+                    // null id: a line it could not parse, a cap, a drain).
+                    Ok(answer) if answer["id"] == json!(id) || answer["id"].is_null() => {
+                        break answer
+                    }
+                    // A late answer to a call that timed out: not this one's.
+                    Ok(_) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        return Err(ServiceError {
+                            kind: "session",
+                            message: format!(
+                                "the server did not answer {} within {} s",
+                                request.method,
+                                timeout.as_secs()
+                            ),
+                        })
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Err(closed()),
+                }
+            };
             if let Some(error) = answer.get("error") {
                 return Err(ServiceError {
                     kind: match error["kind"].as_str() {
@@ -384,6 +436,7 @@ mod remote {
         #[test]
         fn a_line_past_the_cap_ends_the_connection_and_a_refusal_is_capped() {
             let mut feed = Vec::new();
+            feed.extend_from_slice(b"{\"id\":99,\"result\":{\"stale\":true}}\n");
             feed.extend_from_slice(b"{\"id\":1,\"result\":{\"ok\":true}}\n");
             feed.extend_from_slice(
                 format!(
@@ -401,8 +454,14 @@ mod remote {
                 method: "health".into(),
                 params: Value::Null,
             };
-            assert_eq!(remote.call(&request(1)).unwrap()["ok"], true);
-            let refused = remote.call(&request(2)).unwrap_err();
+            assert_eq!(
+                remote.call(&request(1), Duration::from_secs(5)).unwrap()["ok"],
+                true,
+                "the stale answer is skipped"
+            );
+            let refused = remote
+                .call(&request(2), Duration::from_secs(5))
+                .unwrap_err();
             assert_eq!(refused.kind, "usage");
             assert!(
                 refused.message.len() < MAX_ERROR_LEN + 20,
@@ -411,7 +470,9 @@ mod remote {
             );
             assert!(refused.message.ends_with(" [truncated]"));
             // The oversized line ends the reader; nothing after it is read.
-            let closed = remote.call(&request(3)).unwrap_err();
+            let closed = remote
+                .call(&request(3), Duration::from_secs(5))
+                .unwrap_err();
             assert_eq!(closed.kind, "session");
             assert!(matches!(
                 events.recv_timeout(Duration::from_secs(1)),
@@ -484,6 +545,39 @@ mod via_tests {
             next_event(&remote, Duration::from_millis(10)),
             Err(RecvTimeoutError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn a_silent_server_is_a_timeout_not_a_hang() {
+        // A reader that never produces a line and never ends.
+        struct Never;
+        impl std::io::Read for Never {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_secs(60));
+                Ok(0)
+            }
+        }
+        let (mut remote, _events) =
+            super::remote::Remote::new(Box::new(Never), Box::new(Vec::new()));
+        let started = std::time::Instant::now();
+        let err = remote
+            .call(
+                &Request {
+                    id: json!(1),
+                    method: "turn.cancel".into(),
+                    params: Value::Null,
+                },
+                Duration::from_millis(300),
+            )
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(err.kind, "session");
+        assert!(
+            err.message
+                .contains("did not answer turn.cancel within 0 s"),
+            "{}",
+            err.message
+        );
     }
 
     #[cfg(unix)]
