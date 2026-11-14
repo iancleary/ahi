@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- `ahi tui` on the service: `Esc` on a server that had stopped answering froze the screen for 30 s, and `Enter` for up to 90 s. The cancel now goes out on its own thread, every call the screen makes is bounded (5 s for the calls that start a turn, 3 s for a cancel or an approval answer), and a late answer is matched by request id, never mistaken for the next call's.
 - `ahi serve` holds `serve.lock` beside the socket for its life (`flock`, `ahi-unix` 0.3.0), so two chats starting at once can no longer produce two servers with one listening on an unlinked socket forever; only the lock holder removes the socket file, and a second `ahi serve` exits at once saying a server already runs. The socket is bound under a private name, set to mode 600, and renamed into place, so it is never visible with umask permissions.
 - `ahi serve` checks every connection's peer credentials (`SO_PEERCRED` / `getpeereid`) before reading a byte and refuses another user with `auth`; holds at most 64 connections and 16 subscriptions per connection, refusing the next with `limit`; and refuses new requests with `conflict` while it drains after `stop`.
 - `ahi tui` and `ahi exec` on the local socket compare the server's version with their own and say "run `ahi serve stop` and start again" instead of talking to an older server after an upgrade.

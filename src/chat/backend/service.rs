@@ -29,6 +29,14 @@ use crate::service::client::Client;
 use crate::service::{Event, TurnRequest};
 use crate::session::{Kind, Status};
 
+/// How long a turn-starting call (`session.get`, `session.subscribe`,
+/// `turn.submit`, `session.settings`, `session.create`) may wait: these
+/// read local files and resolve a model from them, never the network.
+const START_CALL: Duration = Duration::from_secs(5);
+/// How long a tiny call (`turn.cancel`, `ask.answer`) may wait: it lands in
+/// milliseconds or it is not going to.
+const QUICK_CALL: Duration = Duration::from_secs(3);
+
 pub(crate) struct ServiceBackend {
     client: Arc<Mutex<Client>>,
     /// The session turns go to; created at the first turn.
@@ -83,7 +91,7 @@ impl ServiceBackend {
                 .map_err(|err| err.to_string())?;
             let mut client = Client::open(&state, Some(&path), false).map_err(|err| err.message)?;
             let health = client
-                .call("health", json!({}))
+                .call_within("health", json!({}), QUICK_CALL)
                 .map_err(|err| err.message)?;
             crate::serve::check_version(health["version"].as_str().unwrap_or("?"), &path)
                 .map_err(|err| err.to_string())?;
@@ -113,12 +121,17 @@ impl ServiceBackend {
         Ok(())
     }
 
+    /// A call that starts a turn: settings, the subscription, the submit.
+    /// Bounded, so a wedged server is a `Failed` row within seconds, never a
+    /// frozen screen.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let mut client = self
             .client
             .lock()
             .map_err(|_| "client poisoned".to_string())?;
-        client.call(method, params).map_err(|err| err.message)
+        client
+            .call_within(method, params, START_CALL)
+            .map_err(|err| err.message)
     }
 
     /// Make sure a session exists and its settings match the request.
@@ -264,9 +277,22 @@ impl CompletionBackend for ServiceBackend {
         receiver
     }
 
+    /// Esc. The cancel goes out on its own thread: the screen is free at
+    /// once, its receiver already dropped, and a server that never answers
+    /// closes the turn by its own grace and deadline. Nothing it says after
+    /// this reaches the transcript.
     fn cancel(&mut self) {
-        if let (Some(session), Some(run_id)) = (&self.session, self.running.take()) {
-            let _ = self.call("turn.cancel", json!({"session": session, "run_id": run_id}));
+        if let (Some(session), Some(run_id)) = (self.session.clone(), self.running.take()) {
+            let client = Arc::clone(&self.client);
+            thread::spawn(move || {
+                if let Ok(mut client) = client.lock() {
+                    let _ = client.call_within(
+                        "turn.cancel",
+                        json!({"session": session, "run_id": run_id}),
+                        QUICK_CALL,
+                    );
+                }
+            });
         }
     }
 
@@ -377,9 +403,10 @@ fn follow(
                         _ => vec![false; count],
                     };
                     if let Ok(mut client) = answer_to.lock() {
-                        let _ = client.call(
+                        let _ = client.call_within(
                             "ask.answer",
                             json!({"session": answer_session, "ask_id": ask_id, "allow": allow}),
+                            QUICK_CALL,
                         );
                     }
                 });
@@ -690,5 +717,73 @@ mod tests {
         assert!(seen[0].contains("restart the chat"), "{}", seen[0]);
         gateway.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wedged_server_fails_the_turn_in_seconds_and_cancel_never_waits() {
+        let dir = crate::fixture_directory::create_unique_fixture_directory("service-wedged");
+        fs::create_dir_all(dir.join("state")).unwrap();
+        let socket = std::env::temp_dir().join(format!("ahi-wedged-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // Accepts, reads every line, answers none: the connection thread of a
+        // server that is alive but not listening. The lines it saw are shared,
+        // since neither side will ever close first.
+        let seen_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen_lines);
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut lines = std::io::BufRead::lines(std::io::BufReader::new(stream));
+            while let Some(Ok(line)) = lines.next() {
+                sink.lock().unwrap().push(line);
+            }
+        });
+        let state = Directories::single_root(dir.join("state"));
+        let client = Client::open(&state, Some(&socket), false).unwrap();
+        assert!(client.socket().is_some(), "connected to the fake server");
+        let mut backend = ServiceBackend::new(client, None, dir.join("work"), None);
+        let started = std::time::Instant::now();
+        let receiver = backend.submit(request("hello"));
+        let seen = collect(&receiver, |_| {});
+        assert!(
+            started.elapsed() < Duration::from_secs(9),
+            "one bounded call, not a 30 s wait: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].contains("did not answer session.create within 5 s"),
+            "{}",
+            seen[0]
+        );
+        // Esc with the same server: the screen thread is back at once.
+        backend.session = Some("s1".into());
+        backend.running = Some("r1".into());
+        let started = std::time::Instant::now();
+        backend.cancel();
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(backend.running.is_none());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let seen = seen_lines.lock().unwrap().clone();
+            if seen.iter().any(|line| line.contains("session.create"))
+                && seen.iter().any(|line| line.contains("turn.cancel"))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "both requests reach the server: {seen:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(backend);
+        let _ = fs::remove_file(&socket);
+        let _ = fs::remove_dir_all(dir);
     }
 }
