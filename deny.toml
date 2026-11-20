@@ -4,13 +4,9 @@
 [advisories]
 version = 2
 yanked = "deny"
-# Unsound and unmaintained advisories fail the build unless listed below with
-# a reason, so a new one is a decision, not a warning that scrolls by.
+# Unsound and unmaintained advisories fail the build.
 unsound = "all"
 unmaintained = "all"
-ignore = [
-    { id = "RUSTSEC-2026-0253", reason = "lru 0.16 is a non-optional dependency of ratatui-core 0.1 (ratatui 0.30), used only by its layout cache, which ahi does not enable (default-features = false). The unsound path is a panic inside LruCache::pop; ahi never calls it. Clear when ratatui depends on lru 0.18 or later. Reviewed 2026-11-07." },
-]
 
 [licenses]
 version = 2
