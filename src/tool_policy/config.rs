@@ -92,6 +92,8 @@ struct RawMatch {
     /// `delegate` only: the worker label, required.
     #[serde(default)]
     worker: Option<String>,
+    #[serde(default)]
+    local_profile: Option<String>,
     /// `skill` only: the qualified skill ID, required.
     #[serde(default)]
     skill: Option<String>,
@@ -149,6 +151,11 @@ fn compile_rules(raw: RawPolicy, origin: &str, builtin_tools: &[&str]) -> Result
             if rule.toolchain_env.is_some() {
                 return Err(fail("toolchain_env applies only to action: command".into()));
             }
+        }
+        if rule.action != "delegate" && rule.matcher.local_profile.is_some() {
+            return Err(fail(
+                "match.local_profile applies only to action: delegate".into(),
+            ));
         }
         if rule.action != "delegate" && rule.matcher.worker.is_some() {
             return Err(fail("match.worker applies only to action: delegate".into()));
@@ -249,18 +256,12 @@ fn compile_rules(raw: RawPolicy, origin: &str, builtin_tools: &[&str]) -> Result
                             .into(),
                     ));
                 }
-                let Some(worker) = rule.matcher.worker.take() else {
-                    return Err(fail(
-                        "match.worker is required for action: delegate (the worker's label)".into(),
-                    ));
+                let selector=match (rule.matcher.worker.take(),rule.matcher.local_profile.take()) {
+                    (Some(w),None) if crate::precommit::policy::valid_rule_id(&w)=>w,
+                    (None,Some(p)) if p=="rex-scratch"=>crate::delegation::local::SELECTOR.to_owned(),
+                    _=>return Err(fail("match.worker must be a valid remote label, or set only match.local_profile: rex-scratch".into()))
                 };
-                if !crate::precommit::policy::valid_rule_id(&worker) {
-                    return Err(fail(
-                        "match.worker is a label of 1-64 ASCII letters, digits, '-', '_', or '.'"
-                            .into(),
-                    ));
-                }
-                argv = Some(vec![worker]);
+                argv = Some(vec![selector]);
                 (ActionKind::Delegate, vec![DELEGATE_TOOL.to_string()])
             }
             "skill" => {

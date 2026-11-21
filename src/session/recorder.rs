@@ -192,6 +192,23 @@ impl Recorder {
         }));
     }
 
+    /// An already-admitted follow-up within the same assignment. Keep the
+    /// original run ID open until all its steps reach a terminal disposition.
+    pub(crate) fn next_prompt(&mut self, prompt: &str) {
+        if self.turn.is_none() {
+            return;
+        }
+        self.flush_assistant();
+        self.checkpointed = 0;
+        self.checkpoint_due = None;
+        self.record(Kind::Message(StoredMessage {
+            role: Role::Operator,
+            text: prompt.into(),
+            tool: None,
+            presentation: None,
+        }));
+    }
+
     pub(crate) fn text(&mut self, delta: &str) {
         if self.turn.is_some() && !delta.is_empty() {
             self.segment.push_str(delta);
@@ -339,10 +356,7 @@ impl Recorder {
         self.close(status, result);
     }
 
-    fn close(&mut self, status: Status, result: serde_json::Value) {
-        let Some(open) = self.turn.take() else {
-            return;
-        };
+    fn flush_assistant(&mut self) {
         if !self.segment.is_empty() {
             let text = std::mem::take(&mut self.segment);
             self.record(Kind::Message(StoredMessage {
@@ -352,6 +366,12 @@ impl Recorder {
                 presentation: None,
             }));
         }
+    }
+    fn close(&mut self, status: Status, result: serde_json::Value) {
+        let Some(open) = self.turn.take() else {
+            return;
+        };
+        self.flush_assistant();
         self.record(Kind::Turn(Turn {
             run_id: open.run_id,
             status,

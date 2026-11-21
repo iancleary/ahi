@@ -47,10 +47,17 @@ impl Modes {
             Some(path) => Some(crate::tool_policy::load_file(path, &crate::tools::BUILTIN)?),
             None => crate::tool_policy::load(root, &crate::tools::BUILTIN)?,
         };
+        Ok(Self::from_installed(root, state, installed.as_ref()))
+    }
+    pub(super) fn from_installed(
+        root: &Path,
+        state: &Path,
+        installed: Option<&crate::tool_policy::ActionPolicy>,
+    ) -> Self {
         let has_policy = installed.is_some();
         let trusted = std::fs::read_to_string(trust_path(state, root))
             .is_ok_and(|text| text == root.to_string_lossy());
-        Ok(Self {
+        Self {
             has_policy,
             trusted,
             legacy_policy: installed.as_ref().is_some_and(|p| p.default_mode.is_none()),
@@ -60,7 +67,7 @@ impl Modes {
                 .collect(),
             selected: if has_policy {
                 installed
-                    .and_then(|p| p.default_mode)
+                    .and_then(|p| p.default_mode.clone())
                     .map_or(ExecutionMode::Policy, workspace_mode)
             } else if trusted {
                 ExecutionMode::ReadWrite
@@ -69,7 +76,7 @@ impl Modes {
             },
             dialog: None,
             ..Self::default()
-        })
+        }
     }
     // None means the next key opens the trust prompt, not a mode switch.
     fn cycle_target(&self) -> Option<ExecutionMode> {

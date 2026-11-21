@@ -4,6 +4,61 @@
 use super::*;
 use serde_json::json;
 
+pub(super) fn new_session(server: &str, op: &Operation, timeout: Duration) -> Result<Vec<Call>> {
+    let Operation::Start { argv, cwd } = op else {
+        return Err(Error::input(
+            "server-only target requires starting a new session",
+        ));
+    };
+    let mut args = vec![
+        "--autostart=false".into(),
+        "--server".into(),
+        server.into(),
+        "--timeout".into(),
+        format!("{}ms", timeout.as_millis()),
+        "new".into(),
+        "--json".into(),
+        "--shell".into(),
+        "none".into(),
+        "--cwd".into(),
+        cwd.clone(),
+        "--".into(),
+    ];
+    args.extend_from_slice(argv);
+    Ok(vec![Call {
+        argv: args,
+        stdin: None,
+        response: Response::Json,
+    }])
+}
+pub(super) fn created_session(server: &str, value: Value) -> Result<Reply> {
+    #[derive(Deserialize)]
+    struct Created {
+        session_id: String,
+        initial_windows: Vec<Window>,
+    }
+    #[derive(Deserialize)]
+    struct Window {
+        block_ids: Vec<String>,
+    }
+    let c: Created = super::decode(value)?;
+    let [w] = c.initial_windows.as_slice() else {
+        return Err(Error::protocol());
+    };
+    let [block] = w.block_ids.as_slice() else {
+        return Err(Error::protocol());
+    };
+    let terminal = Handle {
+        target: Target::Rex {
+            server: server.into(),
+            session: c.session_id,
+        },
+        id: block.clone(),
+    };
+    terminal.validate().map_err(|_| Error::protocol())?;
+    Ok(Reply::Started { terminal })
+}
+
 pub(super) fn prepare(
     server: &str,
     session: &str,

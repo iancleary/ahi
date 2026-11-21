@@ -19,7 +19,7 @@ fn terminal(target: &Target) -> Handle {
     Handle {
         target: target.clone(),
         id: match target {
-            Target::Rex { .. } => BLOCK,
+            Target::Rex { .. } | Target::RexServer { .. } => BLOCK,
             Target::Hc { .. } => "work-windows/t7",
         }
         .into(),

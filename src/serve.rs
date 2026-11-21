@@ -147,7 +147,10 @@ mod unix {
             let _ = std::fs::remove_file(&staging);
             Error::new(format!("cannot place {}: {err}", path.display()))
         })?;
-        let service = Service::open(state);
+        let socket = path
+            .canonicalize()
+            .map_err(|e| Error::new(format!("cannot resolve the listening socket: {e}")))?;
+        let service = Service::listening(state, &socket);
         eprintln!(
             "ahi serve {} listening on {}; sessions in {}",
             crate::VERSION,
@@ -177,9 +180,10 @@ mod unix {
                     };
                     let service = service.clone();
                     let stop = Arc::clone(&stop);
+                    let socket = socket.clone();
                     thread::spawn(move || {
                         let _seat = seat;
-                        serve_connection(service, stream, stop, verbose)
+                        serve_connection(service, stream, stop, verbose, &socket)
                     });
                 }
             })
@@ -402,6 +406,7 @@ mod unix {
         stream: UnixStream,
         stop: Arc<AtomicBool>,
         verbose: bool,
+        socket: &Path,
     ) {
         // The socket's mode already limits who connects; the kernel's word
         // on the peer is checked too, before a byte is read, so a socket
@@ -422,6 +427,7 @@ mod unix {
             Ok(writer) => writer,
             Err(_) => return,
         }));
+        let mut child = crate::delegation::broker::Connection::default();
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
         // One event stream per (connection, session). A new cursor replaces
@@ -526,7 +532,11 @@ mod unix {
                 let handle = thread::spawn(move || forward(id, receiver, writer, closed));
                 subscriptions.insert(session.to_owned(), (stop, handle));
             };
-            let answer = wire::dispatch(&service, &request, &mut subscribe);
+            let answer = if request.method.starts_with("child.") {
+                child.dispatch(&service, socket, &request.method, request.params)
+            } else {
+                wire::dispatch(&service, &request, &mut subscribe)
+            };
             if write_line(&writer, &wire::response(&request.id, answer)).is_err() {
                 break;
             }

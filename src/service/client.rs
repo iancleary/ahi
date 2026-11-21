@@ -78,6 +78,13 @@ impl Client {
             if !standalone {
                 let path = crate::serve::socket_path(state, socket);
                 if let Some(stream) = crate::serve::try_connect(&path) {
+                    if !ahi_unix::peer_uid(&stream).is_ok_and(|uid| uid == ahi_unix::current_uid())
+                    {
+                        return Err(ServiceError {
+                            kind: "auth",
+                            message: "cannot authenticate the local service account".into(),
+                        });
+                    }
                     let reader = stream.try_clone().map_err(|err| ServiceError {
                         kind: "session",
                         message: format!("socket: {err}"),
@@ -104,6 +111,15 @@ impl Client {
             transport: Transport::Local(Service::open(state)),
             events: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// A child claim must never fall back to an in-process service.
+    pub(crate) fn listening(state: &Directories, path: &Path) -> Result<Self, ServiceError> {
+        let client = Self::open(state, Some(path), false)?;
+        if client.socket() != Some(path) {
+            return Err(usage("a listening local service is required"));
+        }
+        Ok(client)
     }
 
     /// A handle to the subscription's events, for a reader on another
@@ -403,6 +419,7 @@ mod remote {
                         Some("config") => "config",
                         Some("auth") => "auth",
                         Some("policy") => "policy",
+                        Some("launch") => "launch",
                         Some("conflict") => "conflict",
                         Some("not_found") => "not_found",
                         Some("limit") => "limit",

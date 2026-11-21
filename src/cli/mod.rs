@@ -1,3 +1,4 @@
+mod delegate;
 mod precommit;
 mod terminal_host;
 mod tool_policy;
@@ -66,6 +67,18 @@ struct Cli {
 enum Command {
     /// Control an external Rex or hc terminal host (not ahi's TUI or session protocol).
     TerminalHost(terminal_host::Options),
+    /// Operator-only: run one bounded, tool-less child turn as a worker process in a Rex session (experimental).
+    ///
+    /// `launch` reserves a private receipt and an empty scratch directory,
+    /// then asks the configured Rex server to start `ahi` as the worker in
+    /// the given session; no Rex client needs to be attached. The worker
+    /// claims the assignment once, runs the turn on the exact model, and
+    /// publishes a structured result that `status` reads back. Nothing here
+    /// is offered to a model.
+    Delegate(delegate::Options),
+    /// The worker side of `ahi delegate`; started by the terminal host, not by hand.
+    #[command(hide = true, name = "internal-worker")]
+    InternalWorker(delegate::WorkerArgs),
     /// Run precommit checks, inspect configuration, and manage Git hook integration.
     Precommit {
         #[command(subcommand)]
@@ -457,6 +470,14 @@ pub fn run() -> ExitCode {
     precommit::warn_deprecated(&command);
     match &command {
         Command::TerminalHost(options) => ExitCode::from(terminal_host::run(options)),
+        Command::Delegate(options) => match directories(&cli) {
+            Ok(dirs) => ExitCode::from(delegate::run(&dirs, options)),
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::from(3)
+            }
+        },
+        Command::InternalWorker(args) => ExitCode::from(delegate::worker(args)),
         Command::Precommit { command } => precommit::dispatch(&cli, command),
         Command::Run(args) => precommit::run_precommit(&cli, args),
         Command::ListChecks(args) => precommit::list_checks(&args.format),

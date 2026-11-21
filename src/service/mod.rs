@@ -176,6 +176,7 @@ pub(crate) struct Service {
 }
 
 struct Inner {
+    rex: Option<(PathBuf, crate::terminal_host::Target)>,
     state: Directories,
     store: Store,
     lives: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
@@ -193,7 +194,19 @@ struct Live {
     results: HashMap<String, Value>,
 }
 
+pub(crate) struct ParentAuthority {
+    pub mode: crate::tool_policy::ExecutionMode,
+    pub workspace: PathBuf,
+    pub current: crate::tool_policy::ActionPolicy,
+    pub frozen: crate::tool_policy::ActionPolicy,
+}
 struct OpenTurn {
+    workspace: PathBuf,
+    actions: Option<PathBuf>,
+    authority: (
+        crate::tool_policy::ExecutionMode,
+        crate::tool_policy::ActionPolicy,
+    ),
     run_id: String,
     backend: Arc<Mutex<HttpBackend>>,
     cancelled: bool,
@@ -207,14 +220,79 @@ struct PendingAsk {
 }
 
 impl Service {
+    #[cfg(unix)]
+    pub(crate) fn listening(state: &Directories, socket: &Path) -> Self {
+        let rex = std::env::var("AHI_DELEGATE_REX_SERVER").ok().map(|server| {
+            (
+                socket.to_owned(),
+                crate::terminal_host::Target::RexServer { server },
+            )
+        });
+        Self::with_rex(state, rex)
+    }
     pub(crate) fn open(state: &Directories) -> Self {
+        Self::with_rex(state, None)
+    }
+    fn with_rex(state: &Directories, rex: Option<(PathBuf, crate::terminal_host::Target)>) -> Self {
         Self {
             inner: Arc::new(Inner {
+                rex,
                 state: state.clone(),
                 store: Store::new(state),
                 lives: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    pub(crate) fn directories(&self) -> &Directories {
+        &self.inner.state
+    }
+
+    pub(crate) fn parent_authority(
+        &self,
+        session: &str,
+        run: &str,
+        gateway: &str,
+        model: &str,
+        target: &crate::terminal_host::Target,
+    ) -> ServiceResult<ParentAuthority> {
+        let live = lock(&self.inner.lives)
+            .get(session)
+            .cloned()
+            .ok_or_else(|| ServiceError::new("conflict", "parent session is not running"))?;
+        let live = lock(&live);
+        let settings = live.session().settings();
+        if settings.gateway != gateway
+            || settings.model != model
+            || !self
+                .inner
+                .rex
+                .as_ref()
+                .is_some_and(|(_, configured)| configured == target)
+        {
+            return Err(ServiceError::new(
+                "policy",
+                "parent route or local Rex profile does not match",
+            ));
+        }
+        let turn = live
+            .open
+            .as_ref()
+            .filter(|turn| turn.run_id == run && !turn.cancelled)
+            .ok_or_else(|| ServiceError::new("conflict", "parent turn is not running"))?;
+        let (mode, prior) = turn.authority.clone();
+        let current = crate::tool_policy::ActionPolicy::resolve(
+            &turn.workspace,
+            turn.actions.as_deref(),
+            &mode,
+        )
+        .map_err(|e| ServiceError::new("policy", e.to_string()))?;
+        Ok(ParentAuthority {
+            mode,
+            current,
+            workspace: turn.workspace.clone(),
+            frozen: prior,
+        })
     }
 
     /// Where sessions live, for `health`.
@@ -519,9 +597,31 @@ impl Service {
             .run_id
             .clone()
             .unwrap_or_else(crate::session::run_id);
+        let policy = crate::tool_policy::ActionPolicy::resolve(
+            &workdir,
+            request.tools.as_deref(),
+            &request.mode,
+        )
+        .map_err(|e| ServiceError::new("policy", e.to_string()))?;
+        let local = self
+            .inner
+            .rex
+            .as_ref()
+            .filter(|_| crate::delegation::local::granted(&request.mode, &policy))
+            .map(|(socket, target)| crate::delegation::local::Profile {
+                dirs: self.inner.state.clone(),
+                socket: socket.clone(),
+                target: target.clone(),
+                session: id.to_string(),
+                run: run_id.clone(),
+                gateway: settings.gateway.clone(),
+                model: settings.model.clone(),
+            });
         let backend = HttpBackend::new(self.inner.state.clone())
+            .with_local_profile(local)
+            .with_frozen_policy(policy.clone())
             .with_scratch(live.scratch.clone())
-            .in_workspace(workdir)
+            .in_workspace(workdir.clone())
             .with_actions(request.tools.clone())
             .with_caller(Caller {
                 origin: request.origin,
@@ -534,6 +634,9 @@ impl Service {
         };
         let backend = Arc::new(Mutex::new(backend));
         live.open = Some(OpenTurn {
+            workspace: workdir,
+            actions: request.tools.clone(),
+            authority: (request.mode.clone(), policy),
             run_id: run_id.clone(),
             backend: Arc::clone(&backend),
             cancelled: false,
@@ -1151,6 +1254,9 @@ mod tests {
                 },
             );
             live.open = Some(OpenTurn {
+                workspace: PathBuf::new(),
+                actions: None,
+                authority: Default::default(),
                 run_id: "r1".into(),
                 backend: Arc::new(Mutex::new(HttpBackend::new(state.clone()))),
                 cancelled: false,

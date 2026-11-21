@@ -27,6 +27,7 @@ struct Permissions {
     tools: Vec<String>,
     files: Vec<Files>,
     workers: Vec<String>,
+    local_profiles: Vec<String>,
     write_files: bool,
     skills: Vec<String>,
     skill_scripts: Vec<SkillScripts>,
@@ -140,6 +141,16 @@ impl Modes {
                             );
                         }
                     }
+                }
+                for profile in grants.local_profiles {
+                    push(
+                        "delegate",
+                        RawMatch {
+                            local_profile: Some(profile),
+                            ..Default::default()
+                        },
+                        None,
+                    );
                 }
                 for worker in grants.workers {
                     push(

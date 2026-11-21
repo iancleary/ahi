@@ -176,6 +176,7 @@ pub(super) enum Arguments {
         name: Vec<String>,
         file: Option<String>,
     },
+    LocalDelegate(crate::delegation::local::Task),
     /// A task for a worker. `worker` holds the one label, as a list so
     /// policy matches it the way it matches an argv prefix.
     Delegate {
@@ -202,6 +203,7 @@ impl PreparedCall {
     /// never shown, so a prompt cannot carry model-chosen text.
     pub(super) fn target(&self) -> &str {
         match &self.arguments {
+            Arguments::LocalDelegate(_) => return crate::delegation::local::SELECTOR,
             Arguments::Delegate { worker, .. } => return &worker[0],
             Arguments::Skill { name, .. } => return &name[0],
             _ => {}
@@ -219,6 +221,7 @@ impl PreparedCall {
     pub(super) fn argv(&self) -> &[String] {
         match &self.arguments {
             Arguments::Command { argv, .. } | Arguments::SkillCommand { argv, .. } => argv,
+            Arguments::LocalDelegate(_) => crate::delegation::local::selector(),
             Arguments::Delegate { worker, .. } => worker,
             Arguments::Skill { name, .. } => name,
             _ => &[],
@@ -238,6 +241,9 @@ impl PreparedCall {
                 Some(file) => format!("reference {file}"),
                 None => "the skill's text".to_string(),
             },
+            Arguments::LocalDelegate(task) => {
+                format!("{} prompt(s) in Rex scratch", 1 + task.follow_ups.len())
+            }
             Arguments::Delegate { prompt, task, .. } => format!(
                 "{} lines{}",
                 write_file::line_count(prompt),
@@ -541,6 +547,15 @@ pub(super) fn prepare_scoped(
     }
     if tool == "plan_scratch" {
         return plan_scratch::prepare(call);
+    }
+    if tool == DELEGATE && call.arguments.contains_key("local") {
+        return Ok(PreparedCall {
+            tool,
+            path: String::new(),
+            arguments: Arguments::LocalDelegate(crate::delegation::local::Task::parse(
+                Value::Object(call.arguments.clone()),
+            )?),
+        });
     }
     let raw: RawArguments =
         serde_json::from_value(Value::Object(call.arguments.clone())).map_err(|_| INVALID)?;
@@ -852,6 +867,7 @@ pub(super) fn execute(
             ..Default::default()
         }),
         Arguments::Skill { name, file } => load_skill::run(name, file, skills),
+        Arguments::LocalDelegate(_) => Err("no service-bound local delegation profile".into()),
         Arguments::Delegate {
             worker,
             prompt,

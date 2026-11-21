@@ -9,6 +9,7 @@
 pub mod chat;
 pub mod cli;
 mod clipboard;
+mod delegation;
 pub mod dev;
 pub mod directories;
 pub mod error;

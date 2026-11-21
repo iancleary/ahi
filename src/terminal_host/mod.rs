@@ -18,6 +18,10 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Target {
+    /// New, dedicated session on this server; not an existing terminal namespace.
+    RexServer {
+        server: String,
+    },
     Rex {
         server: String,
         session: String,
@@ -208,7 +212,7 @@ impl Client {
     pub fn new(target: Target) -> Result<Self> {
         target.validate()?;
         let executable = match target {
-            Target::Rex { .. } => "rex",
+            Target::Rex { .. } | Target::RexServer { .. } => "rex",
             Target::Hc { .. } => "hc",
         }
         .into();
@@ -267,6 +271,7 @@ impl Client {
             }
         }
         let decoded = match &self.target {
+            Target::RexServer { server } => rex::created_session(server, last),
             Target::Rex { .. } => rex::decode(&self.target, operation, last),
             Target::Hc { .. } => hc::decode(&self.target, operation, last),
         };
@@ -279,6 +284,7 @@ impl Client {
     fn prepare(&self, operation: &Operation) -> Result<Vec<Call>> {
         operation.validate(&self.target)?;
         match &self.target {
+            Target::RexServer { server } => rex::new_session(server, operation, self.timeout),
             Target::Rex { server, session } => {
                 rex::prepare(server, session, operation, self.timeout)
             }
@@ -310,6 +316,7 @@ enum Response {
 impl Target {
     fn validate(&self) -> Result<()> {
         match self {
+            Self::RexServer { server } => name(server)?,
             Self::Rex { server, session } => {
                 name(server)?;
                 if !rex_id(session, "session:") {
@@ -335,6 +342,7 @@ impl Handle {
     fn validate(&self) -> Result<()> {
         self.target.validate()?;
         let valid = match &self.target {
+            Target::RexServer { .. } => false,
             Target::Rex { .. } => rex_id(&self.id, "block:"),
             Target::Hc { machine, .. } => {
                 let local = match machine {
@@ -405,6 +413,31 @@ impl Operation {
         }
         Ok(())
     }
+}
+/// Close a positively identified, dedicated Rex session. No focus or label resolution.
+pub(crate) fn close_rex_session(handle: &Handle) -> Result<()> {
+    handle.validate()?;
+    let Target::Rex { server, session } = &handle.target else {
+        return Err(Error::input("not a Rex session"));
+    };
+    transport::call(
+        std::path::Path::new("rex"),
+        &Call {
+            argv: vec![
+                "--autostart=false".into(),
+                "--server".into(),
+                server.clone(),
+                "--timeout".into(),
+                "10s".into(),
+                "kill".into(),
+                session.clone(),
+            ],
+            stdin: None,
+            response: Response::Text,
+        },
+        Duration::from_secs(12),
+    )
+    .map(|_| ())
 }
 fn name(value: &str) -> Result<()> {
     if value.is_empty()

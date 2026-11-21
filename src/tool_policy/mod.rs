@@ -20,7 +20,7 @@ pub(crate) use config::{load, load_file};
 
 use std::path::{Component, Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const FILE_NAME: &str = "ahi.modes.yaml";
 pub(crate) const LEGACY_FILE_NAME: &str = "ahi.tools.yaml";
@@ -47,7 +47,7 @@ pub(crate) const COMMAND_TOOL: &str = "run_command";
 /// `action: delegate` rules, matched on the worker's label.
 pub(crate) const DELEGATE_TOOL: &str = "delegate";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) enum ActionKind {
     ToolCall,
     FileWrite,
@@ -63,7 +63,7 @@ pub(crate) enum ActionKind {
 /// only when an approved skill exists and validates; the runtime decides.
 pub(crate) const SKILL_TOOL: &str = "load_skill";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ToolRule {
     pub(crate) id: String,
     pub(crate) action: ActionKind,
@@ -87,14 +87,14 @@ pub(crate) struct ToolRule {
     pub(crate) ask: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Effect {
     Approve,
     Deny,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ActionPolicy {
     pub(crate) rules: Vec<ToolRule>,
     pub(crate) default_mode: Option<String>,
@@ -102,6 +102,37 @@ pub(crate) struct ActionPolicy {
 }
 
 impl ActionPolicy {
+    pub(crate) fn resolve(
+        directory: &std::path::Path,
+        explicit: Option<&std::path::Path>,
+        mode: &ExecutionMode,
+    ) -> crate::error::Result<Self> {
+        let installed = match explicit {
+            Some(path) => Some(load_file(path, &crate::tools::BUILTIN)?),
+            None => load(directory, &crate::tools::BUILTIN)?,
+        };
+        Self::from_installed(installed, mode)
+    }
+    pub(crate) fn from_installed(
+        installed: Option<Self>,
+        mode: &ExecutionMode,
+    ) -> crate::error::Result<Self> {
+        match mode {
+            ExecutionMode::ReadOnly => Ok(Self::plan()),
+            ExecutionMode::ReadWrite | ExecutionMode::FullAccess => {
+                let mut policy = Self::trusted();
+                if let Some(installed) = installed {
+                    policy.named = installed.named;
+                }
+                Ok(policy)
+            }
+            ExecutionMode::Policy => Ok(installed.unwrap_or_default()),
+            ExecutionMode::Named(_) => installed
+                .ok_or_else(|| crate::error::Error::new("workspace modes file missing"))?
+                .select(mode),
+        }
+    }
+
     pub(crate) fn select(mut self, mode: &ExecutionMode) -> crate::error::Result<Self> {
         if let ExecutionMode::Named(name) = mode {
             self.rules = self.named.remove(name).ok_or_else(|| {
@@ -739,7 +770,7 @@ mod delegate_tests {
             Verdict::Deny { rule_id: None }
         ));
         for (bad, message) in [
-            ("- {id: x, action: delegate, match: {}, effect: approve}\n", "match.worker is required"),
+            ("- {id: x, action: delegate, match: {}, effect: approve}\n", "match.worker must be a valid remote label"),
             ("- {id: x, action: delegate, match: {worker: 'a b'}, effect: approve}\n", "label"),
             ("- {id: x, action: delegate, match: {worker: w, path: src}, effect: approve}\n", "match.path does not apply"),
             ("- {id: x, action: tool_call, match: {tool: read_file, worker: w}, effect: approve}\n", "match.worker applies only"),

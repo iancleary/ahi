@@ -14,6 +14,19 @@ pub(crate) mod input;
 mod key_binding;
 mod location;
 mod mode;
+
+pub(crate) fn operator_authority(
+    root: &std::path::Path,
+    state: &std::path::Path,
+) -> crate::error::Result<(
+    crate::tool_policy::ExecutionMode,
+    crate::tool_policy::ActionPolicy,
+)> {
+    let installed = crate::tool_policy::load(root, &crate::tools::BUILTIN)?;
+    let mode = mode::Modes::from_installed(root, state, installed.as_ref()).selected;
+    let policy = crate::tool_policy::ActionPolicy::from_installed(installed, &mode)?;
+    Ok((mode, policy))
+}
 mod open;
 mod preferences;
 mod scroll_navigation;
