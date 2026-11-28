@@ -37,4 +37,5 @@ docs/*
 !docs/SKILLS.md
 !docs/WORKSPACE_TRUST.md
 !docs/CHAT_QUEUE.md
+!docs/MODEL_CONTEXT.md
 

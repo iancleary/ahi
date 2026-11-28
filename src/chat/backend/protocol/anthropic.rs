@@ -1,7 +1,7 @@
 //! Anthropic Messages: content-block replay and `content_block_*` streaming.
 //!
 //! Authentication is the caller's concern (an `x-api-key` header resolved by
-//! the harness). This module never adds identity headers or a system prompt.
+//! the harness).
 
 use std::io::Read;
 use std::sync::mpsc::Sender;
@@ -35,7 +35,7 @@ pub(super) fn request(context: &RequestContext<'_>) -> Result<Value> {
     ))?.get();
     let mut body = json!({
         "model": context.model,
-        "system": crate::system_prompt::CORE,
+        "system": context.instructions,
         "max_tokens": max_tokens,
         "stream": true,
         "messages": messages(context.messages),
@@ -779,6 +779,7 @@ mod tests {
         let messages = [ChatMessage::new(TranscriptRole::Operator, "q")];
         let schemas = crate::tools::schemas(&["read_file".to_string()], &[], false);
         let context = RequestContext {
+            instructions: crate::system_prompt::CORE,
             model: "claude-x",
             thinking: ThinkingLevel::High,
             metadata: &metadata,

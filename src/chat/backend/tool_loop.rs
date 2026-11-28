@@ -175,6 +175,12 @@ impl ToolRuntime {
         }))
     }
 
+    pub(super) fn capability_summary(&self, schemas: &[tools::ToolSchema]) -> String {
+        let advertised: Vec<_> = schemas.iter().map(|schema| schema.name).collect();
+        self.policy
+            .capability_summary(&self.mode, self.workspace.root(), &advertised)
+    }
+
     /// Protocol-neutral schemas of the advertised builtins.
     pub(super) fn schemas(&self) -> Vec<tools::ToolSchema> {
         let skills: Vec<_> = self

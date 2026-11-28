@@ -179,5 +179,4 @@ scrubbing and command auditing use the ordinary command runner. No shell is
 inferred from a filename. These opt-ins do not change the default policy or
 the read-only `operator-skills` preset.
 
-This does not implement `AGENTS.md` instruction loading, automatic project trust,
-or a new skill allow/deny list. Policy-mode approval remains required.
+Skills remain separate from automatic [operator and repository `AGENTS.md` instruction loading](MODEL_CONTEXT.md). Neither instruction source grants tool permissions. Policy-mode approval remains required.

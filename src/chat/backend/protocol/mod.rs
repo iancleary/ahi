@@ -47,6 +47,7 @@ pub(super) struct RequestContext<'a> {
     pub(super) tools: Option<&'a [ToolSchema]>,
     /// A browser-login OpenAI credential: omit fields that endpoint rejects.
     pub(super) browser_token: bool,
+    pub(super) instructions: &'a str,
 }
 
 impl<'a> RequestContext<'a> {
@@ -65,7 +66,13 @@ impl<'a> RequestContext<'a> {
             messages,
             tools,
             browser_token,
+            instructions: crate::system_prompt::CORE,
         }
+    }
+
+    pub(super) fn with_instructions(mut self, instructions: &'a str) -> Self {
+        self.instructions = instructions;
+        self
     }
 
     /// Browser-login Responses rejects an output limit; otherwise honor the model's own.

@@ -79,7 +79,8 @@ pub(crate) const BUILTIN: [&str; 11] = [
 /// Files the model may never change, whatever `ahi.tools.yaml` says: the
 /// policy files themselves, the hook configuration, the ignore file the walk
 /// trusts, and everything under `.git`. Matched on the normalized path.
-pub(crate) const PROTECTED: [&str; 8] = [
+pub(crate) const PROTECTED: [&str; 9] = [
+    "AGENTS.md",
     crate::tool_policy::FILE_NAME,
     "ahi.tools.yaml",
     "ahi.hooks.yaml",
@@ -114,7 +115,9 @@ fn protected(path: &str) -> bool {
     };
     let name = path.rsplit('/').next().unwrap_or(path);
     (Path::new(path).is_absolute() && matches!(name, ".agents" | ".ahi"))
-        || PROTECTED.contains(&name)
+        || PROTECTED
+            .iter()
+            .any(|protected_name| protected_name.eq_ignore_ascii_case(name))
         || path.split('/').any(|part| part == ".git")
         || crate::skills::protected_write(path)
         || (Path::new(path).is_absolute() && host_skill_root(path))
@@ -760,7 +763,7 @@ pub(super) fn prepare_scoped(
                 return Err("a file path is required");
             }
             if protected(&path) {
-                return Err("path is protected: ahi policy files, hook configuration, .gitignore, .git, .agents/skills, and .ahi/skills are never written by tools");
+                return Err("path is protected: AGENTS.md, ahi policy files, hook configuration, .gitignore, .git, .agents/skills, and .ahi/skills are never written by file tools");
             }
             only(no_paging && no_search)?;
             if tool == EDIT_FILE {

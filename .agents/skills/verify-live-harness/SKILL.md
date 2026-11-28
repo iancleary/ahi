@@ -1,6 +1,6 @@
 ---
 name: verify-live-harness
-description: Exercise ahi interactively after changes to tool schemas, permissions, skill loading, mode selection, streaming, chat queue controls, or session exit. Verify model-chosen arguments, actual effects, and what the operator saw. Live inference requires separate authorization.
+description: Exercise ahi interactively after changes to tool schemas, permissions, skill loading, AGENTS.md loading, capability summaries, mode selection, streaming, chat queue controls, or session exit. Verify model-chosen arguments, actual effects, and what the operator saw. Live inference requires separate authorization.
 references:
   - command-cwd.md
 ---
@@ -21,6 +21,19 @@ uv run scripts/smoke-model-picker.py --binary target/debug/ahi --queue-manager-o
 This probe uses disposable state and a loopback HTTP fixture in standalone and service-backed chat. It needs POSIX pseudo-terminals, local listeners, and Unix sockets. It does not need personal credentials or an external model service. Inspect the request-order assertions and the 80×24 and 40×12 captures. The controls and dispatch contract are documented in `docs/CHAT_QUEUE.md`.
 
 If local listener creation fails with `Operation not permitted`, rerun with the required local execution permission. Preserve failure output and captures when an assertion fails. Correct the implementation or fixture, then repeat only this focused probe. The probe removes its disposable state and stops its own service. Do not restart an existing user service or broaden this check into paid inference.
+
+## Model instruction context without live inference
+
+For AGENTS.md loading, instruction precedence, capability summaries, or provider instruction encoding, build the checkout binary and run:
+
+```sh
+cargo build --locked --bin ahi
+uv run --no-project --offline scripts/smoke-model-picker.py --binary target/debug/ahi --model-instructions-only --capture-directory target/model-instruction-captures
+```
+
+The POSIX fixture supplies disposable home, repository, policy, and state directories. Its loopback HTTP service captures all three provider encodings. It verifies standalone and service chat, next-turn refresh, fixed continuation snapshots, actual permitted effects, runtime denials, protected instruction files, invalid instruction files, and exclusion of instructions from durable history. Do not substitute a real home or credentials for this probe. No external model authorization is needed for the local fixture. See `docs/MODEL_CONTEXT.md` for the source and precedence contract.
+
+Local listeners, Unix sockets, and pseudo-terminals must be permitted. Keep failure captures for diagnosis. The probe stops its own service and removes its disposable state; it does not restart a user service. After a failure, correct the implementation or fixture and rerun this focused workflow before considering live inference.
 
 ## Choose a probe
 

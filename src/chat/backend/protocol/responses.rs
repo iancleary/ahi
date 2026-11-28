@@ -29,7 +29,7 @@ const MAX_NATIVE_BYTES: usize = 1024 * 1024;
 pub(super) fn request(context: &RequestContext<'_>) -> Value {
     let mut body = json!({
         "model": context.model,
-        "instructions": crate::system_prompt::CORE,
+        "instructions": context.instructions,
         "input": input(context.messages),
         "stream": true,
         "store": false

@@ -214,17 +214,14 @@ impl CompletionBackend for HttpBackend {
         let frozen = self.frozen.clone();
         let local = self.local.clone();
         let handle = std::thread::spawn(move || {
-            let workspace = if tools_enabled {
-                workspace.or_else(|| std::env::current_dir().ok())
-            } else {
-                None
-            };
+            let workspace = workspace.or_else(|| std::env::current_dir().ok());
             let result = complete(
                 &state,
                 ToolSource {
                     local,
                     frozen,
                     workspace: workspace.as_deref(),
+                    tools_enabled,
                     actions: actions.as_deref(),
                     caller,
                     scratch,
@@ -311,6 +308,7 @@ struct ToolSource<'a> {
     scratch: crate::tools::Scratch,
     /// Tool root; `None` disables tools for the turn.
     workspace: Option<&'a Path>,
+    tools_enabled: bool,
     actions: Option<&'a Path>,
     caller: Caller,
     deadline: Option<Instant>,
@@ -339,13 +337,20 @@ fn complete(
         frozen,
         scratch,
         workspace,
+        tools_enabled,
         actions,
         caller,
         deadline,
     } = source;
+    let directory = workspace
+        .ok_or_else(|| Error::policy("cannot resolve the instruction working directory"))?
+        .canonicalize()
+        .map_err(|_| Error::policy("cannot resolve the instruction working directory"))?;
+    let instruction_files = crate::system_prompt::Instructions::load(&directory)?;
     let child = caller.origin == "delegate";
     let mut rounds = 0usize;
-    let mut tools = match workspace {
+    let mode = request.mode.clone();
+    let mut tools = match workspace.filter(|_| tools_enabled) {
         Some(directory) => ToolRuntime::load(
             directory,
             state,
@@ -382,6 +387,13 @@ fn complete(
         runtime.load_explicit(explicit, &mut messages, sender)?;
     }
     let schemas = tools.as_ref().map(ToolRuntime::schemas);
+    let capabilities = match &tools {
+        Some(runtime) => runtime.capability_summary(schemas.as_deref().unwrap_or_default()),
+        None => {
+            crate::tool_policy::ActionPolicy::default().capability_summary(&mode, &directory, &[])
+        }
+    };
+    let instructions = instruction_files.with_capabilities(&capabilities);
     let mut turn = || -> Result<()> {
         loop {
             if child && deadline.is_some_and(|d| Instant::now() >= d) {
@@ -394,7 +406,8 @@ fn complete(
                 &messages,
                 schemas.as_deref(),
                 connection.browser_token(),
-            );
+            )
+            .with_instructions(&instructions);
             let body = protocol::request_body(connection.protocol, &context)?;
             cancelled(cancel)?;
             let response = send(agent, state, &connection, &body, sender, cancel, deadline)?;

@@ -19,7 +19,7 @@ pub(super) fn request(context: &RequestContext<'_>) -> Value {
     let metadata = context.metadata;
     let mut body = json!({
         "model": context.model,
-        "messages": messages(context.messages, &metadata.compat),
+        "messages": messages(context.messages, &metadata.compat, context.instructions),
         "stream": true,
         "stream_options": {"include_usage": true}
     });
@@ -60,10 +60,14 @@ pub(crate) fn definition(schema: &ToolSchema) -> Value {
     })
 }
 
-pub(super) fn messages(messages: &[ChatMessage], compat: &CompletionCompatibility) -> Vec<Value> {
+pub(super) fn messages(
+    messages: &[ChatMessage],
+    compat: &CompletionCompatibility,
+    instructions: &str,
+) -> Vec<Value> {
     let exchanges = Exchanges::of(messages);
     let mut output = Vec::with_capacity(messages.len() + 1);
-    output.push(json!({"role": "system", "content": crate::system_prompt::CORE}));
+    output.push(json!({"role": "system", "content": instructions}));
     for (index, message) in messages.iter().enumerate() {
         match message.role {
             TranscriptRole::Operator => {
@@ -334,6 +338,7 @@ mod tests {
         let body = messages(
             &[assistant("", &["a"]), stored.to_chat(None)],
             &CompletionCompatibility::default(),
+            crate::system_prompt::CORE,
         );
         assert_eq!(body.len(), 3);
         assert_eq!(
@@ -351,7 +356,7 @@ mod tests {
             ChatMessage::new(TranscriptRole::Operator, "next"),
         ];
         let roles = |compat: &CompletionCompatibility| {
-            messages(&transcript, compat)
+            messages(&transcript, compat, crate::system_prompt::CORE)
                 .into_iter()
                 .map(|value| value["role"].as_str().unwrap().to_string())
                 .collect::<Vec<_>>()
@@ -388,7 +393,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            messages(&transcript, &compat),
+            messages(&transcript, &compat, crate::system_prompt::CORE),
             vec![
                 json!({"role": "system", "content": crate::system_prompt::CORE}),
                 json!({"role": "user", "content": "q"}),

@@ -7,6 +7,7 @@
 //! The file is operator policy. Model output, tool results, and transcript text
 //! never write it and never create a grant.
 
+mod capabilities;
 mod config;
 mod evaluate;
 mod mode;

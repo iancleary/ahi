@@ -311,6 +311,10 @@ Press **`/`** in **Chat, Models, or Catalog** to open the same **Commands** popu
 
 **Enter** on a curated model saves the selection and opens chat. A configured gateway is called at `<baseUrl>` plus the path its `api` implies: `/chat/completions` for `openai-completions`, `/responses` for `openai-responses`, `/messages` for `anthropic-messages`, streaming the conversation history. This sends your messages to the selected provider and may incur charges. `apiKey` and custom header values resolve the marker `gateway` or `$ENV_NAME` at submission time; secrets are not stored in `models.json`. Curated OpenAI models use browser-login credentials with `POST https://api.openai.com/v1/responses`. Setting `ANTHROPIC_API_KEY` adds a built-in `anthropic` provider that talks to `https://api.anthropic.com/v1/messages` with that key. Every protocol validates streamed function calls and runs the policy-gated builtin tools described below through one turn loop. Model output is not execution authority. Invalid/incomplete calls fail closed; tool arguments are not printed in notices or parser errors.
 
+#### Model instructions
+
+Each turn loads optional operator `~/.agents/AGENTS.md` and repository-root `AGENTS.md` instructions. The model also receives a summary of its selected mode, available tools, command prefixes, and path restrictions, generated from the effective policy. Repository guidance overrides operator defaults for project matters; permission checks remain enforced by the mode and policy. Instructions stay fixed through a turn and refresh on the next one. See [Model instructions and capabilities](docs/MODEL_CONTEXT.md) for precedence, file limits, service behavior, and verification.
+
 #### Skill completion
 
 Type `$` in the chat input to open the skills picker. Search by skill name or
